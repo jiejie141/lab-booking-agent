@@ -63,6 +63,24 @@ python scripts/overlap_race.py   # 区间重叠竞态复现（P0-1 的回归）
 python scripts/smoke_http.py     # 真实 uvicorn 进程上的冒烟 + 越权清单
 ```
 
+### 升级过代码之后报 `no such column: users.xxx`？
+
+这是**开发库过期**，不是程序缺陷。`create_all()` 只会创建缺失的**表**，
+从来不演进已有的表 —— 所以库一旦建立，之后再改 schema（比如 P0-2 给 `users`
+加了 `password_hash`）旧库一点都不会跟着变。
+
+它的失败形态很骗人：报错是五十行 SQLAlchemy 堆栈，而且**只有查 `users` 的路径才崩**，
+寒暄类对话照样正常，服务看起来是好的，一到真下单才炸。
+所以本项目在边界上一次性检查掉，并在过期时**明确拒绝启动**而不是带病运行：
+
+```bash
+python main.py seed --force   # 删表重建 + 重灌种子（会清空现有数据）
+# 或者：把 LAB_DATABASE_URL 指向一个新的 sqlite 文件
+```
+
+`doctor` 会把它列成一条检查项并返回非 0，而不是自己也崩掉。
+真正的迁移能力（Alembic）是 P1 第一项，见「已知限制」。
+
 接入真实模型：`cp .env.example .env`，把 `LAB_APP_MODE` 改成 `live` 并填 `LAB_LLM_API_KEY`。
 任何 OpenAI 兼容端点都能用（官方 / 中转站 / 本地 ollama 的 `/v1`）。
 
@@ -410,8 +428,11 @@ docker compose up --build
   生产必须换成 Redis 计数器。
 - **没有 refresh token**：访问令牌 2 小时到期就得重新登录。刻意这么选 ——
   与其签一个 7 天的令牌假装很安全，不如把风险窗口压小。
-- **建表用 `create_all`**：开发够用，**没有迁移能力**（改 schema 要删库重建）。
-  生产应当上 Alembic。这是 P1 的第一项。
+- **建表用 `create_all`**：开发够用，**没有迁移能力**。`create_all()` 只建缺失的表、
+  从不演进已有的表，所以改 schema 后旧库会静默停在老结构上。项目靠
+  `ensure_schema()` 在启动/自检/种子三条路径上做结构校验并**拒绝带病启动**，
+  修法是 `seed --force` 重建（见上文「升级过代码之后报 …」）。
+  真正的迁移能力应当上 Alembic —— 这是 P1 的第一项。
 - **`requirements.txt` 是范围约束不是锁文件**；依赖版本尚未用 `uv lock` 之类锁定。
 - **向量检索路径是可选的**：默认走手写 BM25（零依赖）。装了 `chromadb` 才启用
   `vector`/`hybrid`；缺依赖时自动回退并**在 `/api/health` 里说明原因**，不静默降级。

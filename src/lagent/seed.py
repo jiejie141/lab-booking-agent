@@ -14,19 +14,16 @@
 from __future__ import annotations
 
 import datetime as dt
-from typing import cast
 
-from sqlalchemy import TableClause, delete, func, select
+from sqlalchemy import func, select
 
 from .clock import now_local
-from .db import init_db, session_scope
+from .db import ensure_schema, session_scope
 from .domain.booking import attach_slots
 from .models import (
-    AuditLog,
     Equipment,
     Laboratory,
     Reservation,
-    ReservationSlot,
     User,
 )
 from .security import hash_password
@@ -91,8 +88,21 @@ def demo_password_hash(password: str) -> str:
 
 
 async def seed(force: bool = False) -> dict:
-    """建表并灌入种子数据。已存在且 force=False 时跳过。"""
-    await init_db()
+    """建表并灌入种子数据。已存在且 force=False 时跳过。
+
+    ``force=True`` 是**真正的重建**：把表删掉重来（``rebuild=True``），
+    而不是只把行删空。这一点曾经写错过，代价是 README 里那句
+    「要重建请加 --force」**本身是失效的**：
+
+    只删行的话，库里缺的**列**（比如 P0-2 新增的 ``users.password_hash``）
+    永远不会被补上，于是「重建」过程自己就撞在
+    ``table users has no column named password_hash`` 上 ——
+    用户按文档操作，拿到的是另一个看不懂的报错。
+
+    结构校验交给 :func:`lagent.db.ensure_schema`：所有调用 seed 的路径
+    （CLI、服务启动、测试夹具）都会自动获得「库过期就明确报错」的行为。
+    """
+    await ensure_schema(rebuild=force)
     info: dict = {"seeded": False, "reason": ""}
 
     async with session_scope() as session:
@@ -101,12 +111,9 @@ async def seed(force: bool = False) -> dict:
             info["reason"] = f"已有 {count} 个实验室，跳过。要重建请加 --force"
             return info
 
-        if force:
-            # 删除顺序必须是「子表在前」：占用格引用预约，预约引用设备/实验室/用户。
-            # SQLite 已开 PRAGMA foreign_keys=ON，顺序错了会直接被外键拦下。
-            # 审计表没有外键（actor_id 可能为空），放最前面最省心。
-            for model in (AuditLog, ReservationSlot, Reservation, Equipment, Laboratory, User):
-                await session.execute(delete(cast(TableClause, model.__table__)))
+        # force=True 时表刚被 drop + create 过，行本来就是空的：
+        # 这里不再需要原先那套「按子表在前的顺序逐表删行」。
+        # 那段代码看起来在重建、实际只删行，正是本次修掉的坑。
 
         labs: list[Laboratory] = []
         for row in LABS:

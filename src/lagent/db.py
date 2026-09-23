@@ -11,7 +11,7 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from sqlalchemy import event
+from sqlalchemy import event, inspect
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -24,6 +24,30 @@ from .models import Base
 
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
+
+# 结构与代码不一致时的修法提示。写在一处，是因为
+# 「库坏了」这件事会从 doctor / seed / 服务启动三条路径报出来，
+# 三处各写一份文案必然会漂移（本项目在振荡提示上已经吃过一次这个亏）。
+_REBUILD_HINT = (
+    "create_all() 只建缺失的**表**，不会给已有表补列 —— 真正的迁移能力是 P1 的 Alembic。\n"
+    "两种修法（都会丢掉现有数据，演示库无所谓）：\n"
+    "  A. python main.py seed --force   重建表并重灌种子数据\n"
+    "  B. 把 LAB_DATABASE_URL 指到一个新的 sqlite 文件"
+)
+
+
+class SchemaDriftError(RuntimeError):
+    """库的实际结构与代码里的模型不一致。
+
+    单独定义异常类型而不是直接抛 RuntimeError，是为了让 ``doctor``
+    这种「诊断工具」能把它识别成一条检查项来展示 —— 一个自称诊断环境的
+    命令自己崩在 SQLAlchemy 堆栈里，是最没用的失败形态。
+    """
+
+    def __init__(self, drift: list[str]) -> None:
+        self.drift = drift
+        lines = "\n".join(f"  · {item}" for item in drift)
+        super().__init__(f"库结构与代码不一致：\n{lines}\n{_REBUILD_HINT}")
 
 
 def _engine_kwargs(url: str) -> dict:
@@ -94,11 +118,62 @@ async def dispose_engine() -> None:
     _session_factory = None
 
 
-async def init_db() -> None:
-    """建表。SQLite 本地开发够用；生产用 alembic（见 docker-compose）。"""
+async def init_db(*, drop_first: bool = False) -> None:
+    """建表。``drop_first=True`` 时先删表再建 ——「重建」的真正含义。
+
+    SQLite 本地开发够用；生产用 alembic（见 docker-compose）。
+
+    注意 ``create_all`` 的确切语义：**只创建缺失的表，从不演进已有的表**。
+    所以库一旦建立，之后再改 schema（加列/改类型）它一点都不会生效，
+    旧库会一直停在老结构上。这一点由 :func:`ensure_schema` 负责检测并报错，
+    修法是 ``drop_first=True`` 重建（或换一个库文件）。
+    """
     engine = get_engine()
     async with engine.begin() as conn:
+        if drop_first:
+            await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
+
+
+def _drift_sync(conn) -> list[str]:
+    """同步实现，交给 ``run_sync`` 调用（inspect 只有同步版）。"""
+    inspector = inspect(conn)
+    existing = set(inspector.get_table_names())
+    drift: list[str] = []
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing:
+            drift.append(f"缺表 {table.name}")
+            continue
+        have = {column["name"] for column in inspector.get_columns(table.name)}
+        missing = [column.name for column in table.columns if column.name not in have]
+        if missing:
+            drift.append(f"表 {table.name} 缺列：{', '.join(missing)}")
+    return drift
+
+
+async def schema_drift() -> list[str]:
+    """列出「模型里有、库里没有」的表与列。空列表 = 结构与代码一致。"""
+    async with get_engine().connect() as conn:
+        return await conn.run_sync(_drift_sync)
+
+
+async def ensure_schema(*, rebuild: bool = False) -> None:
+    """建表、校验结构与代码一致，不一致就抛 :class:`SchemaDriftError`。
+
+    为什么值得单独做一次校验，而不是等业务代码崩了再说：
+    漂移的失败形态**又难懂又不一致**。库里缺 ``users.password_hash`` 时，
+
+      * 报错是 ``no such column: users.password_hash`` 外加五十行 SQLAlchemy 堆栈，
+        看不出「你该重建库」；
+      * 更糟的是**只有走到那一步的路径才会失败** —— 「你好」这种寒暄根本不查
+        users 表，于是服务看起来是好的，一到真下单才炸。
+
+    这种「部分可用」比直接报错更难排查，所以在边界上一次性检查掉。
+    """
+    await init_db(drop_first=rebuild)
+    drift = await schema_drift()
+    if drift:
+        raise SchemaDriftError(drift)
 
 
 @asynccontextmanager

@@ -50,7 +50,7 @@ from .agent.state import SessionStore
 from .agent.tools import TOOL_SPECS
 from .clock import now_local
 from .config import Settings, get_settings
-from .db import dispose_engine, init_db, session_scope
+from .db import SchemaDriftError, dispose_engine, session_scope
 from .domain.booking import cancel_reservation, list_reservations
 from .knowledge.retriever import build_retriever, fallback_reason
 from .models import (
@@ -98,8 +98,20 @@ def _dummy_hash() -> str:
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    await init_db()
-    info = await seed()
+    # seed() 内部第一步就是 ensure_schema()：建表 + 校验结构与代码一致。
+    # 校验放在这里而不是等业务代码崩，是因为漂移的失败形态又难懂又不一致：
+    # 库里缺 users.password_hash 时报的是「no such column」加五十行堆栈，
+    # 而且**只有查 users 的路径才会失败** —— 寒暄类对话照样正常，
+    # 服务看起来是好的，一到真下单才炸。这种「部分可用」比直接报错更难查。
+    try:
+        info = await seed()
+    except SchemaDriftError as exc:
+        # 和下面那条默认密钥告警同理：这条要在任何日志配置生效之前就能被看见，
+        # 所以用 print 而不是日志框架。堆栈里唯一有用的信息就是那个列名，
+        # 所以只留一行异常，把可照做的说明放在它上面。
+        print(f"\n[启动失败] {exc}\n")
+        raise RuntimeError("数据库结构与代码不一致，已中止启动（修法见上方提示）") from None
+
     app.state.seed_info = info
 
     # 把设备目录灌给模型层，让它能识别用户点名的设备

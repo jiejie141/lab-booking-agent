@@ -30,7 +30,14 @@ from .agent.state import SessionStore
 from .agent.tools import TOOL_SPECS, tool_create_reservation
 from .clock import now_local
 from .config import get_settings
-from .db import dispose_engine, init_db, isolated_database, session_scope
+from .db import (
+    SchemaDriftError,
+    dispose_engine,
+    init_db,
+    isolated_database,
+    schema_drift,
+    session_scope,
+)
 from .domain.availability import open_window
 from .domain.booking import list_reservations
 from .knowledge.retriever import build_retriever, fallback_reason, load_corpus
@@ -53,6 +60,22 @@ async def _doctor() -> int:
     print(f"  retrieval_backend : {settings.retrieval_backend}")
 
     await init_db()
+
+    # 结构校验放在 seed 之前。库里缺列时 seed 自己也会炸，但它的报错是
+    # 「no such column ...」加一屏堆栈，看不出「该重建库」。自检命令的职责
+    # 恰恰是把这种情况翻译成人能照着做的话 —— 而不是自己也崩掉
+    # （它真崩过一次，所以这里是一条回归点）。
+    drift = await schema_drift()
+    if drift:
+        print("  ✗ 数据库结构      : 与代码不一致")
+        for item in drift:
+            print(f"      · {item}")
+        print("      修法 A：python main.py seed --force     重建演示库（会清空现有数据）")
+        print("      修法 B：把 LAB_DATABASE_URL 指向新的 sqlite 文件")
+        print("=" * 66)
+        print("自检未通过：库结构过期。修好后请重新跑一次 python main.py doctor")
+        return 1
+
     info = await seed()
     print(f"  seed              : {'已灌入' if info['seeded'] else '跳过'} {info.get('reason', '')}")
 
@@ -95,7 +118,9 @@ async def _doctor() -> int:
 # chat
 # ==========================================================================
 async def _chat(message: str, user_id: int, session_id: str) -> int:
-    await init_db()
+    # seed() 内部第一步就是建表 + 校验结构（ensure_schema）。
+    # 库过期时会抛 SchemaDriftError，由 main() 统一翻译成可照做的提示，
+    # 而不是等跑到「查 users」那一步才炸出一段 SQLAlchemy 堆栈。
     await seed()
     async with session_scope() as session:
         rows = (await session.execute(select(Equipment))).scalars().all()
@@ -126,7 +151,7 @@ async def _scratch_database(prefix: str) -> AsyncIterator[None]:
     url = f"sqlite+aiosqlite:///{(root / 'scratch.db').as_posix()}"
     try:
         async with isolated_database(url):
-            await init_db()
+            # seed(force=True) 内部会先重建表结构，这里不必再单独 init_db。
             await seed(force=True)
             yield
     finally:
@@ -301,7 +326,9 @@ async def _run(args: argparse.Namespace) -> int:
                 print(f"    {key}: {value}")
         return 0
     if args.command == "seed":
-        await init_db()
+        # seed() 内部先走 ensure_schema(rebuild=force)：
+        # --force 是「删表重建」而不是「只删行」—— 只删行修不了「缺列」，
+        # 这也正是 README 那句「要重建请加 --force」曾经失效的原因。
         info = await seed(force=args.force)
         print(json.dumps(info, ensure_ascii=False, indent=2))
         return 0
@@ -336,6 +363,11 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         return asyncio.run(_run(args))
+    except SchemaDriftError as exc:
+        # 库结构过期是**配置问题，不是程序缺陷**：给一段能照着做的话，
+        # 而不是让用户从五十行 SQLAlchemy 堆栈里自己看出「该重建库」。
+        print(f"\n{exc}\n", file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         return 130
     finally:
