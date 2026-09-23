@@ -252,6 +252,11 @@ class BookingOutcome(BaseModel):
 class LoginRequest(BaseModel):
     """登录请求。用户名 + 口令，别无其他。"""
 
+    # 严格模式：未知字段直接 422。
+    # 默认的 pydantic 行为是**静默忽略**未知字段，那会让拼错的参数
+    # （比如 password_hash、role）看起来"请求成功了"，实际没生效。
+    model_config = ConfigDict(extra="forbid")
+
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=128)
 
@@ -278,10 +283,32 @@ class TokenResponse(BaseModel):
     user: UserOut
 
 
+class AuditLogOut(BaseModel):
+    """审计记录视图（管理员可读）。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    created_at: dt.datetime
+    actor_id: int | None = None
+    actor_name: str = ""
+    action: str
+    target_type: str = ""
+    target_id: str = ""
+    outcome: str
+    detail: str = ""
+    client_host: str = ""
+
+
 # --------------------------------------------------------------------------
 # 对话
 # --------------------------------------------------------------------------
 class ChatRequest(BaseModel):
+    # 严格模式：未知字段 422。
+    # P0-2 之后前端不再传 user_id，但如果有人还在传，
+    # 这里会**明确报错**而不是静默忽略 —— 静默忽略会让人以为"身份传进去了"。
+    model_config = ConfigDict(extra="forbid")
+
     message: str = Field(min_length=1, max_length=2000)
     # ⚠️ 这里**不是**身份来源。HTTP 层一律用 token 解出的 user_id 覆盖它
     # （见 api.chat），请求体里传什么都不作数。
@@ -290,7 +317,9 @@ class ChatRequest(BaseModel):
     # 缺省 None 而不是 1 —— 曾经默认 1 号用户，等于「不传就是 1 号」，
     # 是个静默的越权入口。
     user_id: int | None = None
-    session_id: str = "default"
+    # 会话号进内存字典当 key，必须有长度上限：否则一个超长 session_id
+    # 就能在 SessionStore 里塞进一条几 MB 的记录（自己给自己制造内存压力）。
+    session_id: str = Field(default="default", min_length=1, max_length=64)
     # 用户点选备选方案时回传，避免让模型重新推断
     accept_equipment_id: int | None = None
     accept_date: dt.date | None = None
@@ -326,6 +355,10 @@ class CancelRequest(BaseModel):
     需要管理员代他人取消时用 ``as_user_id``，且该字段对非管理员返回 403
     （显式拒绝，而不是静默忽略）。
     """
+
+    # 严格模式：还按老接口传 user_id 的人会拿到明确的 422，
+    # 而不是"请求成功了但取消的是自己"这种更难排查的结果。
+    model_config = ConfigDict(extra="forbid")
 
     reservation_id: int
     reason: str = Field(default="", max_length=200)

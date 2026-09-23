@@ -246,3 +246,50 @@ class ReservationSlot(Base):
     slot_index: Mapped[int] = mapped_column(Integer)
 
     reservation: Mapped["Reservation"] = relationship(back_populates="slots")
+
+
+# --------------------------------------------------------------------------
+# 审计日志：只追加，不修改、不删除
+# --------------------------------------------------------------------------
+# 动作名用常量而不是散落的字符串字面量：审计的可查询性完全取决于
+# 取值是否收敛，一个拼错的 "login_fialed" 会让统计口径永远对不上。
+ACTION_LOGIN = "auth.login"
+ACTION_LOGIN_FAILED = "auth.login_failed"
+ACTION_BOOK = "reservation.create"
+ACTION_CANCEL = "reservation.cancel"
+ACTION_ADMIN_READ = "admin.read"
+
+OUTCOME_OK = "ok"
+OUTCOME_DENIED = "denied"
+OUTCOME_FAILED = "failed"
+
+
+class AuditLog(Base):
+    """谁、何时、对什么、做了什么、结果如何。
+
+    刻意保留**失败与拒绝**的记录：只记成功的话，「有人一直在试别人的预约号」
+    这种最该被发现的模式恰好什么都看不到。
+    也刻意不存口令、token 原文 —— 审计表本身不该成为新的泄露面。
+    """
+
+    __tablename__ = "audit_logs"
+    __table_args__ = (
+        # 常见查询：按时间倒序翻页 / 按人筛选 / 按动作统计
+        Index("ix_audit_created", "created_at"),
+        Index("ix_audit_actor", "actor_id", "created_at"),
+        Index("ix_audit_action", "action", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now_local)
+    # 允许为空：登录失败时还没有身份（这正是要记下来的一类事件）
+    actor_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    actor_name: Mapped[str] = mapped_column(String(64), default="")
+    action: Mapped[str] = mapped_column(String(48))
+    target_type: Mapped[str] = mapped_column(String(32), default="")
+    target_id: Mapped[str] = mapped_column(String(64), default="")
+    outcome: Mapped[str] = mapped_column(String(16), default=OUTCOME_OK)
+    detail: Mapped[str] = mapped_column(Text, default="")
+    # 来源 IP。反向代理后面需要在网关上把真实来源写进 X-Forwarded-For 才有意义，
+    # 这里明确只记后端看到的地址，不假装它是客户端真实 IP。
+    client_host: Mapped[str] = mapped_column(String(64), default="")

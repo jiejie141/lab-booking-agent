@@ -74,9 +74,27 @@ class Settings(BaseSettings):
     # 调大更抗暴力破解，但每次登录都会等更久；测试里可调小以加速。
     password_kdf_n: int = 2 ** 14
 
+    # ---- 边界加固（P0-3）---------------------------------------------------
+    # 请求体大小上限（字节）。默认 64KB —— 本项目最大的合法请求体是
+    # 一条 chat 消息（上限 2000 字符），64KB 留了两个数量级的余量。
+    max_body_bytes: int = 64 * 1024
+    # /api/agent/chat 的按用户限流（次/分钟）。0 = 关闭。
+    # 这是**模型算力入口**：不设限等于把账算在自己头上。
+    rate_limit_per_minute: int = 30
+    # CORS 白名单，逗号分隔。**默认空 = 不发 CORS 头 = 只允许同源**。
+    # 刻意不用 "*"：带 Authorization 的跨域请求本就不该对任意源开放。
+    cors_origins: str = ""
+    # 是否写审计日志。默认开 —— 关掉它应当是一个需要解释的动作。
+    audit_enabled: bool = True
+
     # ---- 服务 -------------------------------------------------------------
     host: str = "127.0.0.1"
     port: int = 8200
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        """把逗号分隔的白名单拆成列表（空串 → 空列表 → 不发 CORS 头）。"""
+        return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
 
 
 @functools.lru_cache(maxsize=1)

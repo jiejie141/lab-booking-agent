@@ -81,15 +81,21 @@ def agent(mock_client):
 # --------------------------------------------------------------------------
 @pytest.fixture
 async def http(isolated_db):
-    """已进入 lifespan 的 ASGI 客户端（未登录）。"""
+    """已进入 lifespan 的 ASGI 客户端（未登录）。
+
+    刻意用 ``create_app()`` 而不是模块级的 ``app`` 单例：
+    中间件（CORS 白名单、请求体上限）的配置是在 ``create_app()`` 里读进来的，
+    用同一个单例就没法验证"换了配置真的会变"。
+    """
     import httpx
 
-    from lagent.api import app
+    from lagent.api import create_app
 
-    async with app.router.lifespan_context(app):
-        transport = httpx.ASGITransport(app=app)
+    application = create_app()
+    async with application.router.lifespan_context(application):
+        transport = httpx.ASGITransport(app=application)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            client.app = app  # 便于测试直接改 app.state
+            client.app = application  # 便于测试直接改 app.state
             yield client
 
 

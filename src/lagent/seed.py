@@ -21,6 +21,7 @@ from .clock import now_local
 from .db import init_db, session_scope
 from .domain.booking import attach_slots
 from .models import (
+    AuditLog,
     Equipment,
     Laboratory,
     Reservation,
@@ -102,7 +103,8 @@ async def seed(force: bool = False) -> dict:
         if force:
             # 删除顺序必须是「子表在前」：占用格引用预约，预约引用设备/实验室/用户。
             # SQLite 已开 PRAGMA foreign_keys=ON，顺序错了会直接被外键拦下。
-            for model in (ReservationSlot, Reservation, Equipment, Laboratory, User):
+            # 审计表没有外键（actor_id 可能为空），放最前面最省心。
+            for model in (AuditLog, ReservationSlot, Reservation, Equipment, Laboratory, User):
                 await session.execute(model.__table__.delete())
 
         labs: list[Laboratory] = []
