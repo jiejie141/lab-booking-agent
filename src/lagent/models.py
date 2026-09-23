@@ -81,6 +81,10 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     email: Mapped[str] = mapped_column(String(128), unique=True)
     role: Mapped[str] = mapped_column(String(16), default=ROLE_USER)
+    # 口令哈希（格式 scrypt$n$r$p$salt$hash，见 security.py）。
+    # 默认空串是有意的：历史数据/未初始化账号的哈希为空，
+    # verify_password 对空串一律返回 False，因此**默认不可登录**（fail-closed）。
+    password_hash: Mapped[str] = mapped_column(String(255), default="")
     # 准入资质：拥有哪些设备类别的操作资格（如 ["光谱", "细胞培养"]）。
     # 注意这是「代码层判定」的输入，绝不允许让大模型自己决定用户有没有资质。
     certs: Mapped[list] = mapped_column(JSON, default=list)

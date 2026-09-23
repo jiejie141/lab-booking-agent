@@ -17,6 +17,16 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+# 演示口令固定（seed.py），测试里会反复登录。
+# scrypt 默认 n=2**14 ≈ 140ms/次，几十次登录就是十几秒纯等待 ——
+# 这里调到 2**10 把等待压到 ~1ms。**成本参数本身不是被测对象**
+# （它是 KDF 的实现细节，且 n 已写进哈希串，不影响校验正确性），
+# 所以测试里降低它不损失覆盖面，只省时间。
+TEST_KDF_N = "1024"
+
+# 演示账号（与 seed.USERS 同一份，README 也列了）
+DEMO_PASSWORD = {"张伟": "zhangwei@123", "李娜": "lina@123", "管理员": "admin@123"}
+
 
 @pytest.fixture
 async def isolated_db(tmp_path, monkeypatch):
@@ -24,6 +34,7 @@ async def isolated_db(tmp_path, monkeypatch):
     url = f"sqlite+aiosqlite:///{(tmp_path / 'test.db').as_posix()}"
     monkeypatch.setenv("LAB_DATABASE_URL", url)
     monkeypatch.setenv("LAB_APP_MODE", "mock")
+    monkeypatch.setenv("LAB_PASSWORD_KDF_N", TEST_KDF_N)
 
     from lagent import db as db_module
     from lagent.config import reset_settings_cache
@@ -63,3 +74,50 @@ def agent(mock_client):
     from lagent.agent.state import SessionStore
 
     return LabBookingAgent(mock_client, store=SessionStore())
+
+
+# --------------------------------------------------------------------------
+# HTTP 层夹具（P0-2 之后所有业务端点都要令牌）
+# --------------------------------------------------------------------------
+@pytest.fixture
+async def http(isolated_db):
+    """已进入 lifespan 的 ASGI 客户端（未登录）。"""
+    import httpx
+
+    from lagent.api import app
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            client.app = app  # 便于测试直接改 app.state
+            yield client
+
+
+def auth_header(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def login(http, username: str, password: str | None = None) -> str:
+    """登录并返回访问令牌。"""
+    resp = await http.post(
+        "/api/auth/login",
+        json={"username": username, "password": password or DEMO_PASSWORD[username]},
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["access_token"]
+
+
+@pytest.fixture
+def as_user(http):
+    """``as_user("张伟")`` → (client 不变, 该身份的请求头)。
+
+    用法::
+
+        headers = await as_user("管理员")
+        r = await http.get("/api/users", headers=headers)
+    """
+
+    async def _login(username: str, password: str | None = None) -> dict:
+        return auth_header(await login(http, username, password))
+
+    return _login

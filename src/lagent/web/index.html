@@ -122,7 +122,7 @@ td .mono{font-family:var(--mono)}
 .cite .x{font-size:12px;color:var(--text-dim);margin-top:2px}
 .cite .s{font-family:var(--mono);font-size:11px;color:var(--text-faint)}
 .hint{font-size:11.5px;color:var(--text-faint);margin-top:6px}
-.toasts{position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:8px;z-index:60}
+.toasts{position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:8px;z-index:95}
 .toast{background:var(--panel);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:9px;padding:10px 14px;font-size:13px;box-shadow:0 6px 22px rgba(0,0,0,.28);animation:rise .24s ease both;max-width:330px}
 .toast.err{border-left-color:var(--danger)}
 .toast.ok{border-left-color:var(--ok)}
@@ -131,10 +131,55 @@ td .mono{font-family:var(--mono)}
 .sq .lb{color:var(--text-faint);font-family:var(--mono)}
 .sq .track{height:6px;border-radius:3px;background:var(--panel-3);overflow:hidden;display:flex}
 .sq .seg{height:100%}
+/* ---------- 登录闸门 ---------- */
+.gate{position:fixed;inset:0;z-index:80;background:var(--bg);display:grid;place-items:center;padding:24px}
+.gate[hidden]{display:none}
+.gate .box{width:100%;max-width:392px;background:var(--panel);border:1px solid var(--border);border-radius:16px;
+  box-shadow:0 20px 60px rgba(0,0,0,.35);padding:28px;animation:rise .34s ease both}
+.gate .logo{display:flex;align-items:center;gap:11px;margin-bottom:6px}
+.gate .logo .mark{width:34px;height:34px;border-radius:10px;font-size:15px;background:linear-gradient(135deg,var(--accent),var(--accent-2));display:grid;place-items:center;color:#fff}
+.gate .logo b{font-size:16px;font-weight:600}
+.gate .sub{color:var(--text-dim);font-size:12.5px;margin:0 0 20px}
+.gate label.f{margin-top:12px}
+.gate .btn{width:100%;margin-top:18px;padding:11px}
+.gate .err{display:none;margin-top:12px;padding:9px 12px;border-radius:9px;font-size:12.5px;
+  color:var(--danger);border:1px solid color-mix(in srgb,var(--danger) 35%,transparent);
+  background:color-mix(in srgb,var(--danger) 9%,transparent)}
+.gate .err.on{display:block}
+.gate .demo{margin-top:20px;padding-top:16px;border-top:1px dashed var(--border-soft)}
+.gate .demo .t{font-size:11px;color:var(--text-faint);letter-spacing:.4px;margin-bottom:8px}
+.gate .demo .pill-row{margin-top:0}
+.gate .demo .btn.sm{font-family:var(--mono)}
+.who-role{font-size:11px;padding:1px 6px;border-radius:999px;border:1px solid var(--border);color:var(--text-faint);margin-left:2px}
+.who-role.admin{color:var(--accent-2);border-color:color-mix(in srgb,var(--accent-2) 35%,transparent)}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
 <body>
+<!-- ============ 登录闸门（P0-2：所有业务数据都要令牌） ============ -->
+<div class="gate" id="gate">
+  <div class="box">
+    <div class="logo"><span class="mark">LB</span><b>lab-booking-agent</b></div>
+    <p class="sub">智能实验室预约控制台 · 需登录后使用</p>
+
+    <label class="f">用户名</label>
+    <input id="lg-user" autocomplete="username" placeholder="例如：李娜">
+    <label class="f">密码</label>
+    <input id="lg-pass" type="password" autocomplete="current-password" placeholder="••••••••">
+    <div class="err" id="lg-err"></div>
+    <button class="btn" id="lg-go">登录</button>
+
+    <div class="demo">
+      <div class="t">演示账号（点击填充）· 资质不同，能约到的设备也不同</div>
+      <div class="pill-row">
+        <button class="btn ghost sm" data-demo="张伟|zhangwei@123">张伟 · 仅光谱</button>
+        <button class="btn ghost sm" data-demo="李娜|lina@123">李娜 · 资质齐全</button>
+        <button class="btn ghost sm" data-demo="管理员|admin@123">管理员 · 可看全量</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <header class="top">
   <div class="top-in">
     <div class="brand">
@@ -142,6 +187,10 @@ td .mono{font-family:var(--mono)}
       <span>lab-booking-agent<small>智能实验室预约</small></span>
     </div>
     <div class="spacer"></div>
+    <span class="badge" id="badge-user" hidden>
+      <span class="dot"></span><b id="who-name">–</b><span class="who-role" id="who-role"></span>
+    </span>
+    <button class="icon-btn" id="btn-logout" title="退出登录" aria-label="退出登录" hidden></button>
     <span class="badge" id="badge-mode"><span class="dot" id="dot-health"></span>连接中…</span>
     <span class="badge">检索 <b id="badge-backend">–</b></span>
     <span class="badge">时段 <b id="badge-now">–</b></span>
@@ -166,11 +215,8 @@ td .mono{font-family:var(--mono)}
         <span class="badge" id="badge-agent">–</span>
       </div>
       <div class="card-b">
-        <div class="row" style="margin-bottom:14px">
-          <div style="flex:0 0 190px">
-            <label class="f">当前身份（决定准入资质）</label>
-            <select id="sel-user"></select>
-          </div>
+        <div class="row" style="margin-bottom:14px;align-items:center">
+          <div id="identity-note" style="flex:1;font-size:12px;color:var(--text-dim);min-width:0"></div>
           <div style="flex:0 0 auto">
             <button class="btn ghost sm" id="btn-reset">新会话</button>
           </div>
@@ -202,6 +248,7 @@ td .mono{font-family:var(--mono)}
           <button class="tab on" data-tab="labs">实验室与设备</button>
           <button class="tab" data-tab="res">预约记录</button>
           <button class="tab" data-tab="kb">规范检索</button>
+          <button class="tab" data-tab="users" id="tab-users" hidden>用户目录</button>
         </div>
       </div>
       <div class="card-b">
@@ -211,7 +258,7 @@ td .mono{font-family:var(--mono)}
 
         <div id="pane-res" hidden>
           <div class="filters">
-            <select id="flt-user"><option value="">全部用户</option></select>
+            <select id="flt-user" hidden><option value="">全部用户</option></select>
             <select id="flt-status">
               <option value="">全部状态</option>
               <option value="pending">待确认</option>
@@ -231,6 +278,13 @@ td .mono{font-family:var(--mono)}
           </div>
           <div class="hint">检索《实验室准入与设备使用规范》，命中会标注由哪几路召回。</div>
           <div id="kb-box" style="margin-top:12px"></div>
+        </div>
+
+        <!-- 管理员专属：普通用户拿到的是 403，该标签页根本不会出现 -->
+        <div id="pane-users" hidden>
+          <div class="hint" style="margin-bottom:10px">用户目录为管理员端点（<span class="mono">GET /api/users</span>）。
+            响应中不含邮箱与口令哈希 —— 只回显业务需要的字段。</div>
+          <div id="users-box"><div class="skel sk-row"></div><div class="skel sk-row"></div></div>
         </div>
       </div>
     </section>
@@ -264,6 +318,15 @@ $("#btn-theme").addEventListener("click",()=>{
   applyTheme(document.documentElement.getAttribute("data-theme")==="dark"?"light":"dark");
 });
 
+/* ---------- 令牌存储 ----------
+   token 放 sessionStorage 而不是 localStorage：关掉标签页即失效，
+   把「令牌被 XSS 偷走」的利用窗口从永久压到本次会话。 */
+const TOKEN_KEY="lagent-token";
+const tokenApi={
+  get(){try{return sessionStorage.getItem(TOKEN_KEY);}catch(e){return null;}},
+  set(v){try{v?sessionStorage.setItem(TOKEN_KEY,v):sessionStorage.removeItem(TOKEN_KEY);}catch(e){}}
+};
+
 /* ---------- 基础工具 ---------- */
 function toast(msg,kind){
   const el=document.createElement("div");
@@ -273,12 +336,21 @@ function toast(msg,kind){
   setTimeout(()=>{el.style.opacity="0";setTimeout(()=>el.remove(),240);},3200);
 }
 async function api(path,opts){
-  const r=await fetch(path,Object.assign({headers:{"Content-Type":"application/json"}},opts||{}));
+  const o=Object.assign({},opts||{});
+  o.headers=Object.assign({"Content-Type":"application/json"},o.headers||{});
+  const t=tokenApi.get();
+  if(t) o.headers.Authorization="Bearer "+t;
+  const r=await fetch(path,o);
   let body=null;
   try{body=await r.json();}catch(e){}
+  if(r.status===401){
+    // 令牌缺失/过期不是"一次普通请求失败"，而是会话结束 —— 直接回登录闸门
+    sessionExpired();
+    throw new Error("登录状态已失效，请重新登录");
+  }
   if(!r.ok){
     const detail=(body&&(body.detail||body.message))||("HTTP "+r.status);
-    throw new Error(detail);
+    const err=new Error(detail); err.status=r.status; throw err;
   }
   return body;
 }
@@ -286,7 +358,70 @@ const SKEL = {card:'<div class="skel sk-card"></div>',row:'<div class="skel sk-r
 const skel=(n,t)=>SKEL[t||"row"].repeat(n);
 
 /* ---------- 状态 ---------- */
-const state={ users:[], equipment:new Map(), session:"web-"+Math.random().toString(36).slice(2,8), busy:false };
+const state={ users:[], equipment:new Map(), session:"web-"+Math.random().toString(36).slice(2,8), busy:false, me:null };
+const isAdmin = ()=> !!state.me && (state.me.role==="admin"||state.me.role==="sysadmin");
+
+/* ---------- 登录闸门 ---------- */
+function gateError(msg){ const el=$("#lg-err"); el.textContent=msg||""; el.classList.toggle("on",!!msg); }
+function showGate(msg){
+  $("#gate").hidden=false;
+  $("#badge-user").hidden=true;
+  $("#btn-logout").hidden=true;
+  $("#tab-users").hidden=true;
+  $("#pane-users").hidden=true;
+  // 退出后不能残留上一个身份的数据
+  $("#labs-box").innerHTML=skel(2,"card");
+  $("#res-box").innerHTML=skel(3,"row");
+  $("#kb-box").innerHTML="";
+  $("#users-box").innerHTML=skel(3,"row");
+  $("#lg-pass").value="";
+  gateError(msg||"");
+}
+function clearSession(){ tokenApi.set(null); state.me=null; state.users=[]; $("#msgs").innerHTML=""; }
+function sessionExpired(){ clearSession(); showGate("登录状态已失效，请重新登录"); }
+
+async function doLogin(){
+  const username=$("#lg-user").value.trim(), password=$("#lg-pass").value;
+  if(!username||!password){ gateError("请填写用户名与密码"); return; }
+  const btn=$("#lg-go"); btn.disabled=true; btn.textContent="登录中…"; gateError("");
+  try{
+    // 登录本身不能用 api()（它会在 401 时把闸门重置掉，错误提示就看不见了）
+    const r=await fetch("/api/auth/login",{
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({username,password})});
+    const body=await r.json().catch(()=>null);
+    if(!r.ok){ gateError((body&&body.detail)||("登录失败（HTTP "+r.status+"）")); return; }
+    tokenApi.set(body.access_token);
+    state.me=body.user;
+    $("#gate").hidden=true;
+    await enterApp();
+    toast("已登录："+body.user.username,"ok");
+  }catch(e){ gateError("无法连接后端："+e.message); }
+  finally{ btn.disabled=false; btn.textContent="登录"; }
+}
+
+function renderIdentity(){
+  const me=state.me||{};
+  const certs=me.certs||[];
+  $("#badge-user").hidden=false;
+  $("#btn-logout").hidden=false;
+  $("#who-name").textContent=me.username||"–";
+  const role=$("#who-role");
+  role.textContent=me.role||"";
+  role.className="who-role"+(isAdmin()?" admin":"");
+  $("#identity-note").innerHTML=
+    '以 <b style="color:var(--text)">'+esc(me.username||"")+'</b> 的身份对话（身份取自令牌，不由前端指定）· 准入资质：'
+    +(certs.length?esc(certs.join(" / ")):'<span style="color:var(--warn)">无</span>');
+  $("#tab-users").hidden=!isAdmin();
+}
+
+async function enterApp(){
+  renderIdentity();
+  await Promise.all([loadLabs(), loadUserDirectory()]);
+  if(!isAdmin()) $("#tab-users").hidden=true;
+  await loadReservations();
+  await loadHealth();
+}
 
 /* ---------- 顶部与统计 ---------- */
 async function loadHealth(){
@@ -310,18 +445,34 @@ async function loadHealth(){
   }
 }
 
-/* ---------- 用户 ---------- */
-async function loadUsers(){
+/* ---------- 用户目录（管理员） ---------- */
+async function loadUserDirectory(){
+  const box=$("#users-box"), filter=$("#flt-user");
+  if(!isAdmin()){
+    // 非管理员：/api/users 是管理端点（403），前端直接不请求也不显示筛选器。
+    // 注意这只是"省一次无用请求 + 不显示无权限的控件"，
+    // **真正的边界在服务端** —— 就算手动构造请求也只会拿到 403。
+    filter.hidden=true;
+    box.innerHTML='<div class="empty">当前身份无权查看用户目录（该端点需要管理员）</div>';
+    return;
+  }
+  filter.hidden=false;
+  box.innerHTML=skel(3,"row");
   try{
     state.users=await api("/api/users");
-    const sel=$("#sel-user");
-    sel.innerHTML=state.users.map(u=>
-      `<option value="${u.id}">${esc(u.username)}（${u.certs&&u.certs.length?esc(u.certs.join("/")):"无资质"}）</option>`).join("");
-    const f=$("#flt-user");
-    f.innerHTML='<option value="">全部用户</option>'+state.users.map(u=>`<option value="${u.id}">${esc(u.username)}</option>`).join("");
-    const zhang=state.users.find(u=>(u.certs||[]).length===1);
-    if(zhang) sel.value=zhang.id;
-  }catch(e){toast("加载用户失败："+e.message,"err");}
+    filter.innerHTML='<option value="">全部用户</option>'
+      + state.users.map(u=>`<option value="${u.id}">${esc(u.username)}</option>`).join("");
+    box.innerHTML='<table><thead><tr><th>ID</th><th>用户</th><th>角色</th><th>准入资质</th></tr></thead><tbody>'
+      + state.users.map(u=>{
+          const roleTag = u.role==="user" ? '<span class="tag">user</span>'
+            : '<span class="tag warn">'+esc(u.role)+'</span>';
+          const certs=(u.certs||[]).map(c=>'<span class="tag">'+esc(c)+'</span>').join(" ")
+            || '<span style="color:var(--text-faint)">无</span>';
+          return `<tr><td class="mono">#${u.id}</td><td>${esc(u.username)}</td>
+            <td>${roleTag}</td><td>${certs}</td></tr>`;
+        }).join("")
+      + '</tbody></table>';
+  }catch(e){box.innerHTML='<div class="empty">加载失败：'+esc(e.message)+"</div>";}
 }
 
 /* ---------- 实验室与设备 ---------- */
@@ -395,8 +546,10 @@ async function loadReservations(){
       const id=b.getAttribute("data-cancel");
       b.disabled=true; b.textContent="…";
       try{
+        // 身份不再由前端指定：取消者取自令牌。
+        // 管理员要代他人取消得用 as_user_id，普通用户传了会 403。
         await api("/api/reservations/cancel",{method:"POST",body:JSON.stringify({
-          reservation_id:Number(id), user_id:Number($("#sel-user").value), reason:"控制台取消"})});
+          reservation_id:Number(id), reason:"控制台取消"})});
         toast("已取消预约 #"+id,"ok");
         loadReservations(); loadHealth();
       }catch(e){ toast("取消失败："+e.message,"err"); b.disabled=false; b.textContent="取消"; }
@@ -479,7 +632,7 @@ async function send(message,accept){
   $("#inp-msg").value="";
   const ph=skeletonMsg();
 
-  const payload={message:text||"就选这个",user_id:Number($("#sel-user").value),session_id:state.session};
+  const payload={message:text||"就选这个",session_id:state.session};
   if(accept){
     payload.accept_equipment_id=accept.equipment_id;
     payload.accept_date=accept.date;
@@ -543,25 +696,50 @@ $("#btn-reset").addEventListener("click",()=>{
   $("#msgs").innerHTML="";
   pushMsg("a","已开新会话。上一轮的备选方案不会再被引用。");
 });
-$("#sel-user").addEventListener("change",()=>loadReservations());
 $("#flt-user").addEventListener("change",loadReservations);
 $("#flt-status").addEventListener("change",loadReservations);
 $("#btn-q").addEventListener("click",runRetrieve);
 $("#inp-q").addEventListener("keydown",e=>{if(e.key==="Enter")runRetrieve();});
 
+/* ---------- 登录闸门交互 ---------- */
+$("#lg-go").addEventListener("click",doLogin);
+$("#lg-pass").addEventListener("keydown",e=>{if(e.key==="Enter")doLogin();});
+$("#lg-user").addEventListener("keydown",e=>{if(e.key==="Enter")$("#lg-pass").focus();});
+$$("[data-demo]").forEach(b=>b.addEventListener("click",()=>{
+  const [u,p]=b.getAttribute("data-demo").split("|");
+  $("#lg-user").value=u; $("#lg-pass").value=p;
+  gateError("");
+  $("#lg-go").focus();
+}));
+$("#btn-logout").addEventListener("click",()=>{
+  clearSession();
+  showGate();
+  toast("已退出登录");
+  loadHealth();
+});
+
 $$("#tabs .tab").forEach(tab=>tab.addEventListener("click",()=>{
   $$("#tabs .tab").forEach(t=>t.classList.toggle("on",t===tab));
   const name=tab.getAttribute("data-tab");
-  ["labs","res","kb"].forEach(k=>{$("#pane-"+k).hidden = k!==name;});
+  ["labs","res","kb","users"].forEach(k=>{$("#pane-"+k).hidden = k!==name;});
   if(name==="res") loadReservations();
   if(name==="labs") loadLabs();
+  if(name==="users") loadUserDirectory();
 }));
 
-/* ---------- 启动 ---------- */
+/* ---------- 启动 ----------
+   健康检查是公开端点，先跑，好让登录页顶部也能显示后端连接状态；
+   令牌存在就试着用它换身份，能换到就直接进主界面。 */
 (async function boot(){
   await loadHealth();
-  await Promise.all([loadUsers(),loadLabs()]);
-  await loadReservations();
+  if(!tokenApi.get()){ showGate(); return; }
+  try{
+    state.me=await api("/api/auth/me");
+    $("#gate").hidden=true;
+    await enterApp();
+  }catch(e){
+    // api() 遇到 401 已调 sessionExpired()，闸门已经在了
+  }
 })();
 })();
 </script>

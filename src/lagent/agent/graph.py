@@ -345,6 +345,11 @@ class LabBookingAgent:
     # 对外入口
     # ------------------------------------------------------------------
     async def ainvoke(self, req: ChatRequest) -> ChatResponse:
+        # 身份是硬前提：缺了就没法判资质、也没法归属预约。
+        # 这里 fail-closed 而不是回退到某个默认用户 —— P0-2 之前
+        # 「不传 user_id 就当 1 号」正是那个越权入口。
+        if req.user_id is None:
+            raise ValueError("ChatRequest.user_id 缺失：身份必须由调用方显式提供")
         if self.client is None:
             return ChatResponse(
                 reply=DEGRADED_REPLY,

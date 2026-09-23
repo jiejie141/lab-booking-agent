@@ -62,6 +62,18 @@ class Settings(BaseSettings):
     retrieval_top_k: int = 4
     rrf_k: int = 60
 
+    # ---- 认证与授权（P0-2）-------------------------------------------------
+    # HS256 签名密钥。默认值只是为了让本地**开箱即跑**；
+    # 它写在仓库里 = 公开的，生产必须用 LAB_JWT_SECRET 覆盖。
+    # 服务启动时会检测并打告警（security.uses_default_secret）。
+    jwt_secret: str = "dev-insecure-secret-change-me"
+    # 访问令牌有效期（分钟）。刻意偏短：本项目没做 refresh token，
+    # 与其签一个 7 天的令牌假装很安全，不如 2 小时一续、把风险窗口压小。
+    jwt_ttl_minutes: int = 120
+    # 密码 KDF 成本参数（scrypt 的 n，必须是 2 的幂）。2**14 ≈ 16MB / 140ms。
+    # 调大更抗暴力破解，但每次登录都会等更久；测试里可调小以加速。
+    password_kdf_n: int = 2 ** 14
+
     # ---- 服务 -------------------------------------------------------------
     host: str = "127.0.0.1"
     port: int = 8200

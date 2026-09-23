@@ -247,11 +247,49 @@ class BookingOutcome(BaseModel):
 
 
 # --------------------------------------------------------------------------
+# 认证（P0-2）
+# --------------------------------------------------------------------------
+class LoginRequest(BaseModel):
+    """登录请求。用户名 + 口令，别无其他。"""
+
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class UserOut(BaseModel):
+    """对外暴露的用户视图。
+
+    **刻意不含 password_hash / email**：身份信息按需最小化，
+    列表接口没有任何理由返回口令哈希（哪怕它不可逆）。
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    username: str
+    role: str
+    certs: list[str] = Field(default_factory=list)
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    user: UserOut
+
+
+# --------------------------------------------------------------------------
 # 对话
 # --------------------------------------------------------------------------
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
-    user_id: int = 1
+    # ⚠️ 这里**不是**身份来源。HTTP 层一律用 token 解出的 user_id 覆盖它
+    # （见 api.chat），请求体里传什么都不作数。
+    # 之所以保留字段：CLI（cli._chat）与离线评测（evaluation.run_eval）
+    # 是在进程内直接调 Agent 的，没有 token 可解，必须显式传身份。
+    # 缺省 None 而不是 1 —— 曾经默认 1 号用户，等于「不传就是 1 号」，
+    # 是个静默的越权入口。
+    user_id: int | None = None
     session_id: str = "default"
     # 用户点选备选方案时回传，避免让模型重新推断
     accept_equipment_id: int | None = None
@@ -282,6 +320,13 @@ class ChatResponse(BaseModel):
 
 
 class CancelRequest(BaseModel):
+    """取消预约。
+
+    ``user_id`` 已从请求体里**删除** —— 取消者身份一律取自 token。
+    需要管理员代他人取消时用 ``as_user_id``，且该字段对非管理员返回 403
+    （显式拒绝，而不是静默忽略）。
+    """
+
     reservation_id: int
-    user_id: int = 1
-    reason: str = ""
+    reason: str = Field(default="", max_length=200)
+    as_user_id: int | None = None
