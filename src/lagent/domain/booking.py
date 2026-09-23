@@ -1,22 +1,35 @@
 """下单与取消：并发安全 + 业务规则兜底。
 
-三层防线，缺一不可：
+**「区间不重叠」由数据库唯一索引保证，不靠应用层自觉。**
 
-1. **写前校验**：即便参数是模型给的，也重新过一遍全部非时间约束
-   （设备状态、准入资质、开放时间、单次上限）。
-   模型输出不可信，业务规则绝不能交给它最终裁决。
+早先的实现只在 ``(equipment_id, date, start_time)`` 上建唯一索引，
+并依赖「设备级锁 + 锁内复检」兜住区间相交。这个设计是错的，实测漏了：
 
-2. **设备级串行化**：时间区间重叠只能在事务里判。READ COMMITTED 下
-   两个事务可以各自查完「没冲突」再双双写入，这就是 check-then-act 漏判。
-   PostgreSQL 上用 ``pg_advisory_xact_lock`` 按设备加事务级排他锁；
-   SQLite 本身同一时刻只允许一个写事务，写入即排他，无需额外加锁。
+  1. 唯一索引只能拦**开始时间相同**的重复写入；
+     ``13:00-15:00`` 与 ``14:00-16:00`` 开始时间不同，索引看不见它们重叠。
+  2. 所谓「设备级锁」在 SQLite 上压根不存在 —— SQLite 没有行级锁，
+     ``acquire_equipment_lock`` 当时直接 return 什么都没做。
+     于是「锁内复检」退化成典型的 check-then-act：两个事务各自读到
+     「无冲突」（读快照），再分别写入，两条都落库。
+     20 并发实测：两种时段双双成功 = 超卖。
 
-3. **数据库唯一索引**：同设备 + 同日期 + 同开始时间的有效预约唯一
-   （见 models.Reservation 的部分唯一索引）。这是最后一道闸 —— 前两层
-   万一有缝隙，重复写入会被数据库直接拒绝，而不是悄悄写进去两行。
+现在改成把区间拆成 30 分钟的格（``models.ReservationSlot``），
+唯一索引打在 ``(equipment_id, date, slot_index)`` 上。
+任何形式的相交（相同 / 部分重叠 / 包含）都会撞索引，**且与数据库无关**。
 
-发生第 3 层拦截时不是失败退出，而是**重试**：因为此时抢到坑位的很可能是
-另一个并发请求，重试前会重新查一次冲突，把「被别人抢了」如实回报给用户。
+三层防线仍然保留，但职责重新划分：
+
+  1. **写前校验**：即便参数是模型给的，也重新过一遍全部非时间约束
+     （设备状态、准入资质、开放时间、单次上限、粒度对齐）。
+     模型输出不可信，业务规则绝不能交给它最终裁决。
+  2. **占用格唯一索引**：★★ 这是**唯一**的正确性保证。撞上即冲突。
+  3. **重试**：撞索引不是失败退出，而是重试 —— 抢到坑的很可能就是另一个
+     并发请求，重试时会重新查一次冲突，把「被别人抢了」如实回报给用户。
+
+另有一个 PostgreSQL 专属的 ``pg_advisory_xact_lock``，作用是**减少重试次数**
+（提前把同设备请求串起来），它**不承担正确性职责**：
+即使它完全不起作用，第 2 层也能拦住重复。这一点很关键 ——
+上一版就是把它误当成了正确性保证，而它在 SQLite 上根本没生效。
 """
 
 from __future__ import annotations
@@ -24,7 +37,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 
-from sqlalchemy import select, text, update
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -33,10 +46,14 @@ from ..config import get_settings
 from ..db import session_scope
 from ..models import (
     ACTIVE_STATUSES,
+    DEFAULT_SLOT_GRANULARITY_MINUTES,
     EQUIPMENT_NORMAL,
     Equipment,
     Reservation,
+    ReservationSlot,
     User,
+    is_aligned,
+    slot_indexes_for,
 )
 from ..schemas import BookingOutcome, ReservationOut
 from ..clock import minutes_between, now_local, overlaps
@@ -68,8 +85,72 @@ async def find_conflict(
     return None
 
 
+def granularity_minutes() -> int:
+    """当前配置的最小预约粒度（分钟）。"""
+    return get_settings().slot_granularity_minutes or DEFAULT_SLOT_GRANULARITY_MINUTES
+
+
+def _ensure_aligned(start: dt.time, end: dt.time) -> list[str]:
+    """校验时间点是否落在粒度边界上。
+
+    这不是形式主义：占用格是用「格索引」算的，未对齐的时间点会被向下取整，
+    于是区间**漏保护**（例如 09:00-10:20 只占住到 10:00，10:00 之后的
+    重叠请求就绕过去了）。与其静默漏保护，不如显式拒绝并告诉用户原因。
+
+    产品上也是合理的：实验室按整点/半点排机时是通行做法。
+    """
+    size = granularity_minutes()
+    problems: list[str] = []
+    if not is_aligned(start, size):
+        problems.append(f"开始时间需为 {size} 分钟的整数倍（如 09:00、09:30）")
+    if not is_aligned(end, size):
+        problems.append(f"结束时间需为 {size} 分钟的整数倍（如 11:00、11:30）")
+    return problems
+
+
+async def attach_slots(
+    session: AsyncSession,
+    reservation: Reservation,
+    *,
+    granularity: int | None = None,
+) -> None:
+    """给一条预约登记它占用的所有格。
+
+    调用方必须已经 ``flush()`` 过 reservation（需要它的自增 id）。
+    这里的 flush 就是**不变式 2 的裁决点**：任一格已被占用会抛 IntegrityError。
+    """
+    size = granularity or granularity_minutes()
+    for index in slot_indexes_for(reservation.start_time, reservation.end_time, size):
+        session.add(
+            ReservationSlot(
+                reservation_id=reservation.id,
+                equipment_id=reservation.equipment_id,
+                date=reservation.date,
+                slot_index=index,
+            )
+        )
+    await session.flush()
+
+
+async def release_slots(session: AsyncSession, reservation_id: int) -> int:
+    """释放一条预约占用的全部格（取消 / 改期时调用）。返回释放的格数。"""
+    result = await session.execute(
+        delete(ReservationSlot).where(ReservationSlot.reservation_id == reservation_id)
+    )
+    return result.rowcount or 0
+
+
 async def acquire_equipment_lock(session: AsyncSession, equipment_id: int) -> str:
-    """按设备取事务级排他锁（仅 PostgreSQL 需要）。返回所用策略，便于测试断言。"""
+    """按设备取事务级排他锁（**仅 PostgreSQL**，且不承担正确性职责）。
+
+    ⚠️ 它只是「减少重试次数」的优化：提前把同一设备的并发请求串起来，
+    避免大家都走到唯一索引撞车再重试。**正确性由占用格唯一索引保证** ——
+    即使本函数完全不起作用（SQLite 下就是如此），也不会出现超卖。
+
+    上一版把这里当成第二道正确性防线，是本次修复的核心教训：
+    **在 SQLite 上它是空实现，而注释却写着"写事务天然互斥"，于是
+    "锁内复检"实际上是 check-then-act。**
+    """
     dialect = session.get_bind().dialect.name
     if dialect == "postgresql":
         # hashtext 把设备号映射成 advisory lock 的 key；_xact_ 版本随事务结束自动释放
@@ -79,10 +160,9 @@ async def acquire_equipment_lock(session: AsyncSession, equipment_id: int) -> st
         )
         return "pg_advisory_xact_lock"
     if dialect == "sqlite":
-        # SQLite 的写事务天然互斥：写锁生效期间其他写事务会被阻塞在 busy_timeout 上。
-        # 这里不需要也不应该再叠一层应用层锁 —— 单进程内的 asyncio 锁在多进程部署下无效，
-        # 反而会给人「已经保护好了」的错觉。
-        return "sqlite_write_lock"
+        # SQLite 没有行级锁，这里确实什么都不做。返回策略名只为可观测性 ——
+        # 千万别再把它当成"已经保护好了"。
+        return "none(sqlite)"
     return "none"
 
 
@@ -123,6 +203,9 @@ async def _validate(
     if end <= start:
         problems.append("结束时间必须晚于开始时间")
         return problems
+
+    # 粒度对齐：不对齐会让占用格算漏，等于漏保护（见 _ensure_aligned）
+    problems.extend(_ensure_aligned(start, end))
 
     hours = minutes_between(start, end) / 60
     if hours > equipment.max_hours:
@@ -228,8 +311,11 @@ async def create_reservation(
                     version=1,
                 )
                 session.add(res)
-                # flush 才会真正打数据库，唯一索引冲突在这一刻抛出
+                # 第一次 flush 只为拿到自增 id（占用格要引用它）
                 await session.flush()
+                # ★ 第二次 flush —— 这里才是「区间不重叠」的裁决点：
+                # 任一格已被占用就抛 IntegrityError，整个事务回滚。
+                await attach_slots(session, res)
                 out = _to_out(res, equipment.name, equipment.lab.label)
                 return BookingOutcome(
                     ok=True,
@@ -239,7 +325,8 @@ async def create_reservation(
                 )
 
         except IntegrityError:
-            # 第 3 层防线拦下了「同坑重复写入」—— 抢坑的是并发请求，重试即可
+            # 占用格唯一索引拦下了重叠（或同坑重复）—— 抢坑的是并发请求，重试即可。
+            # 注意：重试前事务已回滚，不会留下半条预约或半个占用格。
             await asyncio.sleep(0.005 * (attempt + 1))
             continue
 
@@ -307,6 +394,10 @@ async def cancel_reservation(
             if result.rowcount == 0:
                 # 版本不匹配 = 有并发修改；重新读一次版本再试
                 continue
+
+            # ★ 释放占用格：不释放的话这个时段就永远订不回来了。
+            # 与状态更新在同一事务里，避免"取消了但格子还占着"的不一致。
+            await release_slots(session, reservation_id)
 
             equipment = await _load_equipment(session, res.equipment_id)
             await session.refresh(res)

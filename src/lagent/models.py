@@ -1,4 +1,4 @@
-"""数据模型：用户 / 实验室 / 设备 / 预约。
+"""数据模型：用户 / 实验室 / 设备 / 预约 / 时段占用。
 
 本文件承载整个项目最核心的工程不变式 —— 它被刻意**下沉到数据库层**，
 而不是靠应用层「先查有没有冲突，再写入」的自觉：
@@ -10,12 +10,21 @@
     之所以是「部分」索引：已取消 / 已过期的记录不该继续占着坑位，
     否则取消之后这个时段就永远订不回来了。
 
-不变式 2（区间不重叠）
-    时间区间重叠只能在事务里串行判定。READ COMMITTED 隔离级别下，
-    两个并发事务可以各自查到「没冲突」然后双双写入 —— 这就是典型的
-    check-then-act 漏判。因此下单前必须先取设备级锁，见 domain/booking.py。
+不变式 2（区间不重叠）★
+    同一设备的任意两条有效预约，时间区间不得相交。
+    **这条不变式不能靠 (equipment_id, date, start_time) 唯一索引实现** ——
+    ``13:00-15:00`` 与 ``14:00-16:00`` 开始时间不同，索引看不见它们重叠。
+    实测过：20 并发下这两条会双双写入（超卖）。
 
-两条不变式分别用「索引」与「锁」实现，都用并发测试真实打过。
+    正确做法是把「区间」拆成「不可再分的格」，让重叠变成**同一格被占两次**：
+    预约按 ``slot_granularity_minutes``（默认 30 分钟）展开成若干条
+    ``ReservationSlot``，唯一索引打在 ``(equipment_id, date, slot_index)`` 上。
+    这样任何形式的相交（部分重叠 / 包含 / 完全相同）都必然撞唯一索引，
+    且**与数据库种类无关** —— SQLite 与 PostgreSQL 行为一致。
+
+    为什么不用 PostgreSQL 的 ``EXCLUDE USING gist (..., tsrange(...) WITH &&)``：
+    那是 PG 上更优雅的解法，但 SQLite 没有等价物，本地开发就跑不起来。
+    占用表是「一次实现，两种库都对」的取舍，代价是多一张表。
 """
 
 from __future__ import annotations
@@ -155,6 +164,10 @@ class Reservation(Base):
 
     user: Mapped[User] = relationship(back_populates="reservations")
     equipment: Mapped[Equipment] = relationship(back_populates="reservations")
+    # 占位格：取消时删除，改期时重建。cascade 保证删预约不留孤儿格。
+    slots: Mapped[list["ReservationSlot"]] = relationship(
+        back_populates="reservation", cascade="all, delete-orphan"
+    )
 
     @property
     def slot_label(self) -> str:
@@ -166,3 +179,66 @@ class Reservation(Base):
     @property
     def is_active(self) -> bool:
         return self.status in ACTIVE_STATUSES
+
+
+# --------------------------------------------------------------------------
+# 时段占用格：把「区间不重叠」变成「同一格不被占两次」
+# --------------------------------------------------------------------------
+# 最小预约粒度（分钟）。必须与 config.slot_granularity_minutes 的默认值一致；
+# 单独在这里定义一份是因为 models 不该反向依赖 config（config 会被测试替换）。
+DEFAULT_SLOT_GRANULARITY_MINUTES = 30
+
+
+def slot_index_of(value: dt.time, granularity: int = DEFAULT_SLOT_GRANULARITY_MINUTES) -> int:
+    """把时间点映射成「当天第几格」，以 00:00 为原点。
+
+    ⚠️ 只有**对齐**的时间点（分钟数是 granularity 的整数倍）才是精确的。
+    未对齐的时间点会被向下取整，导致区间漏保护 ——
+    所以调用方必须先做对齐校验，见 domain/booking.py 的 ``_ensure_aligned``。
+    """
+    return (value.hour * 60 + value.minute) // granularity
+
+
+def is_aligned(value: dt.time, granularity: int = DEFAULT_SLOT_GRANULARITY_MINUTES) -> bool:
+    return (value.hour * 60 + value.minute) % granularity == 0
+
+
+def slot_indexes_for(
+    start: dt.time,
+    end: dt.time,
+    granularity: int = DEFAULT_SLOT_GRANULARITY_MINUTES,
+) -> list[int]:
+    """区间 [start, end) 覆盖的格索引。
+
+    刻意用**左闭右开**：14:00-16:00 与 16:00-18:00 首尾相接但不相交，
+    不该互相冲突。这是预约系统里最容易写错的一处边界。
+    """
+    return list(range(slot_index_of(start, granularity), slot_index_of(end, granularity)))
+
+
+class ReservationSlot(Base):
+    """一条预约所占的 30 分钟格。唯一索引是「区间不重叠」的**唯一**保证。
+
+    它是一张纯保护性的表：不参与业务展示，只为让数据库能独立判定重叠。
+    预约创建时按区间写入若干行，取消时删除；改期 = 先删旧格再写新格。
+
+    设计取舍见本模块 docstring「不变式 2」。
+    """
+
+    __tablename__ = "reservation_slots"
+    __table_args__ = (
+        # ★ 核心不变式：同一设备、同一天、同一格，全局只能被占一次。
+        # 任何形式的区间相交都会在这里撞车，与数据库种类无关。
+        Index("uq_equipment_slot", "equipment_id", "date", "slot_index", unique=True),
+        Index("ix_res_slot_reservation", "reservation_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    reservation_id: Mapped[int] = mapped_column(
+        ForeignKey("reservations.id", ondelete="CASCADE"), index=True
+    )
+    equipment_id: Mapped[int] = mapped_column(ForeignKey("equipment.id"), index=True)
+    date: Mapped[dt.date] = mapped_column(Date)
+    slot_index: Mapped[int] = mapped_column(Integer)
+
+    reservation: Mapped["Reservation"] = relationship(back_populates="slots")
