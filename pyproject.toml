@@ -1,0 +1,19 @@
+[project]
+name = "lab-booking-agent"
+version = "1.0.0"
+description = "带真实约束协商能力的智能实验室预约 Agent（FastAPI + LangGraph）"
+requires-python = ">=3.10"
+readme = "README.md"
+
+[tool.pytest.ini_options]
+# src 布局：让测试直接 import lagent，不必先安装
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

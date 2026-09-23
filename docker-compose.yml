@@ -1,0 +1,47 @@
+# ===========================================================================
+# 生产形态：PostgreSQL 16 + API
+#
+#   docker compose up --build     # api → http://127.0.0.1:8200
+#
+# 为什么这里用 PostgreSQL 而不是 SQLite：
+#   SQLite 的并发安全靠「部分唯一索引 + 忙等待」，够用但更像本地开发的兜底；
+#   PostgreSQL 下同样有唯一索引兜底，另外还能用 pg_advisory_xact_lock()
+#   对同一台设备做行级串行（见 src/lagent/domain/booking.py）。
+# ===========================================================================
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lab
+      POSTGRES_PASSWORD: lab
+      POSTGRES_DB: lab
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      # api 会依赖这个健康检查：库没就绪就启动会直接建表失败
+      test: ["CMD-SHELL", "pg_isready -U lab -d lab"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      LAB_HOST: 0.0.0.0
+      LAB_PORT: "8200"
+      LAB_DATABASE_URL: postgresql+asyncpg://lab:lab@db:5432/lab
+      # mock = 不联网、不需要 key，开箱即可演示
+      LAB_APP_MODE: mock
+      LAB_RETRIEVAL_BACKEND: bm25
+    ports:
+      - "8200:8200"
+    restart: unless-stopped
+
+volumes:
+  pgdata:

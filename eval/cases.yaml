@@ -1,0 +1,117 @@
+# 评测用例集
+# ---------------------------------------------------------------------------
+# 三档分开计分（意图 / 槽位 / 端到端），见 src/lagent/evaluation.py。
+# 用例里的日期一律用 date_offset（相对今天的天数），不用绝对日期 ——
+# 否则评测集会在特定日期后开始失败，而失败原因与代码无关。
+#
+# 依赖的种子数据（见 src/lagent/seed.py）：
+#   用户 1 = 张伟，只有「光谱」资质      → 约离心机必须被拒
+#   用户 2 = 李娜，资质齐全
+#   荧光光谱仪（max 4h，需资质）  在「明天」14:00-16:00 与 16:30-18:00 已被占
+# ---------------------------------------------------------------------------
+cases:
+  # ---- 意图 + 槽位 -------------------------------------------------------
+  - id: c01
+    message: 明天下午两点想用荧光光谱仪两小时
+    user: 2
+    expect_intent: create_reservation
+    expect_slots: {date_offset: 1, start: "14:00", end: "16:00", duration: 2, equipment_contains: 荧光光谱仪}
+    expect_outcome: proposals
+
+  - id: c02
+    message: 明天上午十点到十一点，紫外可见分光光度计
+    user: 2
+    expect_intent: create_reservation
+    expect_slots: {date_offset: 1, start: "10:00", end: "11:00", equipment_contains: 紫外可见分光光度计}
+    expect_outcome: booked
+
+  - id: c03
+    message: 明天上午九点想用 CO2 培养箱 3 小时
+    user: 2
+    expect_intent: create_reservation
+    expect_slots: {date_offset: 1, start: "09:00", end: "12:00", duration: 3, equipment_contains: CO2}
+    expect_outcome: booked
+
+  # ---- 资质拦截（代码层判定，绝不由模型裁决） ---------------------------
+  - id: c04
+    message: 明天下午三点想用高速离心机一小时
+    user: 1
+    expect_intent: create_reservation
+    expect_slots: {date_offset: 1, start: "15:00", end: "16:00", equipment_contains: 高速离心机}
+    expect_outcome: blocked
+
+  # ---- 缺槽位 → 追问 ----------------------------------------------------
+  - id: c05
+    message: 我想约个设备
+    user: 2
+    expect_intent: create_reservation
+    expect_outcome: ask
+
+  # ---- 多轮：先说不完整的，再补一句（验证跨轮合并） ---------------------
+  - id: c06
+    turns:
+      - 我想约荧光光谱仪
+      - 明天晚上八点，一小时
+    user: 2
+    expect_intent: create_reservation
+    expect_slots: {date_offset: 1, start: "20:00", end: "21:00", duration: 1}
+    expect_outcome: booked
+
+  # ---- 规范检索 ---------------------------------------------------------
+  - id: c07
+    message: 离心机使用有什么安全规范
+    user: 2
+    expect_intent: check_admission
+    expect_outcome: answer
+
+  - id: c08
+    message: 你好
+    user: 2
+    expect_intent: smalltalk
+    expect_outcome: smalltalk
+
+  # ---- 取消 -------------------------------------------------------------
+  - id: c09
+    message: 我要取消预约
+    user: 2
+    expect_intent: cancel_reservation
+    expect_outcome: answer
+
+  # ---- 周表达（下周三）+ 时间区间 ---------------------------------------
+  - id: c10
+    message: 下周三下午三点到五点，荧光光谱仪
+    user: 2
+    expect_intent: create_reservation
+    expect_slots: {start: "15:00", end: "17:00", equipment_contains: 荧光光谱仪}
+    expect_outcome: booked
+
+  # ---- 显式 24 小时制 + 冲突 --------------------------------------------
+  - id: c11
+    message: 明天 14:00-16:00 荧光光谱仪
+    user: 2
+    expect_intent: create_reservation
+    expect_slots: {date_offset: 1, start: "14:00", end: "16:00", equipment_contains: 荧光光谱仪}
+    expect_outcome: proposals
+
+  # ---- 超出单次上限 → 应当给「缩短时长」的替代，而不是直接拒绝 ---------
+  - id: c12
+    message: 明天上午九点到下午三点，高速离心机
+    user: 2
+    expect_intent: create_reservation
+    expect_slots: {date_offset: 1, start: "09:00", end: "15:00", duration: 6, equipment_contains: 高速离心机}
+    expect_outcome: proposals
+
+  # ---- 只说类别（不点名设备） -------------------------------------------
+  - id: c13
+    message: 明天下午两点想用光谱类设备两小时
+    user: 2
+    expect_intent: create_reservation
+    expect_slots: {date_offset: 1, start: "14:00", end: "16:00", category: 光谱}
+    expect_outcome: booked
+
+  - id: c14
+    message: 明天下午三点到五点，细胞培养类设备
+    user: 2
+    expect_intent: create_reservation
+    expect_slots: {date_offset: 1, start: "15:00", end: "17:00", category: 细胞培养}
+    expect_outcome: available

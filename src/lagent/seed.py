@@ -1,0 +1,132 @@
+"""种子数据：把「一个有真实约束、真实冲突」的实验室场景灌进库。
+
+刻意让数据本身携带冲突与权限差异，这样演示和评测才有意义：
+  * 张伟只有光谱类资质 → 预约离心机必须被拒（资质约束真的会拦）
+  * 李娜资质齐全 → 同样诉求能过
+  * 分析楼 301 的荧光光谱仪当天下午被占 → 触发协商而非「不可预约」
+  * 材料楼 412 周末不开放 → 触发「改日期」这一类放宽
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+
+from sqlalchemy import func, select
+
+from .clock import now_local
+from .db import init_db, session_scope
+from .models import (
+    Equipment,
+    Laboratory,
+    Reservation,
+    User,
+)
+
+LABS: list[dict] = [
+    {
+        "building": "分析楼", "floor": 3, "room": "301", "capacity": 6,
+        "open_hours": {"weekday": ["08:00", "22:00"], "weekend": ["09:00", "18:00"]},
+        "note": "光谱与色谱类设备集中在此，需刷卡进入",
+    },
+    {
+        "building": "生物楼", "floor": 2, "room": "205", "capacity": 4,
+        "open_hours": {"weekday": ["08:00", "20:00"], "weekend": ["10:00", "16:00"]},
+        "note": "细胞培养专用，进入前须更换专用鞋套",
+    },
+    {
+        "building": "材料楼", "floor": 4, "room": "412", "capacity": 2,
+        "open_hours": {"weekday": ["09:00", "18:00"], "weekend": ["09:00", "18:00"]},
+        "note": "高速离心机专用间，需两人同时在场",
+    },
+]
+
+EQUIPMENT: list[dict] = [
+    {"lab": 0, "name": "荧光光谱仪", "model": "F-7000", "code": "SPEC-F7000",
+     "category": "光谱", "max_hours": 4, "requires_training": True},
+    {"lab": 0, "name": "紫外可见分光光度计", "model": "UV-1900", "code": "SPEC-UV1900",
+     "category": "光谱", "max_hours": 4, "requires_training": False},
+    {"lab": 0, "name": "高效液相色谱仪", "model": "LC-2030", "code": "CHRO-LC2030",
+     "category": "色谱", "max_hours": 6, "requires_training": True},
+    {"lab": 1, "name": "CO2 培养箱", "model": "MCO-170", "code": "CELL-CO2170",
+     "category": "细胞培养", "max_hours": 6, "requires_training": True},
+    {"lab": 1, "name": "生物安全柜", "model": "BSC-1300IIA2", "code": "CELL-BSC1300",
+     "category": "细胞培养", "max_hours": 4, "requires_training": True},
+    {"lab": 2, "name": "高速离心机", "model": "CR-21N", "code": "CENT-CR21N",
+     "category": "离心", "max_hours": 2, "requires_training": True},
+]
+
+USERS: list[dict] = [
+    {"username": "张伟", "email": "zhangwei@example.com", "role": "user", "certs": ["光谱"]},
+    {"username": "李娜", "email": "lina@example.com", "role": "user",
+     "certs": ["光谱", "色谱", "细胞培养", "离心"]},
+    {"username": "管理员", "email": "admin@example.com", "role": "admin",
+     "certs": ["光谱", "色谱", "细胞培养", "离心"]},
+]
+
+
+async def seed(force: bool = False) -> dict:
+    """建表并灌入种子数据。已存在且 force=False 时跳过。"""
+    await init_db()
+    info: dict = {"seeded": False, "reason": ""}
+
+    async with session_scope() as session:
+        count = (await session.execute(select(func.count()).select_from(Laboratory))).scalar() or 0
+        if count and not force:
+            info["reason"] = f"已有 {count} 个实验室，跳过。要重建请加 --force"
+            return info
+
+        if force:
+            for model in (Reservation, Equipment, Laboratory, User):
+                await session.execute(model.__table__.delete())
+
+        labs: list[Laboratory] = []
+        for row in LABS:
+            lab = Laboratory(**row)
+            session.add(lab)
+            labs.append(lab)
+        await session.flush()
+
+        equipment: list[Equipment] = []
+        for row in EQUIPMENT:
+            data = dict(row)
+            lab_index = data.pop("lab")
+            item = Equipment(lab_id=labs[lab_index].id, **data)
+            session.add(item)
+            equipment.append(item)
+        await session.flush()
+
+        users: list[User] = []
+        for row in USERS:
+            user = User(**row)
+            session.add(user)
+            users.append(user)
+        await session.flush()
+
+        # 造两个「已有预约」，让协商有东西可谈
+        today = now_local().date()
+        tomorrow = today + dt.timedelta(days=1)
+        demo: list[Reservation] = []
+        # 荧光光谱仪明天 14:00-16:00 已被张伟占用 → 李娜再约同一时段会触发协商
+        demo.append(Reservation(
+            user_id=users[0].id, equipment_id=equipment[0].id,
+            date=tomorrow, start_time=dt.time(14, 0), end_time=dt.time(16, 0),
+            status="confirmed", purpose="薄膜样品荧光测试",
+        ))
+        spectro = equipment[0]
+        demo.append(Reservation(
+            user_id=users[1].id, equipment_id=spectro.id,
+            date=tomorrow, start_time=dt.time(16, 30), end_time=dt.time(18, 0),
+            status="confirmed", purpose="量子点表征",
+        ))
+        for row in demo:
+            session.add(row)
+
+        info.update({
+            "seeded": True,
+            "labs": len(labs),
+            "equipment": len(equipment),
+            "users": len(users),
+            "reservations": len(demo),
+            "demo_date": tomorrow.isoformat(),
+        })
+    return info

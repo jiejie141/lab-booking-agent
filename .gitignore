@@ -1,0 +1,24 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- 本地数据 ----
+# 开发库与 SQLite 的 WAL 伴生文件：属于运行态，不入库
+*.db
+*.db-shm
+*.db-wal
+
+# ---- 本地配置（含密钥） ----
+.env
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

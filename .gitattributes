@@ -1,0 +1,12 @@
+# 统一换行：源码 LF，Windows 批处理 CRLF。
+# .cmd/.bat 如果用 LF 换行，cmd.exe 解析多行块（if/for）时会出问题，
+# 所以这里显式钉死，别指望 core.autocrlf 的默认行为。
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制
+*.png binary
+*.jpg binary
+*.pdf binary
