@@ -361,7 +361,7 @@ if not isinstance(payload.get("exp"), int):       # 缺 exp = 永久凭证
 ## 验证
 
 ```bash
-pytest -q                       # 314 passed
+pytest -q                       # 322 passed
 python main.py eval             # 14/14（mock 模型）
 python main.py loadtest -c 40 -r 3
 python scripts/overlap_race.py  # 3/3
@@ -369,7 +369,7 @@ python scripts/smoke_http.py    # 39/39（真实 uvicorn 进程）
 ```
 
 ```
-pytest:            314 passed
+pytest:            322 passed
 评测报告:           意图准确率 100.0% · 槽位准确率 100.0% · 端到端通过率 100.0%（14/14）
 并发压测:           3 轮 × 40 并发，每轮恰好 1 成功
 区间重叠竞态:        3/3 未超卖
