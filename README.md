@@ -182,7 +182,7 @@ Agent：这个需求不是换个时间能解决的：缺少「离心」准入资
 ## 验证
 
 ```bash
-pytest -q          # 191 passed
+pytest -q          # 195 passed
 python main.py eval
 ```
 
