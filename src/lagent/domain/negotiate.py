@@ -26,7 +26,7 @@ from collections.abc import Sequence
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..clock import minutes_between, overlaps
+from ..clock import minutes_between
 from ..models import User
 from ..schemas import (
     ConstraintCheck,
@@ -50,6 +50,13 @@ from .availability import (
 
 # 阶梯尝试的日期偏移，按优先级排列；0 是同一天。
 DATE_OFFSETS: tuple[int, ...] = (0, 1, -1, 2)
+
+
+def _require_date(req: Requirement) -> dt.date:
+    """协商阶段必须有具体日期；进入阶梯前已守卫，这里把不变量写实。"""
+    if req.date is None:
+        raise ValueError("协商阶段必须已有具体日期")
+    return req.date
 
 
 def _add_minutes(value: dt.time, minutes: int) -> dt.time:
@@ -315,7 +322,8 @@ def _place_with_relaxation(
     tier: str,
 ) -> list[tuple[dt.time, dt.time, list[str]]]:
     """按阶梯级别放宽并落位，返回 (开始, 结束, 放宽说明)。"""
-    todays = reservations.get((ev.equipment.id, req.date), [])
+    date_ = _require_date(req)
+    todays = reservations.get((ev.equipment.id, date_), [])
     checks = evaluate(ev, user, req, todays, now=None)
     blocking = [c for c in summarize_failures(checks) if c.name != "conflict"]
     if tier == "shorten":
@@ -327,7 +335,7 @@ def _place_with_relaxation(
     if blocking:
         return []
 
-    window = open_window(ev.lab, req.date)
+    window = open_window(ev.lab, date_)
     free = free_windows(window, busy_intervals(todays))
     if not free:
         return []
@@ -380,7 +388,7 @@ def _place_with_relaxation(
         return results
 
     # switch_equipment / switch_lab：时间照原诉求试，不行就退化为「挪到当天最早可用」
-    original = [
+    original: list[tuple[dt.time, dt.time, list[str]]] = [
         (start, end, [])
         for start, end in place_slots(free, req, limit)
     ]
@@ -462,8 +470,9 @@ def _checks_for_best(
     now: dt.datetime | None,
 ) -> list[ConstraintCheck]:
     """挑一台最接近诉求的设备，把它的约束判定摊开给用户看。"""
+    date_ = _require_date(req)
     probe = targeted[0]
-    todays = reservations.get((probe.equipment.id, req.date), [])
+    todays = reservations.get((probe.equipment.id, date_), [])
     return evaluate(probe, user, req, todays, now=now)
 
 
@@ -477,9 +486,10 @@ def _blockers_of(
     now: dt.datetime | None,
 ) -> list[str]:
     """汇总「为什么原方案不行」，去重后按出现顺序返回。"""
+    date_ = _require_date(req)
     seen: list[str] = []
     for ev in targeted:
-        todays = reservations.get((ev.equipment.id, req.date), [])
+        todays = reservations.get((ev.equipment.id, date_), [])
         for check in summarize_failures(evaluate(ev, user, req, todays, now=now)):
             text = check.detail
             if text not in seen:

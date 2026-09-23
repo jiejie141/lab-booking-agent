@@ -36,12 +36,14 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+from typing import cast
 
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import CursorResult, delete, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from ..clock import minutes_between, now_local, overlaps
 from ..config import get_settings
 from ..db import session_scope
 from ..models import (
@@ -56,7 +58,6 @@ from ..models import (
     slot_indexes_for,
 )
 from ..schemas import BookingOutcome, ReservationOut
-from ..clock import minutes_between, now_local, overlaps
 
 
 # --------------------------------------------------------------------------
@@ -134,8 +135,11 @@ async def attach_slots(
 
 async def release_slots(session: AsyncSession, reservation_id: int) -> int:
     """释放一条预约占用的全部格（取消 / 改期时调用）。返回释放的格数。"""
-    result = await session.execute(
-        delete(ReservationSlot).where(ReservationSlot.reservation_id == reservation_id)
+    result = cast(
+        CursorResult,
+        await session.execute(
+            delete(ReservationSlot).where(ReservationSlot.reservation_id == reservation_id)
+        ),
     )
     return result.rowcount or 0
 
@@ -390,7 +394,7 @@ async def cancel_reservation(
                     updated_at=now_local(),
                 )
             )
-            result = await session.execute(stmt)
+            result = cast(CursorResult, await session.execute(stmt))
             if result.rowcount == 0:
                 # 版本不匹配 = 有并发修改；重新读一次版本再试
                 continue

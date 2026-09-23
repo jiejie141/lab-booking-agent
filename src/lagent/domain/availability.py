@@ -16,9 +16,9 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-import datetime as dt
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -202,9 +202,7 @@ def matches_target(ev: EquipmentView, req: Requirement) -> bool:
         name = ev.equipment.name.replace(" ", "")
         if want not in name and name not in want:
             return False
-    if cur.category and cur.category != ev.equipment.category:
-        return False
-    return True
+    return not (cur.category and cur.category != ev.equipment.category)
 
 
 def evaluate(
@@ -305,15 +303,14 @@ def evaluate(
     )
 
     # 7. 是否已过期（只提示，不阻断判定本身）
-    if now and cur.date and cur.start:
-        if dt.datetime.combine(cur.date, cur.start) <= now:
-            checks.append(
-                ConstraintCheck(
-                    name="conflict",
-                    passed=False,
-                    detail="该时间点已经过去，请改约之后的时间",
-                )
+    if now and cur.date and cur.start and dt.datetime.combine(cur.date, cur.start) <= now:
+        checks.append(
+            ConstraintCheck(
+                name="conflict",
+                passed=False,
+                detail="该时间点已经过去，请改约之后的时间",
             )
+        )
     return checks
 
 

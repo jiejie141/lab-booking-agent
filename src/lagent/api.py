@@ -38,7 +38,7 @@ from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
@@ -531,7 +531,7 @@ async def chat(
     req = req.model_copy(update={"user_id": user.user_id})
     try:
         response = await agent.ainvoke(req)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         # 模型侧异常不该变成 500 堆栈；明确告诉前端失败了，并由前端切到表单
         raise HTTPException(status_code=502, detail=f"Agent 执行失败：{exc}") from exc
 
@@ -585,7 +585,7 @@ async def retrieve(
 # 控制台
 # ==========================================================================
 @router.get("/")
-async def index() -> FileResponse:
+async def index() -> Response:
     target = WEB_DIR / "index.html"
     if not target.exists():
         return JSONResponse({"detail": "web/index.html 不存在"}, status_code=404)

@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
-
-import pytest
+from typing import cast
 
 from lagent.agent.graph import DEGRADED_REPLY, LabBookingAgent
 from lagent.agent.state import SessionStore, pick_proposal
@@ -100,7 +99,7 @@ class TestSelection:
         first = await ask(agent, "明天下午两点想用荧光光谱仪两小时", session="pick")
         assert first.proposals
 
-        second = await ask(agent, f"第 1 个", session="pick")
+        second = await ask(agent, "第 1 个", session="pick")
         assert second.booking is not None and second.booking.ok
         assert second.booking.reservation.equipment_name == first.proposals[0].equipment_name
 
@@ -113,8 +112,8 @@ class TestSelection:
             Proposal(kind="shift", equipment_id=2, equipment_name="B", lab_label="L",
                      date=TOMORROW, start=dt.time(12, 0), end=dt.time(13, 0), hours=1),
         ]
-        assert pick_proposal("第 2 个", props).equipment_id == 2
-        assert pick_proposal("2", props).equipment_id == 2
+        assert cast(Proposal, pick_proposal("第 2 个", props)).equipment_id == 2
+        assert cast(Proposal, pick_proposal("2", props)).equipment_id == 2
         assert pick_proposal("算了", props) is None
         assert pick_proposal("第 9 个", props) is None
         assert pick_proposal("好", props) is None

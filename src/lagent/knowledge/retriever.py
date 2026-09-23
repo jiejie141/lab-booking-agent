@@ -160,7 +160,7 @@ class ChromaVectorIndex(Retriever):
         self._collection = None
         self.last_error: str | None = None
         try:
-            import chromadb  # noqa: PLC0415
+            import chromadb
 
             client = chromadb.EphemeralClient()
             self._collection = client.create_collection("lab_safety_rules")
@@ -168,7 +168,7 @@ class ChromaVectorIndex(Retriever):
                 ids=[c.fingerprint for c in chunks],
                 documents=[c.body() for c in chunks],
             )
-        except Exception as exc:  # pragma: no cover - 取决于环境是否装了 chromadb
+        except Exception as exc:  # noqa: BLE001  # pragma: no cover - 取决于环境是否装了 chromadb
             self.last_error = f"{type(exc).__name__}: {exc}"
             self._collection = None
 
@@ -181,7 +181,7 @@ class ChromaVectorIndex(Retriever):
         by_fp = {c.fingerprint: c for c in self.chunks}
         try:
             raw = self._collection.query(query_texts=[query], n_results=k)
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:  # noqa: BLE001  # pragma: no cover
             # 保住 last_error，而不是静默返回空 —— 空结果与「检索坏了」是两件事
             self.last_error = f"{type(exc).__name__}: {exc}"
             return []

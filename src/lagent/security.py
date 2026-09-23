@@ -134,6 +134,10 @@ def verify_password(password: str, stored: str) -> bool:
 # ---------------------------------------------------------------------------
 # JWT（HS256）
 # ---------------------------------------------------------------------------
+def _compact_json(obj: object) -> str:
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
 def create_access_token(
     *,
     user_id: int,
@@ -157,10 +161,9 @@ def create_access_token(
         "exp": issued + ttl,
     }
     # 紧凑序列化：不带空格，与 JWT 惯例一致（也避免 base64 里出现意外字符）
-    dumping = {"ensure_ascii": False, "separators": (",", ":"), "sort_keys": True}
     signing_input = ".".join((
-        _b64u_encode(json.dumps(header, **dumping).encode("utf-8")),
-        _b64u_encode(json.dumps(payload, **dumping).encode("utf-8")),
+        _b64u_encode(_compact_json(header).encode("utf-8")),
+        _b64u_encode(_compact_json(payload).encode("utf-8")),
     ))
     signature = hmac.new(
         settings.jwt_secret.encode("utf-8"), signing_input.encode("ascii"), hashlib.sha256

@@ -113,43 +113,46 @@ def _check_slots(req: Requirement, expect: dict, today: dt.date) -> tuple[bool, 
     ok = True
 
     if "date_offset" in expect:
-        want = today + dt.timedelta(days=int(expect["date_offset"]))
-        if cur.date != want:
+        want_date = today + dt.timedelta(days=int(expect["date_offset"]))
+        if cur.date != want_date:
             ok = False
-            detail["date_expected"] = want.isoformat()
+            detail["date_expected"] = want_date.isoformat()
     if "date" in expect:
-        want = dt.date.fromisoformat(str(expect["date"]))
-        if cur.date != want:
+        want_date = dt.date.fromisoformat(str(expect["date"]))
+        if cur.date != want_date:
             ok = False
-            detail["date_expected"] = want.isoformat()
+            detail["date_expected"] = want_date.isoformat()
     if "start" in expect:
-        want = parse_time(str(expect["start"]))
-        if cur.start != want:
+        want_time = parse_time(str(expect["start"]))
+        if cur.start != want_time:
             ok = False
-            detail["start_expected"] = want.strftime("%H:%M")
+            detail["start_expected"] = want_time.strftime("%H:%M")
     if "end" in expect:
-        want = parse_time(str(expect["end"]))
-        if cur.end != want:
+        want_time = parse_time(str(expect["end"]))
+        if cur.end != want_time:
             ok = False
-            detail["end_expected"] = want.strftime("%H:%M")
+            detail["end_expected"] = want_time.strftime("%H:%M")
     if "duration" in expect:
-        want = float(expect["duration"])
-        if cur.duration_hours is None or abs(cur.duration_hours - want) > 1e-6:
+        want_hours = float(expect["duration"])
+        if cur.duration_hours is None or abs(cur.duration_hours - want_hours) > 1e-6:
             ok = False
-            detail["duration_expected"] = want
+            detail["duration_expected"] = want_hours
     if "equipment_contains" in expect:
         needle = str(expect["equipment_contains"])
         got = cur.equipment_name or ""
-        if needle not in got and got not in needle:
-            # 名字没抽到但类别抽到了也算通过（用户可能只说类别）
-            if not (cur.category and needle[:2] in str(cur.category)):
-                ok = False
-                detail["equipment_expected"] = needle
-    if "category" in expect:
-        want = str(expect["category"])
-        if want != (cur.category or ""):
+        # 名字没抽到但类别抽到了也算通过（用户可能只说类别）
+        if (
+            needle not in got
+            and got not in needle
+            and not (cur.category and needle[:2] in str(cur.category))
+        ):
             ok = False
-            detail["category_expected"] = want
+            detail["equipment_expected"] = needle
+    if "category" in expect:
+        want_category = str(expect["category"])
+        if want_category != (cur.category or ""):
+            ok = False
+            detail["category_expected"] = want_category
     return ok, detail
 
 
@@ -225,6 +228,8 @@ async def run_eval(cases_path: str | Path | None = None, *, verbose: bool = Fals
             resp = await agent.ainvoke(
                 ChatRequest(message=turn, user_id=user_id, session_id=session)
             )
+        if resp is None:
+            raise ValueError(f"用例 {case_id} 没有任何对话轮次，无法评测")
         outcome = _classify_outcome(resp)
         expect_outcome = case.get("expect_outcome")
         e2e_ok = True

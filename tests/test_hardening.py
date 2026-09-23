@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import contextlib
 import json
+from typing import Any, cast
 
 import httpx
-
 from conftest import auth_header, login
 
 
@@ -28,15 +28,15 @@ async def app_client(monkeypatch, **env):
     for key, value in env.items():
         monkeypatch.setenv(f"LAB_{key.upper()}", str(value))
 
-    from lagent.config import reset_settings_cache
     from lagent.api import create_app
+    from lagent.config import reset_settings_cache
 
     reset_settings_cache()
     application = create_app()
     async with application.router.lifespan_context(application):
         transport = httpx.ASGITransport(app=application)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            client.app = application
+            cast(Any, client).app = application
             yield client
     reset_settings_cache()
 
@@ -88,15 +88,15 @@ class TestBodySizeLimitMiddlewareDirect:
 
         reached = {"inner": False}
 
-        async def inner(scope, receive, send):  # noqa: ANN001
+        async def inner(scope, receive, send):
             reached["inner"] = True
 
         sent: list[dict] = []
 
-        async def send(message):  # noqa: ANN001
+        async def send(message):
             sent.append(message)
 
-        async def receive():  # noqa: ANN001
+        async def receive():
             return {"type": "http.request", "body": b"", "more_body": False}
 
         middleware = BodySizeLimitMiddleware(inner, max_bytes=max_bytes)

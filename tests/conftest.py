@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -95,7 +96,7 @@ async def http(isolated_db):
     async with application.router.lifespan_context(application):
         transport = httpx.ASGITransport(app=application)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            client.app = application  # 便于测试直接改 app.state
+            cast(Any, client).app = application  # 便于测试直接改 app.state
             yield client
 
 

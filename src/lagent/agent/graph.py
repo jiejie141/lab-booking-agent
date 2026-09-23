@@ -36,6 +36,7 @@ from ..schemas import (
     ChatRequest,
     ChatResponse,
     NegotiationResult,
+    Proposal,
     Requirement,
     TraceStep,
 )
@@ -61,7 +62,7 @@ def merge_requirements(prev: Requirement | None, new: Requirement) -> Requiremen
         if value in (None, "", 0):
             value = getattr(prev, field, None)
         merged[field] = value
-    return Requirement(**merged).normalized()
+    return Requirement.model_validate(merged).normalized()
 
 
 class LabBookingAgent:
@@ -78,6 +79,13 @@ class LabBookingAgent:
         self.store = store if store is not None else STORE
         self.now_provider = now_provider
         self.graph = self._build()
+
+    @property
+    def _llm(self) -> LLMClient:
+        """图节点只在模型可用时被走到（ainvoke 会先短路降级），这里把不变量写实。"""
+        if self.client is None:  # pragma: no cover - 由 ainvoke 的降级短路保证
+            raise RuntimeError("模型客户端未配置")
+        return self.client
 
     # ------------------------------------------------------------------
     # 图装配
@@ -158,11 +166,11 @@ class LabBookingAgent:
                 },
             )
 
-        intent = await self.client.classify_intent(state["message"])
+        intent = await self._llm.classify_intent(state["message"])
         # 只有上一轮在「等用户补槽位」时才跨轮合并；否则新请求应当独立成立，
         # 不能把上一轮的设备/时间带进来（否则「我想约个设备」会直接跳到出方案）。
         prev = self.store.requirement(session_id) if self.store.awaiting(session_id) else None
-        extracted = await self.client.extract_requirement(
+        extracted = await self._llm.extract_requirement(
             state["message"], history=prev.summary() if prev else ""
         )
         merged = merge_requirements(prev, extracted)
@@ -198,7 +206,7 @@ class LabBookingAgent:
         if not missing:
             return {"missing": [], "stage": "slots_ready"}
 
-        reply = await self.client.ask_missing(missing, requirement)
+        reply = await self._llm.ask_missing(missing, requirement)
         # 标记「在等用户补槽位」，下一轮才允许把这次已知的信息合并进来
         self.store.save(state.get("session_id", "default"), [], requirement, awaiting=True)
         return self._trace(
@@ -264,7 +272,7 @@ class LabBookingAgent:
         #
         # 点选路径用「字段在不在」判定，而不是看 stage 等于什么：
         # accept_* 字段是请求里带的既成事实，比一个可能被中途改写的字符串可靠。
-        target = _from_accept(state)
+        target: _Target | Proposal | None = _from_accept(state)
         if target is None and state.get("selected_index"):
             target = _from_selection(state, self.store)
         if target is None and intent == "create_reservation" and satisfied and len(proposals) == 1:
@@ -338,7 +346,7 @@ class LabBookingAgent:
             "booking": state.get("booking"),
             "citations": state.get("citations") or [],
         }
-        reply = await self.client.compose(ctx)
+        reply = await self._llm.compose(ctx)
         return self._trace("compose", started, {"reply": reply, "stage": "composed"})
 
     # ------------------------------------------------------------------
@@ -374,7 +382,7 @@ class LabBookingAgent:
         intent = final.get("intent")
         return ChatResponse(
             reply=final.get("reply", ""),
-            intent=intent,  # type: ignore[arg-type]
+            intent=intent,
             stage=final.get("stage", ""),
             missing=list(final.get("missing") or []),
             proposals=final.get("proposals") or [],
@@ -416,7 +424,7 @@ def _describe(update: dict[str, Any]) -> str:
     return f"阶段 {stage}"
 
 
-def _from_selection(state: AgentState, store: SessionStore):
+def _from_selection(state: AgentState, store: SessionStore) -> Proposal | None:
     """按序号取出上一轮列出的某个方案。
 
     注意 store 必须由调用方传入：早期版本这里直接读了模块级单例 STORE，

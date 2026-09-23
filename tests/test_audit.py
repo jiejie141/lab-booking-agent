@@ -9,8 +9,8 @@
 
 from __future__ import annotations
 
+from lagent.audit import ACTION_BOOK, ACTION_CANCEL, ACTION_LOGIN, ACTION_LOGIN_FAILED
 from lagent.models import AuditLog
-from lagent.audit import ACTION_LOGIN, ACTION_LOGIN_FAILED, ACTION_CANCEL, ACTION_BOOK
 
 
 async def _logs(http, admin_headers, **params):

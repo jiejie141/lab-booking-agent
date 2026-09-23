@@ -89,7 +89,7 @@ class User(Base):
     # 注意这是「代码层判定」的输入，绝不允许让大模型自己决定用户有没有资质。
     certs: Mapped[list] = mapped_column(JSON, default=list)
 
-    reservations: Mapped[list["Reservation"]] = relationship(back_populates="user")
+    reservations: Mapped[list[Reservation]] = relationship(back_populates="user")
 
 
 class Laboratory(Base):
@@ -104,7 +104,7 @@ class Laboratory(Base):
     open_hours: Mapped[dict] = mapped_column(JSON, default=dict)
     note: Mapped[str] = mapped_column(Text, default="")
 
-    equipment: Mapped[list["Equipment"]] = relationship(back_populates="lab")
+    equipment: Mapped[list[Equipment]] = relationship(back_populates="lab")
 
     @property
     def label(self) -> str:
@@ -127,7 +127,7 @@ class Equipment(Base):
     requires_training: Mapped[bool] = mapped_column(Boolean, default=False)
 
     lab: Mapped[Laboratory] = relationship(back_populates="equipment")
-    reservations: Mapped[list["Reservation"]] = relationship(back_populates="equipment")
+    reservations: Mapped[list[Reservation]] = relationship(back_populates="equipment")
 
 
 class Reservation(Base):
@@ -169,7 +169,7 @@ class Reservation(Base):
     user: Mapped[User] = relationship(back_populates="reservations")
     equipment: Mapped[Equipment] = relationship(back_populates="reservations")
     # 占位格：取消时删除，改期时重建。cascade 保证删预约不留孤儿格。
-    slots: Mapped[list["ReservationSlot"]] = relationship(
+    slots: Mapped[list[ReservationSlot]] = relationship(
         back_populates="reservation", cascade="all, delete-orphan"
     )
 
@@ -245,7 +245,7 @@ class ReservationSlot(Base):
     date: Mapped[dt.date] = mapped_column(Date)
     slot_index: Mapped[int] = mapped_column(Integer)
 
-    reservation: Mapped["Reservation"] = relationship(back_populates="slots")
+    reservation: Mapped[Reservation] = relationship(back_populates="slots")
 
 
 # --------------------------------------------------------------------------

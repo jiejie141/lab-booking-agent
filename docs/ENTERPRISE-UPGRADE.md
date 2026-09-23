@@ -17,6 +17,60 @@
 
 ---
 
+## 实施进度
+
+> 上面的评估基准是 `b132bbf`。**下面是之后的实际实施记录**，包含与原方案的差异
+> —— 差异比「照做了」更值得说，因为它解释了当时的取舍。
+
+| 项 | 状态 | commit | 验收证据 |
+|---|---|---|---|
+| P0-1 区间不变式下沉 | ✅ 已完成 | `7000e0b` | `overlap_race.py` **3/3**（修复前 1/3）；`loadtest -c 40 -r 3` 每轮恰好 1 成功；已写成 pytest 回归断言 |
+| P0-2 认证与授权 | ✅ 已完成 | `9c8207f` | 无 token 写 → 401；A 读不到 B（query 参数绕不过）；普通用户调管理端点 → 403 |
+| P0-3 边界加固与审计 | ✅ 已完成 | `33da4c8` | 最小渗透清单 **39/39**（真实 uvicorn 进程），含 413 / 411 / 422 / 429 / CORS / 审计留痕 |
+| P1 交付项（CI） | ✅ 已完成 | 本次 | `.github/workflows/ci.yml`：ruff + mypy + pytest（3.10/3.13 矩阵）、真实进程冒烟、docker build |
+
+### 与原方案的差异（为什么没照抄）
+
+- **P0-2 不引 `pyjwt` / `passlib[bcrypt]`，改用标准库自实现。**
+  `hashlib.scrypt` + 手写 HS256（就是 `base64url(hmac-sha256(...))`，无算法复杂度）。
+  理由有三条：bcrypt 在 Windows 上要 MSVC 工具链才能装；少两个依赖就少两条供应链；
+  而这两个函数的边界很清楚，接口刻意与 pyjwt 对齐（`create_access_token` /
+  `decode_access_token`），日后要换成成熟库只是替换两个函数体。
+  **代价**：自实现意味着要自己把安全细节补全，已覆盖强制 `alg == HS256`（挡 `alg=none`）、
+  `hmac.compare_digest` 比对（时序安全）、`exp` 缺失即拒（不签「永久凭证」）、
+  未知账号与错口令返回**完全相同**的 401（防账号枚举）。
+- **P0-3 不引 `slowapi`，用进程内滑动窗口。** 按**用户**而非按 IP 限流 ——
+  校园网出口 IP 天然共享，按 IP 会让同校用户互相误伤。
+  **代价已写进 README「已知限制」**：单进程、重启清零、多副本下等于配额乘以副本数，
+  生产要换 Redis 计数器。这个取舍是故意的 —— 与其上一个要引 Redis 的「假完整」，
+  不如把边界写清楚。
+- **P0-1 只做了方案 B（占用表），没上方案 A（PG `btree_gist` 排他约束）。**
+  A 只能在 PostgreSQL 上跑，本地开发与 CI 都验证不到。B 是「任何重叠都必然撞唯一索引」，
+  与数据库无关，可移植且可测试。`acquire_equipment_lock` 保留但**改掉了误导性注释**：
+  它现在是显式的性能优化（PG 下按设备做事务级串行），并注明**不承担正确性职责**。
+
+### 本次更新实测（全部命令的真实输出）
+
+```
+pytest -q                            314 passed
+python main.py eval                  14/14（mock 模型）
+python main.py loadtest -c 40 -r 3   3 轮 × 40 并发，每轮恰好 1 成功
+python scripts/overlap_race.py       3/3
+python scripts/smoke_http.py         39/39（真实 uvicorn 进程）
+ruff check .                         All checks passed
+mypy                                 Success: no issues found in 42 source files
+```
+
+### 仍然没做的（明确列出，不含糊）
+
+- **密钥托管**：`LAB_JWT_SECRET` 仍走 `.env`。未接 Docker secrets / 云 KMS。
+  目前只做到「用默认密钥时启动打告警」。
+- **P1 的其余各项**：Alembic 迁移、LangGraph checkpointer、Redis（会话与限流）、
+  结构化日志 / `/metrics` / request_id 贯穿、幂等键、`/api/v1` 前缀 —— 一条都没做。
+- **真实模型评测**：14/14 是 mock 模型下的链路自洽，不是模型准确率（README 已声明）。
+
+---
+
 ## 一、技术栈盘点：完整性与主流性
 
 ### 1.1 现有选型（实测版本）
@@ -173,6 +227,9 @@ API 无版本化。
 P0 不装任何新中间件就能做完——它全是「把已有的说法补成真的」。
 
 ### P0 · 正确性与安全底线（必做，性价比最高）
+
+> **实施状态：三项均已完成**（`7000e0b` / `9c8207f` / `33da4c8`），
+> 差异与验收证据见上方 §实施进度。
 
 #### P0-1 把「区间不重叠」真正下沉到数据库
 

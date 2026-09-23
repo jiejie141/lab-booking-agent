@@ -70,7 +70,7 @@ class Requirement(BaseModel):
 
     # ---- 归一化与缺失判定 ------------------------------------------------
 
-    def normalized(self) -> "Requirement":
+    def normalized(self) -> Requirement:
         """把「时长」与「起止时间」补齐成一致形态。"""
         start, end, duration = self.start, self.end, self.duration_hours
         if start and not end and duration:

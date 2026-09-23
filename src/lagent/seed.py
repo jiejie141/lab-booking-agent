@@ -14,8 +14,9 @@
 from __future__ import annotations
 
 import datetime as dt
+from typing import cast
 
-from sqlalchemy import func, select
+from sqlalchemy import TableClause, delete, func, select
 
 from .clock import now_local
 from .db import init_db, session_scope
@@ -105,7 +106,7 @@ async def seed(force: bool = False) -> dict:
             # SQLite 已开 PRAGMA foreign_keys=ON，顺序错了会直接被外键拦下。
             # 审计表没有外键（actor_id 可能为空），放最前面最省心。
             for model in (AuditLog, ReservationSlot, Reservation, Equipment, Laboratory, User):
-                await session.execute(model.__table__.delete())
+                await session.execute(delete(cast(TableClause, model.__table__)))
 
         labs: list[Laboratory] = []
         for row in LABS:
@@ -149,13 +150,13 @@ async def seed(force: bool = False) -> dict:
             date=tomorrow, start_time=dt.time(16, 30), end_time=dt.time(18, 0),
             status="confirmed", purpose="量子点表征",
         ))
-        for row in demo:
-            session.add(row)
+        for res in demo:
+            session.add(res)
         # 演示预约也要登记占用格 —— 否则它们不参与「区间不重叠」判定，
         # 演示数据本身就成了一个绕过不变式的后门。
         await session.flush()
-        for row in demo:
-            await attach_slots(session, row)
+        for res in demo:
+            await attach_slots(session, res)
 
         info.update({
             "seeded": True,

@@ -58,7 +58,7 @@ def _install_sqlite_pragmas(engine: AsyncEngine) -> None:
     """
 
     @event.listens_for(engine.sync_engine, "connect")
-    def _on_connect(dbapi_conn, _record):  # noqa: ANN001
+    def _on_connect(dbapi_conn, _record):
         cursor = dbapi_conn.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA busy_timeout=30000")

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+from typing import cast
 
 import pytest
 from sqlalchemy import func, select
@@ -17,6 +18,7 @@ from lagent.clock import now_local
 from lagent.db import session_scope
 from lagent.domain.booking import cancel_reservation, create_reservation, list_reservations
 from lagent.models import Reservation
+from lagent.schemas import ReservationOut
 
 # 紫外可见分光光度计：不需要资质、单次 4 小时、分析楼 301（工作日 08:00-22:00）
 EQUIPMENT_ID = 2
@@ -189,7 +191,7 @@ class TestWriteValidation:
         async with session_scope() as session:
             from lagent.models import Equipment
 
-            item = await session.get(Equipment, EQUIPMENT_ID)
+            item = cast(Equipment, await session.get(Equipment, EQUIPMENT_ID))
             item.status = "maintenance"
         outcome = await _book(2)
         assert not outcome.ok
@@ -201,7 +203,7 @@ class TestCancel:
         first = await _book(2)
         outcome = await cancel_reservation(reservation_id=first.reservation.id, user_id=2)
         assert outcome.ok
-        assert outcome.reservation.status == "cancelled"
+        assert cast(ReservationOut, outcome.reservation).status == "cancelled"
 
     async def test_cannot_cancel_others(self, isolated_db):
         first = await _book(2)
@@ -225,7 +227,7 @@ class TestCancel:
         outcome = await cancel_reservation(reservation_id=first.reservation.id, user_id=2)
         assert outcome.reservation is not None
         async with session_scope() as session:
-            row = await session.get(Reservation, first.reservation.id)
+            row = cast(Reservation, await session.get(Reservation, first.reservation.id))
             assert row.version == 2
 
     async def test_concurrent_cancel_only_one_succeeds(self, isolated_db):

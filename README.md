@@ -1,6 +1,7 @@
 # lab-booking-agent
 
-一个**带真实约束协商能力**的智能实验室预约 Agent。FastAPI + LangGraph + SQLAlchemy 2.0(async)。
+一个**带真实约束协商能力**的智能实验室预约 Agent。FastAPI + LangGraph + SQLAlchemy 2.0(async)，
+带 JWT 认证、RBAC、审计日志与边界加固。
 
 它不是「表单 + 让大模型抽几个字段」那种教学项目。差别只有一个，但很关键：
 
@@ -35,8 +36,17 @@ python main.py
 # 或双击 start-lab-booking-agent.cmd（Windows）
 ```
 
-打开 <http://127.0.0.1:8200> 就是控制台：左侧对话，右侧实验室/设备/预约，底部可试规范检索，
+打开 <http://127.0.0.1:8200> 会先看到**登录闸门**。演示账号：
+
+| 用户名 | 口令 | 角色 | 准入资质 | 能干什么 |
+|---|---|---|---|---|
+| 张伟 | `zhangwei@123` | user | 仅「光谱」 | 约离心机会被**资质约束**拦下 |
+| 李娜 | `lina@123` | user | 光谱/色谱/细胞培养/离心 | 资质齐全，能约到张伟约不到的设备 |
+| 管理员 | `admin@123` | admin | 全 | 额外可看**全量预约**、用户目录、审计流水 |
+
+登录后是控制台：左侧对话，右侧实验室/设备/预约/用户目录，可试规范检索，
 每一步的节点流转（parse → negotiate → book → compose）都实时画出来。
+**身份由登录决定，前端不再提供「切换身份」的下拉** —— 这是刻意的，见下文「认证与授权」。
 
 默认 `LAB_APP_MODE=mock`：**不联网、不需要 API Key**，全流程与评测集都能跑通。
 
@@ -48,6 +58,9 @@ python main.py chat "明天下午两点想用荧光光谱仪两小时" --user 2
 python main.py eval        # 跑评测集，量出意图与槽位准确率
 python main.py loadtest --concurrency 40 --rounds 3   # 并发抢坑压测
 python main.py tools       # 列出已注册的工具
+
+python scripts/overlap_race.py   # 区间重叠竞态复现（P0-1 的回归）
+python scripts/smoke_http.py     # 真实 uvicorn 进程上的冒烟 + 越权清单
 ```
 
 接入真实模型：`cp .env.example .env`，把 `LAB_APP_MODE` 改成 `live` 并填 `LAB_LLM_API_KEY`。
@@ -55,43 +68,85 @@ python main.py tools       # 列出已注册的工具
 
 ---
 
-## 三个真正花时间的地方
+## 五个真正花时间的地方
 
-### 1. 并发抢同一时段：把安全性压到数据库层
+### 1. 并发抢同一时段：把不变式压到数据库层（含一次自我推翻）
 
-两个人同时抢同一个坑，靠应用层「先查再写」是拦不住的 —— 查和写之间有窗口。
-这里做了三层：
+先说结论：**「并发安全」这句话，我一开始只对一种情形验证过，却当成了普遍结论。**
+这一节记录的是发现并修掉它的过程 —— 它比功能本身更值得读。
+
+#### 三层防线
 
 | 层 | 手段 | 作用 |
 |---|---|---|
-| 写前校验 | 领域层 `evaluate()` 六道约束 | 给出**可读的**拒绝理由，而不是抛约束异常 |
-| 数据库约束 | 部分唯一索引 `uq_res_active_slot(equipment_id, date, start_time) WHERE status IN ('pending','confirmed')` | 最后一道真兜底：重复写入直接失败 |
+| 写前校验 | 领域层六道约束 + 粒度对齐 | 给出**可读的**拒绝理由，而不是抛约束异常 |
+| 数据库约束 | `reservation_slots(equipment_id, date, slot_index)` 唯一索引 | ★ **唯一**的正确性保证 |
 | 重试 | 捕获 `IntegrityError` 后有限次重试 | 把「撞车」转成「稍后成功」，而不是把错误抛给用户 |
 
-PostgreSQL 下额外加 `pg_advisory_xact_lock(equipment_id)` 做行级串行；SQLite 下开 WAL + `busy_timeout`。
+#### 原先的设计错在哪
 
-**唯一的实证**是 `loadtest`：40 个并发请求抢同一个时段，期望恰好 1 个成功。
+唯一索引原本建在 `(equipment_id, date, start_time)` 上。它只能拦住**开始时间完全相同**的写入，
+而真正的业务不变式是「时间区间不重叠」：`13:00-15:00` 与 `14:00-16:00` 开始时间不同，索引看不见它们重叠。
+
+本该兜住这一层的第二道防线是 `acquire_equipment_lock()`（设备级锁 + 锁内复检）。
+**但它在 SQLite 上直接 `return`，什么也不做**，注释却写着「写事务天然互斥」：
+
+```python
+if dialect == "sqlite":
+    return "sqlite_write_lock"      # ← 不加锁
+```
+
+写事务确实互斥，**但这不构成保护**：两个事务可以各自先 `SELECT` 读到「无冲突」（读快照），
+再先后写入。互斥只保证「不会同时写」，没保证「不会分别写成功」——
+于是「锁内复检」退化成典型的 check-then-act。
+
+实测复现（`scripts/overlap_race.py`）：
 
 ```
-轮 1 [08:00-09:00] 成功 1 / 明确冲突 39 / 其他 0 / 异常 0 · 最大重试 0  ✓
+【同开始时间（对照组）】20 并发 · 09:00-11:00          ✓ 恰好 1 条
+【部分重叠·不同开始】  20 并发 · 13:00-15:00 / 14:00-16:00   ✗ 超卖 2 条
+【完全包含关系】      20 并发 · 15:00-17:00 / 15:30-16:00   ✗ 超卖 2 条
+```
+
+**为什么原来的压测没发现**：`main.py loadtest` 的 40 个并发用的是**同一个开始时间**，
+恰好走在唯一索引能覆盖的路径上。「并发安全」这个结论此前只对一种情形成立，却被当成了普遍结论。
+
+#### 改法：时段占用表
+
+把区间按 `slot_granularity_minutes`（默认 30 分钟）展开成若干条 `ReservationSlot`，
+唯一索引打在 `(equipment_id, date, slot_index)` 上 ——
+**任何形式的相交（完全相同 / 部分重叠 / 包含）都必然撞索引，且与数据库种类无关。**
+
+| | 方案 A：PG 排他约束 | 方案 B：时段占用表（采用） |
+|---|---|---|
+| 做法 | `btree_gist` + `EXCLUDE USING gist (..., tsrange(...) WITH &&)` | 新增占用格表 + `(equipment_id, date, slot_index)` 唯一索引 |
+| 效果 | 一次到位 | 任何重叠都撞唯一索引，**SQLite 与 PG 行为一致** |
+| 代价 | 仅 PG，SQLite 下本地跑不起来 | 多一张表；下单写 N 条格、取消时释放 |
+
+选 B 的理由不是「B 更好」，而是**本地开发库与生产库必须表现一致**：
+A 方案只能在生产 PG 上生效，而 bug 恰恰是在本地「看起来没问题」时溜进去的。
+
+三个必须做对的细节：
+
+- **左闭右开**：`14:00-16:00` 与 `16:00-18:00` 首尾相接但不相交，必须都能约。
+- **粒度对齐校验**：未对齐的时间点（如 `10:20`）在算格索引时会被向下取整，导致区间**漏保护**。
+  与其静默漏保护，不如显式拒绝并说明原因。
+- **诚实标注锁的作用**：`acquire_equipment_lock()` 现在返回 `"none(sqlite)"`，
+  并在 docstring 里写明它**不承担正确性职责**，只是减少重试次数的优化。
+
+#### 修复后的实证
+
+```
+$ python scripts/overlap_race.py
+结果：3/3 项通过            （修复前 1/3）
+
+$ python main.py loadtest --concurrency 40 --rounds 3
+轮 1 [08:00-09:00] 成功 1 / 明确冲突 39 / 其他 0 / 异常 0 · 最大重试 1  ✓
 轮 2 [09:00-10:00] 成功 1 / 明确冲突 39 / 其他 0 / 异常 0 · 最大重试 1  ✓
 轮 3 [10:00-11:00] 成功 1 / 明确冲突 39 / 其他 0 / 异常 0 · 最大重试 1  ✓
-结论：并发写入被数据库唯一索引正确拦下，未出现同坑重复
 ```
 
 成功数 > 1 说明索引没生效；成功数 = 0 说明正常请求被误判成了冲突。两个方向都算失败。
-
-> ⚠️ **已知缺口（2026-09-23 实测发现）**：上面的压测里 40 个并发用的是**同一个开始时间**，
-> 走的正是唯一索引能覆盖的路径。唯一索引建在 `(equipment_id, date, start_time)` 上，
-> **拦不住「部分重叠但开始时间不同」的写入** —— `13:00-15:00` 与 `14:00-16:00`
-> 可以同时被预约成功。而 `acquire_equipment_lock()` 在 SQLite 下是空实现，
-> 锁内复检因此退化成 check-then-act。
->
-> 复现：`python scripts/overlap_race.py` （三种情形 = 1/3 通过）
->
-> 也就是说：**「并发安全」目前只对同一开始时间成立。** 加固方案见
-> [`docs/ENTERPRISE-UPGRADE.md`](docs/ENTERPRISE-UPGRADE.md) 的 P0-1
-> （PG 排他约束，或时段占用表 + `(equipment_id, date, slot_index)` 唯一索引）。
 
 ### 2. 协商：把「不可预约」拆成一组可比较的取舍
 
@@ -119,7 +174,8 @@ PostgreSQL 下额外加 `pg_advisory_xact_lock(equipment_id)` 做行级串行；
 
 缺资质和时段被占，是完全不同的两件事 —— 前者换一百个时间也没用。
 
-回复层拿到的不是一串人话 blocker，而是结构化的 `checks` + `blocker_kind`：
+回复层拿到的不是一串人话 blocker，而是结构化的 `checks` + `blocker_kind`
+（`none` / `no_date` / `no_target` / `constraint`）：
 
 ```
 用户：明天上午十点到十一点，高速离心机        （张伟只有光谱资质）
@@ -128,24 +184,109 @@ Agent：这个需求不是换个时间能解决的：缺少「离心」准入资
 
 如果这里偷懒统一回「要不要换个日期再试试」，用户就会在时间上白转一圈。
 
+### 4. 认证与授权：身份不再来自请求体
+
+**修之前的状态**（这是本次升级中最严重的一类问题，因为它静默、且看起来一切正常）：
+
+| 位置 | 问题 |
+|---|---|
+| `ChatRequest.user_id` | 身份是**请求体里的一个整数**，默认还是 1 号用户 |
+| `GET /api/reservations` | 不传参**返回全库**所有预约（含他人姓名、用途、时段） |
+| `POST /api/reservations/cancel` | `user_id` 同样来自请求体；唯一"鉴权"是比对两个都来自请求体的值，等于没鉴权 |
+
+**现在的设计原则是「默认拒绝 + 显式放行」**，公开清单短到能一眼审完：
+
+| 端点 | 要求 |
+|---|---|
+| `GET /api/health`、`POST /api/auth/login`、`GET /`（登录页） | 公开（存活探针 / 拿令牌 / 页面本身） |
+| 其余全部业务端点 | 需要 `Authorization: Bearer <token>` |
+| `GET /api/users`、`GET /api/audit` | 额外要求管理员（`ROLE_ADMIN`/`ROLE_SYSADMIN`） |
+
+关键点：
+
+- **`user_id` 一律从 token 取**。HTTP 层用令牌身份覆盖请求体字段；
+  `/api/reservations` 对非管理员**强制改写**为本人（传 `?user_id=别人` 无效，且不报错，
+  前端不需要知道权限细节，而越权在服务端就断了）；取消接口的身份只来自 token。
+- **401 与 403 严格分开**：401 = 没认证（前端去登录），403 = 认证了但权限不够。
+  混用会让前端无法决定该跳登录页还是该提示找管理员。
+- **防账号枚举**：账号不存在与口令错误返回**完全相同**的 401；
+  且账号不存在时也走一次等价成本的假校验，避免响应时间本身成为侧信道。
+- **口令校验走线程池**：scrypt 是故意慢的 CPU 密集操作（≈140ms），
+  直接在事件循环里跑会把整个进程卡住。
+- **零依赖实现**：见 [`src/lagent/security.py`](src/lagent/security.py)。
+  一个 HS256 JWT 的全部内容就是 `base64url(header).base64url(payload).base64url(HMAC-SHA256(...))`；
+  自己写能讲清每个字节从哪来，且接口与 `pyjwt` 对齐（换库只改两个函数）。
+  口令哈希用标准库 `hashlib.scrypt`（内存硬 KDF，不需要编译扩展，Windows 上少一层摩擦）。
+
+JWT 校验里三条最容易被忽略、也最致命的检查（都有对应测试）：
+
+```python
+if header.get("alg") != ALGORITHM:   # 不校验就会被改成 alg=none 绕过签名
+    raise TokenError("不支持的签名算法")
+if not hmac.compare_digest(expected, provided):   # 用 == 会泄露时序
+    raise TokenError("签名校验失败")
+if not isinstance(payload.get("exp"), int):       # 缺 exp = 永久凭证
+    raise TokenError("token 缺少过期时间")
+```
+
+### 5. 审计日志：只追加，且**用独立事务写**
+
+`audit_logs` 记录「谁、何时、对什么、做了什么、结果如何」，覆盖登录成功/失败、
+下单、取消（含越权被拒）、管理员读花名册。两个刻意的决定：
+
+- **独立事务。** 审计不能跟着业务事务回滚 —— 「越权尝试被拒绝」这件事恰恰发生在
+  业务失败的那条路径上。写进同一个 session，一次回滚就会把最该被发现的证据抹掉，
+  日志会永远显得一片祥和。测试里专门有一条断言这件事（`test_audit_survives_business_rollback`）。
+- **失败与拒绝也要记。** 只记成功，就答不出「谁在反复试别人的预约号」。
+
+审计表**只暴露 `GET /api/audit`**（管理员），没有任何改/删接口；不存口令与 token 原文。
+
+---
+
+## 边界加固
+
+| 项 | 做法 | 为什么这么做 |
+|---|---|---|
+| 请求体上限 64KB | 校验 `Content-Length`，在**读 body 之前**拒绝 → 413 | 先读完再拒没意义，内存已经花出去了 |
+| 分块传输 | 无 `Content-Length` 的 POST/PUT/PATCH → 411 | 无法在读取前度量，就明确要求声明长度（纯 JSON 接口的合理约束） |
+| CORS | 默认**空**白名单 = 不发任何 CORS 头 = 只允许同源 | 刻意不用 `allow_origins=["*"]`：带 `Authorization` 的跨域本就不该对任意源开放 |
+| 限流 | `/api/agent/chat` 按**用户**滑动窗口（默认 30/分钟） | 按 IP 会误伤（同一实验室出口 IP 后面几十个人）；固定窗口会在边界放过 2 倍配额 |
+| 输入白名单 | 写接口 `extra="forbid"`，长度上限 | 拼错的字段应当 422，而不是被静默忽略后让人以为"生效了" |
+
+实证（`python scripts/smoke_http.py`，对着真实 uvicorn 进程）：
+
+```
+[1] 公开端点与认证边界       6/6  ✓
+[2] 登录（含防账号枚举）      5/5  ✓
+[3] 越权读取                5/5  ✓
+[4] 越权写入                3/3  ✓
+[5] 令牌伪造（改 role / alg=none / 过期）  4/4  ✓
+[6] 身份不可伪造             2/2  ✓
+[7] 滥用与边界（413/411/422/429/CORS）  7/7  ✓
+[8] 审计留痕                6/6  ✓
+结果：39/39 项全部通过
+```
+
 ---
 
 ## 架构
 
 ```
-                    ┌─────────────────────────────────────────┐
-   HTTP / 控制台 ───▶│              FastAPI (api.py)            │
-                    └────────────────┬────────────────────────┘
-                                     │ ChatRequest
-                    ┌────────────────▼────────────────────────┐
-                    │        LangGraph 编排 (agent/graph.py)   │
-                    │                                          │
-                    │  parse ─┬─ cancel ──────┐                │
-                    │         ├─ retrieve ────┤                │
-                    │         ├─ smalltalk ───┤                │
-                    │         └─ check_missing─┬─ 缺 ─▶ ask ─▶ END
-                    │                         └─ 齐 ─▶ negotiate ─▶ book ─▶ compose ─▶ END
-                    └───────┬──────────────┬───────────┬───────┘
+                    ┌──────────────────────────────────────────────┐
+   HTTP / 控制台 ───▶│ FastAPI (api.py)                             │
+                    │  BodySizeLimit ▸ CORS ▸ 认证 ▸ 限流 ▸ 路由    │
+                    │  ├─ /api/auth/*  登录 / 身份                 │
+                    │  └─ current_user / require_admin / chat_quota│
+                    └────────────────┬─────────────────────────────┘
+                                     │ ChatRequest（身份由 token 覆盖）
+                    ┌────────────────▼─────────────────────────────┐
+                    │        LangGraph 编排 (agent/graph.py)       │
+                    │  parse ─┬─ cancel ──────┐                    │
+                    │         ├─ retrieve ────┤                    │
+                    │         ├─ smalltalk ───┤                    │
+                    │         └─ check_missing─┬─ 缺 ─▶ ask ─▶ END │
+                    │                         └─ 齐 ─▶ negotiate ─▶ book ─▶ compose
+                    └───────┬──────────────┬───────────┬──────────┘
                             │              │           │
               ┌─────────────▼───┐  ┌───────▼──────┐  ┌─▼──────────────┐
               │ 模型层 llm.py    │  │ 领域层 domain │  │ 知识层 knowledge│
@@ -154,59 +295,73 @@ Agent：这个需求不是换个时间能解决的：缺少「离心」准入资
               │                 │  │ booking      │  │                 │
               └─────────────────┘  └───────┬──────┘  └─────────────────┘
                                            │
-                              ┌────────────▼─────────────┐
-                              │ 数据层 db.py / models.py  │
-                              │ SQLite(默认) / PostgreSQL │
-                              │ 部分唯一索引兜底并发       │
-                              └──────────────────────────┘
+                              ┌────────────▼──────────────────┐
+                              │ 数据层 db.py / models.py       │
+                              │ SQLite(默认) / PostgreSQL      │
+                              │ reservation_slots 唯一索引兜底  │
+                              │ audit_logs 只追加               │
+                              └───────────────────────────────┘
 ```
 
 | 目录 | 职责 |
 |---|---|
 | `src/lagent/domain/` | 纯业务：约束判定、找空闲窗口、协商阶梯、并发安全下单 |
 | `src/lagent/agent/` | 编排：LangGraph 图、工具定义、Mock/真实模型客户端、会话状态 |
-| `src/lagent/knowledge/` | 安全规范检索：手写 BM25 + 可选向量 + RRF 融合 |
-| `src/lagent/api.py` | HTTP 层（8 个端点） |
-| `src/lagent/web/index.html` | 控制台：**零依赖单文件**，深浅色主题 |
+| `src/lagent/security.py` | 认证原语：scrypt 口令哈希 + HS256 JWT + RBAC 判定（零依赖） |
+| `src/lagent/audit.py` | 审计写入（独立事务）与读取 |
+| `src/lagent/ratelimit.py` | 进程内滑动窗口限流 |
+| `src/lagent/api.py` | HTTP 层（12 个 API + 1 个页面），`create_app()` 工厂 + APIRouter |
+| `src/lagent/web/index.html` | 控制台：**零依赖单文件**，登录闸门 + 深浅色主题 |
 
-关键的边界：**模型不决定事实**。资质够不够、时段有没有冲突，全部由代码判定；
-模型只负责把中文需求抽成槽位、把结构化事实写成人话。所以模型换代、甚至挂掉，
-业务结论都不会变 —— 挂掉时降级为「引导式表单」，用户按格式直说即可继续用。
+关键的边界：**模型不决定事实，也不决定权限**。资质够不够、时段有没有冲突、
+谁能看什么，全部由代码判定；模型只负责把中文需求抽成槽位、把结构化事实写成人话。
+所以模型换代、甚至挂掉，业务结论都不会变 —— 挂掉时降级为「引导式表单」。
 
 ---
 
-## 工程复盘：几个踩过的坑
+## 工程复盘：踩过的坑
 
 这些坑的共同点是——**图照样跑通、结果看起来也对，只是某处静默地错了**。
 
 | 现象 | 根因 | 修法 |
 |---|---|---|
-| 可观测性只剩最后一步 | LangGraph 默认「同名键后写覆盖」，`trace` 没声明累加器，每个节点把前面的冲掉 | `trace: Annotated[list, operator.add]`，节点只返回单元素 |
-| 新请求继承了上一轮的设备 | 无条件跨轮合并槽位，「我想约个设备」被上一轮的诉求污染 | `SessionStore.awaiting` 显式标志，只在「上一轮在等补槽位」时合并 |
-| 控制台点选方案，回复「没找到可用时段」 | `_negotiate` 把 `stage` 从 `"accepted"` 改写成了 `"selected"`，`_book` 认不出自己 | `_book` 改看 `accept_*` 字段是否存在，而不是看一个会被中途改写的字符串 |
-| `python main.py` 能起服务，`python main.py serve` 崩 | `cli.main` 把一切包进 `asyncio.run`，而 `uvicorn.run` 内部要自己起事件循环 | `serve` 分支移到 `asyncio.run` 之外 |
+| 「并发安全」只在一种情形下成立 | 唯一索引只拦相同开始时间；`acquire_equipment_lock` 在 SQLite 上是空实现，注释却写「写事务天然互斥」 | 区间展开成占用格，唯一索引打在 `(equipment_id,date,slot_index)` |
+| 压测 40 并发全绿却仍有超卖 | 40 个请求用的是**同一个开始时间**，恰好走在被覆盖的路径上 | 新增 `overlap_race.py` 覆盖部分重叠/包含，并写成 pytest 断言 |
+| 可观测性只剩最后一步 | LangGraph 默认「同名键后写覆盖」，`trace` 没声明累加器 | `trace: Annotated[list, operator.add]`，节点只返回单元素 |
+| 新请求继承了上一轮的设备 | 无条件跨轮合并槽位 | `SessionStore.awaiting` 显式标志，只在「上一轮在等补槽位」时合并 |
+| 控制台点选方案，回复「没找到可用时段」 | `_negotiate` 把 `stage` 从 `"accepted"` 改写成了 `"selected"` | `_book` 改看 `accept_*` 字段是否存在，而不是看会被中途改写的字符串 |
+| `python main.py serve` 崩，`python main.py` 正常 | `uvicorn.run` 内部要自己起事件循环，却被包在 `asyncio.run` 里 | `serve` 分支移到 `asyncio.run` 之外 |
 | 评测从 14/14 掉到 13/14，像代码回归 | 评测跑在开发库上，手工点的一单占用了用例需要的时段 | eval/loadtest 改跑一次性沙箱库，**结果可复现** |
 | 用户要 3 小时，系统默默给了 2 小时 | 找时段函数「尽量塞」并把它当成精确解返回 | 严格匹配：不满足就返回空，把取舍交回协商层显式说明 |
-| RRF 融合后同一段话出现好几次 | 融合的去重键用了 `chunk.id`，两条召回路径各自编号，同一内容对不上 | 去重键改为**内容指纹** `(source, heading, text)` |
+| RRF 融合后同一段话出现好几次 | 去重键用了 `chunk.id`，两条召回路径各自编号 | 去重键改为内容指纹 `(source, heading, text)` |
+| 审计日志「一片祥和」 | 如果与业务共用 session，失败路径上的记录会随回滚消失 | 审计用独立事务写，并单独写测试钉住 |
+| 新增 `create_app()` 后**所有接口 404** | `@app.get` 直接绑在模块级实例上，工厂造出的第二个应用一个路由都没有 | 路由改挂 `APIRouter`，由 `create_app()` include |
+| 一条"验证 CORS 白名单"的测试**恒真** | FastAPI 新版把 `include_router` 结果包成 `_IncludedRouter`，遍历 `app.routes` 取 `route.path` 得到空集合 | 改用 `create_app().openapi()["paths"]` 断言 |
 
 ---
 
 ## 验证
 
 ```bash
-pytest -q          # 195 passed
-python main.py eval
+pytest -q                       # 314 passed
+python main.py eval             # 14/14（mock 模型）
+python main.py loadtest -c 40 -r 3
+python scripts/overlap_race.py  # 3/3
+python scripts/smoke_http.py    # 39/39（真实 uvicorn 进程）
 ```
 
 ```
-评测报告 · 14 条用例
-意图准确率 100.0% · 槽位准确率 100.0% · 端到端通过率 100.0%
-全部通过 14/14
+pytest:            314 passed
+评测报告:           意图准确率 100.0% · 槽位准确率 100.0% · 端到端通过率 100.0%（14/14）
+并发压测:           3 轮 × 40 并发，每轮恰好 1 成功
+区间重叠竞态:        3/3 未超卖
+HTTP 越权清单:       39/39
 ```
 
-覆盖：意图分类、中文时间解析（「下午两点到四点」的时段继承）、六道约束判定、
-协商阶梯与排序、并发下单、多轮合并与回归、图路由与 trace 累加、HTTP 层、
-数据库隔离。
+覆盖范围：意图分类、中文时间解析（「下午两点到四点」的时段继承）、六道约束判定、
+协商阶梯与排序、并发下单、**区间重叠与粒度对齐**、多轮合并与回归、图路由与 trace 累加、
+**JWT 签名/过期/篡改/alg 混淆/账号枚举**、**RBAC 与越权读写**、
+**请求体上限/CORS/限流/输入白名单**、**审计留痕与事务独立性**、数据库隔离。
 
 > **关于这组数字要说实话**：默认 `LAB_APP_MODE=mock`，跑的是确定性假模型 ——
 > 它验证的是**代码链路自洽**（槽位抽取规则、约束判定、协商、下单、渲染都对），
@@ -215,6 +370,19 @@ python main.py eval
 
 评测与压测都跑在**一次性沙箱库**上：它们自己会下单，跑在开发库上会互相污染，
 导致「跑第一遍通过、第二遍结论变了」——那样通过率就不能作为证据。
+
+### CI
+
+`.github/workflows/ci.yml` 分三个 job，拆开是为了**失败时能一眼看出是哪一类问题**：
+
+| job | 跑什么 | 为什么单独拆 |
+|---|---|---|
+| `quality` | ruff（lint）→ mypy → pytest，**py3.10 与 py3.13 双版本矩阵** | 声明支持 3.10 就不能只在 3.13 上验证 |
+| `smoke` | `main.py eval` → `scripts/overlap_race.py` → `scripts/smoke_http.py` | 这三项都要起真实进程/真实 uvicorn，失败信号与单测不同类 |
+| `docker` | `docker build`（不推送） | Dockerfile 坏了属于交付问题，不是代码问题 |
+
+CI **只强制 lint，不强制 formatter**：本项目的手写风格是「同类参数按语义分组压行」，
+`ruff format` 会把它拆成一参数一行，全仓重排 30 个文件的噪声不该混进功能提交。
 
 ---
 
@@ -226,23 +394,29 @@ docker compose up --build
 # db   → PostgreSQL 16（比 SQLite 更接近生产形态）
 ```
 
+生产部署前必须做的一件事：设置 `LAB_JWT_SECRET`。
+用仓库内置默认密钥时服务启动会打印告警 —— 那个默认值是公开的，任何人都能伪造令牌。
+
 ---
 
 ## 已知限制（明确写出来，而不是藏起来）
 
 > 完整的架构评估（技术栈主流性、分层局限、分期升级方案、安全与容量要求）见
-> [`docs/ENTERPRISE-UPGRADE.md`](docs/ENTERPRISE-UPGRADE.md)。
+> [`docs/ENTERPRISE-UPGRADE.md`](docs/ENTERPRISE-UPGRADE.md)。P0 三项已全部完成。
 
-- **区间不重叠不变式未完全下沉到数据库**（见上文并发一节的缺口说明）——
-  同一开始时间由唯一索引兜底，部分重叠的情形目前拦不住。
-- **没有认证与授权**：`user_id` 直接来自请求体，`GET /api/reservations` 不传参返回全量。
-  仅适合本机演示，**不可直接对外暴露**。
 - **会话状态在进程内存里**：`SessionStore` 只保存「上一轮列出的备选」，用于对上「第 2 个」。
   多进程/多副本部署时会话会漂移，生产形态应当换 Redis 或数据库表。
-- **建表用 `create_all`**：开发够用，**没有迁移能力**。生产应当上 Alembic。
-- **无 CI / 无类型检查 / 无依赖锁定**：`requirements.txt` 是范围约束而非锁文件。
+- **限流是单进程的**：进程内滑动窗口，重启即清零，**多副本下等于把配额乘以副本数**。
+  生产必须换成 Redis 计数器。
+- **没有 refresh token**：访问令牌 2 小时到期就得重新登录。刻意这么选 ——
+  与其签一个 7 天的令牌假装很安全，不如把风险窗口压小。
+- **建表用 `create_all`**：开发够用，**没有迁移能力**（改 schema 要删库重建）。
+  生产应当上 Alembic。这是 P1 的第一项。
+- **`requirements.txt` 是范围约束不是锁文件**；依赖版本尚未用 `uv lock` 之类锁定。
 - **向量检索路径是可选的**：默认走手写 BM25（零依赖）。装了 `chromadb` 才启用
   `vector`/`hybrid`；缺依赖时自动回退并**在 `/api/health` 里说明原因**，不静默降级。
 - **准入资质是种子数据**：真实场景应当对接培训记录系统，而不是 `users.certs` 这个 JSON 字段。
+- **审计的 `client_host` 只是后端看到的地址**：反向代理后面需要在网关写入真实来源，
+  这里不解析 `X-Forwarded-For`（那是客户端可伪造的头，顺便信任只会污染审计数据）。
 - **`docker-compose.yml` 与 `start-lab-booking-agent.cmd` 未在开发环境实机验证**
-  （沙箱禁止 `wsl.exe` 与 `cmd.exe`）；其核心命令 `main.py serve` 已实测。
+  （沙箱禁止 `wsl.exe`）；其核心命令 `main.py serve` 已实测。

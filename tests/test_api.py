@@ -7,6 +7,7 @@ P0-2 之后这里多了一层前提：**除存活探针与登录外，所有端�
 from __future__ import annotations
 
 import datetime as dt
+from typing import ClassVar
 
 import pytest
 
@@ -41,7 +42,7 @@ class TestPublicEndpoints:
 class TestAuthRequired:
     """默认拒绝：拿掉令牌，业务端点必须一律 401。"""
 
-    PROTECTED = [
+    PROTECTED: ClassVar[list[tuple[str, str]]] = [
         ("GET", "/api/tools"),
         ("GET", "/api/labs"),
         ("GET", "/api/users"),

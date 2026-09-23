@@ -99,16 +99,16 @@ class TestConsoleAuthWiring:
         assert "sel-user" not in html, "残留了对已删除身份选择器的引用"
 
         lines = html.splitlines()
-        payload = next(l for l in lines if l.strip().startswith("const payload={"))
+        payload = next(line for line in lines if line.strip().startswith("const payload={"))
         assert "user_id" not in payload, "对话请求体仍在指定身份"
 
-        cancel_at = next(i for i, l in enumerate(lines) if "/api/reservations/cancel" in l)
+        cancel_at = next(i for i, line in enumerate(lines) if "/api/reservations/cancel" in line)
         cancel_body = "\n".join(lines[cancel_at:cancel_at + 3])
         assert "user_id" not in cancel_body, "取消请求体仍在指定身份"
 
     def test_identity_field_only_used_for_read_filtering(self, html):
         """把「哪些地方出现了 user_id」钉死，防止悄悄长回来。"""
-        hits = [l.strip() for l in html.splitlines() if "user_id" in l]
+        hits = [line.strip() for line in html.splitlines() if "user_id" in line]
         # 只允许：1) 预约列表的读侧过滤参数；2) 解释 as_user_id 的注释
         for line in hits:
             assert "?user_id=" in line or line.startswith("//") or line.startswith("<!--"), \

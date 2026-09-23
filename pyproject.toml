@@ -1,7 +1,7 @@
 [project]
 name = "lab-booking-agent"
-version = "1.0.0"
-description = "带真实约束协商能力的智能实验室预约 Agent（FastAPI + LangGraph）"
+version = "1.2.0"
+description = "带真实约束协商能力的智能实验室预约 Agent（FastAPI + LangGraph + JWT/RBAC + 审计）"
 requires-python = ">=3.10"
 readme = "README.md"
 
@@ -14,6 +14,58 @@ addopts = "-q"
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]
+
+# ---------------------------------------------------------------------------
+# ruff：lint + format
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # isort（import 分组与排序）
+    "B",         # flake8-bugbear（常见陷阱）
+    "BLE",       # flake8-blind-except（裸 except Exception 必须显式标注）
+    "UP",        # pyupgrade（用新语法）
+    "C4",        # 推导式简化
+    "SIM",       # 简化建议
+    "RUF",       # ruff 自有规则
+]
+ignore = [
+    "E501",      # 行长交给 formatter 管，不在 lint 里重复报
+    # FastAPI 的依赖注入就是「在默认参数里调用 Depends(...)」，
+    # B008 在这里是框架约定，不是 bug。
+    "B008",
+    # 中文注释里的全角标点不影响可读性，但这几条对现有代码噪声大
+    "RUF001", "RUF002", "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试里断言长、fixture 多，放宽一点
+"tests/*" = ["B011"]
+
+# ---------------------------------------------------------------------------
+# mypy：类型检查
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.10"
+files = ["src/lagent", "tests", "scripts"]
+# 不追求 strict：本项目有完整标注，但 strict 会强迫给 SQLAlchemy 的
+# 动态属性和 pydantic 的 validator 加一堆无意义的 ignore。
+# 目标定在「能抓出真正的类型错误，且不需要靠 ignore 维持」。
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true
+ignore_missing_imports = true
+exclude = ["src/lagent/web/"]
+
+# 不开启 disallow_untyped_defs，因此 tests/ 与 scripts/ 无需单独 override：
+# 它们的价值在断言与可读性，不在类型完备性，但仍然享受 check_untyped_defs 的检查。
 
 [tool.setuptools.packages.find]
 where = ["src"]

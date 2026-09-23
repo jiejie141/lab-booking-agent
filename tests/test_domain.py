@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 
-import pytest
-
 from lagent.clock import minutes_between, overlaps
 from lagent.domain.availability import (
     EquipmentView,
@@ -24,36 +22,36 @@ SATURDAY = dt.date(2026, 9, 26)  # 周六
 
 
 def make_lab(**over):
-    data = dict(
-        id=1,
-        building="分析楼",
-        floor=3,
-        room="301",
-        capacity=6,
-        open_hours={"weekday": ["08:00", "22:00"], "weekend": ["09:00", "18:00"]},
-    )
+    data = {
+        "id": 1,
+        "building": "分析楼",
+        "floor": 3,
+        "room": "301",
+        "capacity": 6,
+        "open_hours": {"weekday": ["08:00", "22:00"], "weekend": ["09:00", "18:00"]},
+    }
     data.update(over)
     return Laboratory(**data)
 
 
 def make_equipment(**over):
-    data = dict(
-        id=1,
-        lab_id=1,
-        name="荧光光谱仪",
-        model="F-7000",
-        code="SPEC-F7000",
-        category="光谱",
-        status="normal",
-        max_hours=4,
-        requires_training=True,
-    )
+    data = {
+        "id": 1,
+        "lab_id": 1,
+        "name": "荧光光谱仪",
+        "model": "F-7000",
+        "code": "SPEC-F7000",
+        "category": "光谱",
+        "status": "normal",
+        "max_hours": 4,
+        "requires_training": True,
+    }
     data.update(over)
     return Equipment(**data)
 
 
 def make_user(**over):
-    data = dict(id=1, username="张伟", email="z@e.com", role="user", certs=["光谱"])
+    data = {"id": 1, "username": "张伟", "email": "z@e.com", "role": "user", "certs": ["光谱"]}
     data.update(over)
     return User(**data)
 

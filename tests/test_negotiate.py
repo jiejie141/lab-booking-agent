@@ -6,8 +6,7 @@
 from __future__ import annotations
 
 import datetime as dt
-
-import pytest
+from typing import Any, cast
 
 from lagent.clock import now_local
 from lagent.db import session_scope
@@ -22,12 +21,12 @@ BUSY_START, BUSY_END = dt.time(14, 0), dt.time(16, 0)
 
 async def _run(user_id: int, req: Requirement):
     async with session_scope() as session:
-        user = await session.get(User, user_id)
+        user = cast(User, await session.get(User, user_id))
         return await negotiate(session, user, req)
 
 
 def _req(**over) -> Requirement:
-    data = {"date": TOMORROW}
+    data: dict[str, Any] = {"date": TOMORROW}
     data.update(over)
     return Requirement(**data).normalized()
 
@@ -201,7 +200,7 @@ class TestBlockerKind:
 
     async def test_no_date(self, isolated_db):
         async with session_scope() as session:
-            user = await session.get(User, 2)
+            user = cast(User, await session.get(User, 2))
             result = await negotiate(session, user, Requirement(equipment_name="荧光光谱仪"))
         assert result.blocker_kind == "no_date"
 

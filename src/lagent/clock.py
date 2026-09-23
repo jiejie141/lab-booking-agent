@@ -29,7 +29,7 @@ def tz() -> dt.tzinfo:
     name = get_settings().timezone
     try:
         return ZoneInfo(name)
-    except Exception:  # noqa: BLE001 - 含 ZoneInfoNotFoundError 与数据损坏
+    except Exception:  # 含 ZoneInfoNotFoundError，以及 tzdata 缺失/损坏
         if name == "Asia/Shanghai":
             return dt.timezone(dt.timedelta(hours=8), name="UTC+8")
         raise

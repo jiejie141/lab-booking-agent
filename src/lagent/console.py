@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import sys
 from contextlib import suppress
-from typing import TextIO
+from io import TextIOWrapper
+from typing import TextIO, cast
 
 
 def enable_utf8_output(*streams: TextIO) -> None:
@@ -33,4 +34,4 @@ def enable_utf8_output(*streams: TextIO) -> None:
 
     for stream in streams or (sys.stdout, sys.stderr):
         with suppress(Exception):
-            stream.reconfigure(encoding="utf-8", errors="replace")
+            cast(TextIOWrapper, stream).reconfigure(encoding="utf-8", errors="replace")

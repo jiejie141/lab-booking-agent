@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 
-import pytest
 from sqlalchemy import func, select
 
 from lagent.agent.tools import tool_create_reservation

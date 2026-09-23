@@ -19,7 +19,7 @@ import json
 import re
 from typing import Any, Protocol
 
-from ..clock import now_local, parse_time
+from ..clock import now_local
 from ..config import Settings
 from ..schemas import HARD_CONSTRAINTS, IntentKind, IntentResult, Proposal, Requirement
 
@@ -240,7 +240,7 @@ class MockLLMClient:
                         best_name = name
                     break
         if best_name:
-            for name, category in self.catalog:
+            for name, _ in self.catalog:
                 if name == best_name:
                     return name, None
         for _name, category in self.catalog:
@@ -397,7 +397,7 @@ class RealLLMClient:
                 )
                 resp.raise_for_status()
                 return resp.json()["choices"][0]["message"]["content"]
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise LLMError(f"模型调用失败：{exc}") from exc
 
     async def classify_intent(self, message: str) -> IntentResult:
@@ -410,7 +410,7 @@ class RealLLMClient:
         )
         try:
             return IntentResult(**data)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise LLMError(f"意图输出无法解析：{data}") from exc
 
     async def extract_requirement(self, message: str, history: str = "") -> Requirement:
@@ -426,7 +426,7 @@ class RealLLMClient:
         cleaned = {k: v for k, v in data.items() if v not in ("", "null", "未知")}
         try:
             return Requirement(**cleaned).normalized()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise LLMError(f"槽位输出无法解析：{data}") from exc
 
     async def ask_missing(
