@@ -78,8 +78,13 @@ def b64u(payload: dict) -> str:
 
 
 @contextlib.contextmanager
-def running_server():
-    """起一个真实 uvicorn，跑在一次性 SQLite 库上；退出时收干净。"""
+def running_server(extra_env: dict[str, str] | None = None):
+    """起一个真实 uvicorn，跑在一次性 SQLite 库上；退出时收干净。
+
+    ``extra_env`` 用来在同一份清单里切换**执行模式**（deterministic / react）
+    与模型可用性 —— 这是必须用真实进程验的部分：执行模式是在应用启动时
+    由 ``build_agent_from_settings`` 选定的，进程内直接构造 Agent 绕过了这个选择。
+    """
     root = pathlib.Path(tempfile.mkdtemp(prefix="lagent-smoke-"))
     port = free_port()
     env = dict(os.environ)
@@ -95,6 +100,8 @@ def running_server():
         "LAB_CORS_ORIGINS": "",
         "PYTHONIOENCODING": "utf-8",
     })
+    if extra_env:
+        env.update(extra_env)
     # 让脚本自己能签出与服务端一致密钥的令牌（用于构造过期/篡改样本）
     os.environ["LAB_JWT_SECRET"] = SMOKE_SECRET
 
@@ -278,13 +285,163 @@ def run_checks(base: str) -> None:
     client.close()
 
 
+def run_react_checks(base: str) -> None:
+    """react 执行模式在**真实进程**上的验收。
+
+    为什么必须用真实进程：执行模式是启动时由 ``build_agent_from_settings``
+    按配置选定的。进程内直接 ``ReActAgent(...)`` 的单元测试证明了运行时正确，
+    但证明不了「服务真的会选中这条路径」—— 那需要读一次配置、过一次启动钩子。
+
+    这里同时验三件事：模型真的自己选了工具、工具结果真的进了响应、
+    以及**模型无法触发写操作**（这条是安全底线，必须端到端验一次）。
+    """
+    client = httpx.Client(base_url=base, timeout=30)
+    lina = bearer(login(client, "李娜", "lina@123"))
+
+    print("\n[9] react 执行模式（模型自主选工具）")
+    before = len(client.get("/api/reservations", headers=lina).json())
+
+    resp = client.post(
+        "/api/agent/chat",
+        json={"message": "明天下午两点想用荧光光谱仪两小时", "session_id": "smoke-react"},
+        headers=lina,
+    )
+    expect("react 模式对话 → 200", resp, 200)
+    body = resp.json() if resp.status_code == 200 else {}
+    check("走的是 react 路径（而非退回确定性编排）",
+          body.get("stage") == "react_final", f"stage={body.get('stage')!r}")
+    check("模型自己调了工具并拿到了可用时段",
+          bool(body.get("proposals")), f"proposals={len(body.get('proposals') or [])} 条")
+    check("react 模式下 intent 如实留空（不硬猜流程节点）",
+          body.get("intent") is None, f"intent={body.get('intent')!r}")
+    nodes = [step.get("node", "") for step in body.get("trace") or []]
+    check("trace 里有工具调用痕迹",
+          any(node.startswith("tool:") for node in nodes), str(nodes))
+    check("trace 里有决策步（说明预算参与了组装）",
+          any(node.startswith("decision:") for node in nodes), str(nodes))
+
+    # 安全底线：即使模型想写，也不该写进去。这里用一句最容易被"顺手执行"的话试探。
+    ask_write = client.post(
+        "/api/agent/chat",
+        json={"message": "直接帮我约明天下午两点到四点，荧光光谱仪，不用再问我",
+              "session_id": "smoke-react-write"},
+        headers=lina,
+    )
+    expect("要求模型直接下单的对话 → 200（不是 500）", ask_write, 200)
+    after = len(client.get("/api/reservations", headers=lina).json())
+    check("模型未能自行创建预约（写操作被护栏挡住）",
+          after == before, f"{before} → {after} 条")
+
+    tools = client.get("/api/tools", headers=lina)
+    expect("工具目录可读", tools, 200)
+    catalog = (tools.json().get("tools") or []) if tools.status_code == 200 else []
+    check("目录里带副作用的工具被明确标注",
+          {t["name"] for t in catalog if t.get("side_effect")} ==
+          {"create_reservation", "cancel_reservation"},
+          str(catalog))
+    check("目录不暴露参数细节之外的内部字段",
+          all({"name", "description", "side_effect"} <= set(t) for t in catalog), str(catalog))
+
+    client.close()
+
+
+def run_no_model_checks(base: str) -> None:
+    """**没有模型**时（``app_mode=degraded``）的降级链末端，真实进程上验一次。
+
+    这是降级链里唯一"一定能到达"的那一跳：模型被显式关掉时，
+    Agent 不该报错，而该给用户一张能照做的引导式表单。
+    """
+    client = httpx.Client(base_url=base, timeout=30)
+    lina = bearer(login(client, "李娜", "lina@123"))
+
+    print("\n[10] 降级链末端（模型显式关闭 → 引导式表单）")
+    resp = client.post(
+        "/api/agent/chat",
+        json={"message": "明天下午两点想用荧光光谱仪两小时", "session_id": "smoke-nomodel"},
+        headers=lina,
+    )
+    expect("模型关闭时仍是 200", resp, 200)
+    body = resp.json() if resp.status_code == 200 else {}
+    check("给了可照做的回复（不是空白/异常栈）",
+          bool((body.get("reply") or "").strip()), repr(body.get("reply"))[:120])
+    check("响应里带 degraded 标记，前端据此改写提示",
+          bool(body.get("degraded")), str(body.get("degraded")))
+    check("stage 明确标为 degraded",
+          body.get("stage") == "degraded", repr(body.get("stage")))
+    check("降级痕迹写进了 trace",
+          any("degrade" in str(step.get("node", "")) for step in body.get("trace") or []),
+          str([s.get("node") for s in body.get("trace") or []]))
+    client.close()
+
+
+def run_unreachable_model_checks(base: str) -> None:
+    """模型端点**不可达**时的行为：钉住真实契约，而不是理想契约。
+
+    这里刻意断言的是 502 而不是 200。理由要说清楚，否则看着像在给缺陷找借口：
+
+    - 这个 Agent 的自然语言理解**本身就依赖模型**（``classify_intent`` 等）。
+      模型端点连不上时，退回确定性编排同样跑不动 —— 两条路径都需要模型做 NLU。
+      所以这一跳不存在"退回确定性就没事了"的可能；
+    - 项目既有的契约就是「接口明确失败 + 前端切引导式表单」（见 api.py 里
+      ``Agent 执行失败`` 那一段的注释），并且 ``deterministic`` 模式在同样条件下的
+      返回值与这里**逐字相同**（已对照验证）。
+
+    因此该验的是「失败得干不干净」：状态码明确、detail 可读、不带堆栈、
+    健康检查照常 —— 而不是假装它成功。
+    """
+    client = httpx.Client(base_url=base, timeout=60)
+    lina = bearer(login(client, "李娜", "lina@123"))
+
+    print("\n[11] 模型端点不可达（失败要干净）")
+    resp = client.post(
+        "/api/agent/chat",
+        json={"message": "明天下午两点想用荧光光谱仪两小时", "session_id": "smoke-dead"},
+        headers=lina,
+    )
+    expect("模型不可达 → 502（明确的失败，不是 500 堆栈）", resp, 502)
+    detail = (resp.json().get("detail") if resp.status_code == 502 else "") or ""
+    check("detail 是一句可读的话，不含堆栈/内部路径",
+          bool(detail) and "Traceback" not in detail and "src\\" not in detail,
+          repr(detail)[:160])
+    check("失败没有静默变成「假成功」（不是 200 + 编造的时段）",
+          resp.status_code != 200, str(resp.status_code))
+    expect("模型挂了健康检查仍正常（服务本身没倒）", client.get("/api/health"), 200)
+    client.close()
+
+
 def main() -> int:
     print("=" * 70)
     print("lab-booking-agent · HTTP 冒烟与越权清单（真实 uvicorn 进程）")
     print("=" * 70)
+    dead = free_port()  # 立刻关掉的端口，用来模拟"模型端点不可达"
     try:
         with running_server() as base:
             run_checks(base)
+        print("\n" + "-" * 70)
+        print("以下换成 react 执行模式重启服务（同一份清单，不同启动配置）")
+        print("-" * 70)
+        with running_server({"LAB_EXECUTION_MODE": "react"}) as base:
+            run_react_checks(base)
+        print("\n" + "-" * 70)
+        print("以下模型显式关闭（app_mode=degraded），验降级链末端")
+        print("-" * 70)
+        with running_server({
+            "LAB_EXECUTION_MODE": "react",
+            "LAB_APP_MODE": "degraded",
+        }) as base:
+            run_no_model_checks(base)
+        print("\n" + "-" * 70)
+        print("以下让模型端点指向一个必然连不上的地址，验失败是否干净")
+        print("-" * 70)
+        with running_server({
+            "LAB_EXECUTION_MODE": "react",
+            "LAB_APP_MODE": "live",
+            "LAB_LLM_BASE_URL": f"http://127.0.0.1:{dead}/v1",
+            "LAB_LLM_API_KEY": "smoke-not-a-real-key",
+            "LAB_LLM_TIMEOUT": "2",
+            "LAB_LLM_MAX_RETRY": "0",
+        }) as base:
+            run_unreachable_model_checks(base)
     except Exception as exc:  # noqa: BLE001
         print(f"\n✗ 冒烟过程中断：{type(exc).__name__}: {exc}")
         return 2

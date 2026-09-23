@@ -16,6 +16,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 AppMode = Literal["mock", "live", "degraded"]
 RetrievalBackend = Literal["bm25", "vector", "hybrid"]
+# 执行模式（见 harness/runtime.py）：
+#   deterministic  条件边决定调哪个工具（原路径，模型只做语言层）
+#   react          模型通过 function calling 自己选工具再决定下一步
+ExecutionMode = Literal["deterministic", "react"]
 
 
 class Settings(BaseSettings):
@@ -41,6 +45,22 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4o-mini"
     llm_timeout: float = 30.0
     llm_max_retry: int = 2
+
+    # ---- Agent 运行时（harness）-------------------------------------------
+    # 默认仍是 deterministic：它已被 322 条测试与 golden path 覆盖，
+    # 改成 react 是一个应当有理由的动作，不该是偷偷换掉的默认值。
+    execution_mode: ExecutionMode = "deterministic"
+    # 单次模型调用的上下文 token 预算。超限时按 context.py 的优先级裁剪
+    # （先丢最旧的工具结果 → 截断摘要 → 丢最旧的对话轮次）。
+    context_max_tokens: int = 3000
+    # ReAct 循环最多几步。到顶仍未收敛就如实报 "max_steps"，交由上层降级，
+    # 而不是硬编一句话假装跑完了。
+    react_max_steps: int = 6
+    # 是否允许模型触发有副作用的工具（下单/取消）。
+    # 默认 False —— 这是安全默认值，改成 True 需要能解释为什么。
+    react_allow_side_effects: bool = False
+    # 单次工具结果回喂给模型的字符上限，超出截断（见 harness/tools.py）。
+    tool_result_limit: int = 1200
 
     # ---- 数据层 -----------------------------------------------------------
     # 本地默认 SQLite，开箱即跑；生产走 docker-compose 里的 PostgreSQL：

@@ -108,6 +108,16 @@ async def _doctor() -> int:
         print(f"  对话自测          : intent={resp.intent} stage={resp.stage} 方案 {len(resp.proposals)} 个")
         print(f"     trace           : {' → '.join(t.node for t in resp.trace)}")
 
+    # 工具路由要说清是**谁在选工具**。之前这行只写「已注册工具：a, b, c」，
+    # 而「注册了」与「由模型调用」是两件事 —— 那种措辞很容易被读成
+    # 「实现了 function calling」。现在把执行模式一并打出来，不含糊。
+    routing = (
+        "条件边（确定性路由，模型不参与）"
+        if settings.execution_mode == "deterministic"
+        else "模型 function calling（harness/react）"
+    )
+    print(f"  执行模式          : {settings.execution_mode}")
+    print(f"  工具路由          : {routing}")
     print(f"  已注册工具        : {', '.join(t['name'] for t in TOOL_SPECS)}")
     print("=" * 66)
     print("自检通过" if agent.client else "自检完成（模型不可用，属降级运行）")

@@ -21,6 +21,7 @@ from typing import Any, Protocol
 
 from ..clock import now_local
 from ..config import Settings
+from ..harness import ToolCall, TurnResult
 from ..schemas import HARD_CONSTRAINTS, IntentKind, IntentResult, Proposal, Requirement
 
 
@@ -40,6 +41,17 @@ class LLMClient(Protocol):
     ) -> str: ...
 
     async def compose(self, ctx: dict[str, Any]) -> str: ...
+
+    async def chat_tools(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> TurnResult:
+        """带工具的一轮对话（function calling 的模型侧）。
+
+        这是 harness 的 :class:`~lagent.harness.runtime.ToolCallingLLM` 协议，
+        在**语言层之上的第二组能力**：前四个方法把语言翻成结构，这个方法让模型
+        自己决定调哪个工具。两种执行模式（deterministic / react）分别只用其中一组。
+        """
+        ...
 
 
 # ==========================================================================
@@ -179,6 +191,67 @@ class MockLLMClient:
     def __init__(self, catalog: list[tuple[str, str]] | None = None) -> None:
         # catalog: [(设备名, 类别), ...] 由调用方注入，和真实模型的提示词同源
         self.catalog = catalog or []
+
+    # ---- 工具调用（function calling 的确定性替身）-------------------------
+    async def chat_tools(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> TurnResult:
+        """确定性版本的「模型选工具」。
+
+        它是替身，不是模拟器 —— 这里没有任何"假装理解"的成分，只有两条规则：
+        按意图关键词选一个可用工具；拿到工具结果后**停止调工具**并给一段可读文本。
+
+        第二条规则不可省：没有它，离线 ReAct 循环永远不会终止
+        （假模型会一直要求调工具）。真实模型靠「读懂结果已经够了」停止，
+        这里靠「上一条消息是 tool」判断 —— 机制不同，但循环形态一致，
+        所以 ReAct 运行时的逻辑可以在离线环境下被完整测试。
+        """
+        available = {entry["function"]["name"] for entry in tools}
+        last = messages[-1] if messages else {}
+
+        if last.get("role") == "tool":
+            return TurnResult(content=_answer_from_tool_result(str(last.get("content", ""))))
+
+        user_text = _last_user_text(messages)
+        intent = await self.classify_intent(user_text)
+
+        if intent.intent == "check_admission" and "check_admission" in available:
+            return TurnResult(
+                tool_calls=[
+                    ToolCall(id="call_1", name="check_admission", arguments={"query": user_text})
+                ]
+            )
+
+        if intent.intent in ("query_availability", "create_reservation"):
+            requirement = await self.extract_requirement(user_text)
+            if requirement.date is None:
+                # 连日期都没有：调工具也只会拿到 no_date，不如直接追问。
+                # 这与确定性路径的行为一致，两条路径不该在同一个输入上分叉。
+                return TurnResult(
+                    content=await self.ask_missing(requirement.missing_slots(), requirement)
+                )
+            if "query_availability" in available:
+                return TurnResult(
+                    tool_calls=[
+                        ToolCall(
+                            id="call_1",
+                            name="query_availability",
+                            arguments=_query_arguments(requirement),
+                        )
+                    ]
+                )
+
+        if intent.intent == "cancel_reservation":
+            # 取消工具带副作用，默认不在 available 里。如实说明要走确认，
+            # 而不是假装已经取消了 —— 这一点必须与真实运行时的行为一致。
+            return TurnResult(
+                content=(
+                    "取消属于会改变记录的操作，需要你确认具体是哪一条（例如「取消 #12」），"
+                    "我再执行。"
+                )
+            )
+
+        return TurnResult(content=await self.compose({"kind": "smalltalk"}))
 
     # ---- 意图 ----------------------------------------------------------
     async def classify_intent(self, message: str) -> IntentResult:
@@ -400,6 +473,53 @@ class RealLLMClient:
         except Exception as exc:
             raise LLMError(f"模型调用失败：{exc}") from exc
 
+    async def chat_tools(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> TurnResult:
+        """真实的 function calling：把 tools 交给模型，由它决定调哪个。
+
+        三个协议细节在这一层抹平，别处不必再关心：
+
+        1. ``arguments`` 在 wire format 里是 **JSON 字符串**，这里解析成 dict ——
+           运行时只处理结构化之后的形状，否则每个分支都要判「字符串还是字典」；
+        2. 模型偶尔给出**非法 JSON** 的 arguments。这时不抛错、给空 dict：
+           空 dict 会在参数校验那一关被拒，并以「缺哪个字段」回喂给它重试，
+           比在协议层直接失败多一次自愈机会；
+        3. ``tool_choice="auto"``：允许模型不调工具直接回答（闲聊、追问都走这条）。
+           写死 ``required`` 会逼它为了调工具而调工具。
+        """
+        import httpx
+
+        url = self.settings.llm_base_url.rstrip("/") + "/chat/completions"
+        payload = {
+            "model": self.settings.llm_model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "temperature": 0,
+        }
+        last: Exception | None = None
+        for _ in range(self.settings.llm_max_retry + 1):
+            try:
+                async with httpx.AsyncClient(timeout=self.settings.llm_timeout) as client:
+                    resp = await client.post(
+                        url,
+                        json=payload,
+                        headers={"Authorization": f"Bearer {self.settings.llm_api_key}"},
+                    )
+                    resp.raise_for_status()
+                    message = resp.json()["choices"][0]["message"]
+                    return TurnResult(
+                        content=message.get("content"),
+                        tool_calls=[
+                            _parse_tool_call(raw)
+                            for raw in (message.get("tool_calls") or [])
+                        ],
+                    )
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+        raise LLMError(f"模型调用失败：{last}")
+
     async def classify_intent(self, message: str) -> IntentResult:
         today = now_local().date().isoformat()
         data = await self._json(
@@ -474,6 +594,74 @@ class RealLLMClient:
             "不要建议用户更换时段。",
             json.dumps(payload, ensure_ascii=False),
         )
+
+
+# ==========================================================================
+# function calling 的协议适配与 Mock 辅助
+# ==========================================================================
+def _last_user_text(messages: list[dict[str, Any]]) -> str:
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            return str(msg.get("content") or "")
+    return ""
+
+
+def _query_arguments(requirement: Requirement) -> dict[str, Any]:
+    """把已抽取的诉求转成 query_availability 的工具参数。
+
+    只带非空字段：多传一个 ``null`` 对模型没坏处，但会让「参数是谁给的」
+    这件事变模糊 —— 而这一层恰恰是要保持「参数来自抽取结果」这一点清楚。
+    """
+    args: dict[str, Any] = {"date": requirement.date.isoformat() if requirement.date else ""}
+    if requirement.start:
+        args["start"] = requirement.start.strftime("%H:%M")
+    if requirement.end:
+        args["end"] = requirement.end.strftime("%H:%M")
+    if requirement.duration_hours:
+        args["duration_hours"] = requirement.duration_hours
+    if requirement.equipment_name:
+        args["equipment_name"] = requirement.equipment_name
+    if requirement.category:
+        args["category"] = requirement.category
+    return args
+
+
+def _answer_from_tool_result(text: str) -> str:
+    """Mock 的「读完工具结果就作答」。
+
+    刻意不做真实摘要：Mock 的职责是让链路可跑、评测可复现，不是假装会写
+    自然语言。所以它如实呈现工具结果，并标明这来自确定性假模型 ——
+    真实模型在这一步会把这些结构化事实措辞成人话（见 compose 的约束）。
+    """
+    head = text.strip()
+    if len(head) > 400:
+        head = head[:400] + "…"
+    return f"（mock 模型基于工具结果的答复）\n{head}"
+
+
+def _parse_tool_call(raw: dict[str, Any]) -> ToolCall:
+    """把 wire format 的 tool_call 解析成结构化形状。
+
+    ``arguments`` 兼容两种形态：标准协议给 JSON 字符串，部分兼容端点直接给对象。
+    非法 JSON 归成空 dict（原因见 RealLLMClient.chat_tools 的说明）。
+    """
+    function = raw.get("function") or {}
+    raw_args = function.get("arguments")
+    arguments: dict[str, Any] = {}
+    if isinstance(raw_args, dict):
+        arguments = raw_args
+    elif isinstance(raw_args, str) and raw_args.strip():
+        try:
+            parsed = json.loads(raw_args)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            arguments = parsed
+    return ToolCall(
+        id=str(raw.get("id") or ""),
+        name=str(function.get("name") or ""),
+        arguments=arguments,
+    )
 
 
 def _default_catalog() -> list[tuple[str, str]]:

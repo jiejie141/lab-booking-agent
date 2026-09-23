@@ -26,7 +26,7 @@ from __future__ import annotations
 import datetime as dt
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from langgraph.graph import END, StateGraph
 
@@ -43,6 +43,23 @@ from ..schemas import (
 from . import tools
 from .llm import LLMClient
 from .state import STORE, AgentState, SessionStore, pick_proposal
+
+
+class ChatAgent(Protocol):
+    """执行入口的统一契约。
+
+    API / CLI / 评测都只依赖这一个方法与 ``client``，所以「当前跑的是哪种执行模式」
+    对它们完全透明 —— 换模式不需要改任何一个调用点，也不需要它们做分支判断。
+    这正是把执行模式做成运行时策略、而不是做第二个系统的收益。
+
+    ``client`` 进契约是因为自检（doctor）要报告「当前用的是哪个模型客户端」，
+    那是运行环境的一部分，不该靠 isinstance 去猜实现。
+    """
+
+    client: LLMClient | None
+
+    async def ainvoke(self, req: ChatRequest) -> ChatResponse: ...
+
 
 DEGRADED_REPLY = (
     "智能助手当前不可用（模型未配置或已关闭），已切换为引导式预约：\n"
@@ -467,14 +484,35 @@ def build_agent(client: LLMClient | None, store: SessionStore | None = None) -> 
     return LabBookingAgent(client, store)
 
 
-def build_agent_from_settings(store: SessionStore | None = None):
-    """按配置建 Agent；模型不可用时返回的 Agent 会走降级回复。"""
+def build_agent_from_settings(store: SessionStore | None = None) -> ChatAgent:
+    """按配置建 Agent。默认确定性编排；``execution_mode=react`` 时走 harness 运行时。
+
+    刻意保留确定性为默认值：它被全部回归测试与 golden path 覆盖，
+    切换执行模式应当是一个**有理由的动作**，而不是一次静默的默认值变更。
+
+    react 模式下把确定性 Agent 一并作为 ``fallback`` 传进去，
+    于是「模型不按格式回 / 步数耗尽 / 模型故障」会自动退回确定性路径 ——
+    降级链与理由见 react_agent.py。
+    """
     settings = get_settings()
 
     from .llm import build_client
 
     catalog = _catalog_cache
     client = build_client(settings, catalog)
+
+    if settings.execution_mode == "react":
+        # 延迟导入：react_agent 需要 graph 里的 DEGRADED_REPLY 与 LabBookingAgent，
+        # 模块级互相 import 会成环。这里在函数体内导入，与上面 build_client
+        # 的处理方式一致 —— 本文件已有的模式，不新造一种。
+        from .react_agent import ReActAgent
+
+        return ReActAgent(
+            client,
+            store,
+            settings=settings,
+            fallback=LabBookingAgent(client, store),
+        )
     return LabBookingAgent(client, store)
 
 
