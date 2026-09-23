@@ -424,13 +424,14 @@ react ──模型故障 / 步数耗尽 / 不按格式回──▶ deterministic
 | ReAct 明明配好了工具，却总说「没能在限定步数内查清」 | 上下文裁剪把**这一轮刚拿到的工具结果**也丢了（它被归入"最低优先级"）。模型看不到答案，只看见自己上一句的问题，于是把同一个工具再调一遍，直到步数耗尽 | 裁剪优先级里把「本轮工具结果」提到必留档；工具层改为按「轮」整组取舍。**裁剪策略直接决定 ReAct 能不能收敛，这是正确性问题，不是性能调优** |
 | 工具 schema 里混进了「默认不暴露给模型，见 harness/tools.py」 | pydantic 默认把参数模型的 docstring 提升成 schema 的顶层 `description`，写给维护者的内部结论就这样发给了模型 | `ToolSpec.json_schema()` 清洗掉顶层 `title`/`description` 与属性级 `title`，只留刻意写给模型看的字段说明 |
 | 裁剪计数偏小，恰好装不下的那轮没被算进"丢了" | `cut = idx + 1` 而 `idx` 本身就该被丢 | `cut = idx`。这类 off-by-one 不会让测试变红（断言是 `>= 1`），只会让线上观察到的数字长期偏小 |
+| 重构后 **365 个测试全绿，但 `python main.py tools` 崩了** | 把展示清单改成从注册表派生时，`params` 从 `{字段名: 说明}` 变成了字段名列表 —— 而当时所有断言只看 `name` / `side_effect`，**没人看 `params` 的类型** | 恢复既有结构并新增 `test_catalog_shape_is_a_stable_contract` 钉住响应形状。**对外契约的变更不该靠"碰巧有人用到"来发现** |
 
 ---
 
 ## 验证
 
 ```bash
-pytest -q                       # 364 passed
+pytest -q                       # 365 passed
 python main.py eval             # 14/14（mock 模型）
 python main.py loadtest -c 40 -r 3
 python scripts/overlap_race.py  # 3/3
@@ -438,7 +439,7 @@ python scripts/smoke_http.py    # 59/59（真实 uvicorn 进程，含 react 模�
 ```
 
 ```
-pytest:            364 passed
+pytest:            365 passed
 评测报告:           意图准确率 100.0% · 槽位准确率 100.0% · 端到端通过率 100.0%（14/14）
 并发压测:           3 轮 × 40 并发，每轮恰好 1 成功
 区间重叠竞态:        3/3 未超卖

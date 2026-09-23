@@ -331,9 +331,10 @@ async def _run(args: argparse.Namespace) -> int:
         return await _doctor()
     if args.command == "tools":
         for spec in TOOL_SPECS:
-            print(f"{spec['name']}: {spec['description']}")
-            for key, value in spec["params"].items():
-                print(f"    {key}: {value}")
+            mark = "（写操作 · 默认不对模型暴露）" if spec["side_effect"] else ""
+            print(f"{spec['name']}{mark}: {spec['description']}")
+            for name, desc in spec["params"].items():
+                print(f"    {name}" + (f"  —— {desc}" if desc else ""))
         return 0
     if args.command == "seed":
         # seed() 内部先走 ensure_schema(rebuild=force)：

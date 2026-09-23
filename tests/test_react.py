@@ -122,6 +122,31 @@ def test_tool_catalog_is_derived_from_the_registry():
     }
 
 
+def test_catalog_shape_is_a_stable_contract():
+    """``/api/tools`` 的**响应结构**必须有测试钉住，而不只是内容对。
+
+    这是一个真踩过的坑：``params`` 一度从 ``{字段名: 说明}`` 被改成字段名列表，
+    结果 **364 个测试全绿、只有 CLI 崩了** —— 因为当时所有断言都只看
+    ``name`` / ``side_effect``，没人看 ``params`` 的类型。
+    对外响应结构的变更不该靠"碰巧有人用到"来发现。
+    """
+    catalog = tool_catalog()
+    assert catalog, "清单不该为空"
+    for item in catalog:
+        assert set(item) == {"name", "description", "params", "side_effect"}
+        assert isinstance(item["params"], dict), f"{item['name']} 的 params 必须是 dict"
+        for field, doc in item["params"].items():
+            assert isinstance(field, str) and isinstance(doc, str)
+
+    by_name = {item["name"]: item for item in catalog}
+    # 参数说明与实际校验同源：展示层不该出现"控制台写着 A、模型看到的是 B"
+    assert set(by_name["query_availability"]["params"]) == {
+        "date", "start", "end", "duration_hours", "equipment_name", "category",
+    }
+    assert by_name["create_reservation"]["params"]["purpose"] == "用途说明"
+    assert by_name["list_reservations"]["params"] == {}
+
+
 # ==========================================================================
 # 运行时的边界行为
 # ==========================================================================

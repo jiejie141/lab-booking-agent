@@ -295,22 +295,36 @@ def build_registry(
 
 
 def tool_catalog() -> list[dict[str, Any]]:
-    """给 ``/api/tools`` 与 ``doctor`` 用的展示清单。
+    """给 ``/api/tools`` 与 CLI ``tools`` / ``doctor`` 用的展示清单。
 
     从 :func:`build_registry` **派生**而不是再手写一份：之前 ``TOOL_SPECS``
     是与实现分开维护的第二份清单，正是「两份定义必然漂移」的典型。
     这里用一个占位 user_id 建注册表只为取契约（handler 不会被调用）。
+
+    ``params`` 是 ``{字段名: 说明}`` 的 **dict**，不是字段名列表 ——
+    这是 ``/api/tools`` 的既有响应结构，改形状属于破坏性变更。
+    （曾经把它换成 list，结果 364 个测试全绿、只有 CLI 崩了；
+    现在由 ``test_catalog_shape_is_a_stable_contract`` 钉住。）
     """
     registry = build_registry(user_id=0)
     return [
         {
             "name": spec.name,
             "description": spec.description,
-            "params": list(spec.params.model_fields),
+            "params": _field_docs(spec.params),
             "side_effect": spec.side_effect,
         }
         for spec in registry.specs()
     ]
+
+
+def _field_docs(model: type[BaseModel]) -> dict[str, str]:
+    """从参数模型抽出「字段名 → 说明」，供展示层使用。
+
+    说明取自 ``Field(description=...)``，与发给模型的那份是同一个来源 ——
+    展示与实际校验同源，不会出现"控制台写着 A、模型看到的是 B"。
+    """
+    return {name: (field.description or "") for name, field in model.model_fields.items()}
 
 
 # 兼容原有调用点（api.py 的 /api/tools、cli.py 的 tools 与 doctor）。
