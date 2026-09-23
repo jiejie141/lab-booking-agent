@@ -81,6 +81,18 @@ PostgreSQL 下额外加 `pg_advisory_xact_lock(equipment_id)` 做行级串行；
 
 成功数 > 1 说明索引没生效；成功数 = 0 说明正常请求被误判成了冲突。两个方向都算失败。
 
+> ⚠️ **已知缺口（2026-09-23 实测发现）**：上面的压测里 40 个并发用的是**同一个开始时间**，
+> 走的正是唯一索引能覆盖的路径。唯一索引建在 `(equipment_id, date, start_time)` 上，
+> **拦不住「部分重叠但开始时间不同」的写入** —— `13:00-15:00` 与 `14:00-16:00`
+> 可以同时被预约成功。而 `acquire_equipment_lock()` 在 SQLite 下是空实现，
+> 锁内复检因此退化成 check-then-act。
+>
+> 复现：`python scripts/overlap_race.py` （三种情形 = 1/3 通过）
+>
+> 也就是说：**「并发安全」目前只对同一开始时间成立。** 加固方案见
+> [`docs/ENTERPRISE-UPGRADE.md`](docs/ENTERPRISE-UPGRADE.md) 的 P0-1
+> （PG 排他约束，或时段占用表 + `(equipment_id, date, slot_index)` 唯一索引）。
+
 ### 2. 协商：把「不可预约」拆成一组可比较的取舍
 
 约束是一组可以**逐级放宽**的维度，按代价从低到高走阶梯：
@@ -218,9 +230,19 @@ docker compose up --build
 
 ## 已知限制（明确写出来，而不是藏起来）
 
+> 完整的架构评估（技术栈主流性、分层局限、分期升级方案、安全与容量要求）见
+> [`docs/ENTERPRISE-UPGRADE.md`](docs/ENTERPRISE-UPGRADE.md)。
+
+- **区间不重叠不变式未完全下沉到数据库**（见上文并发一节的缺口说明）——
+  同一开始时间由唯一索引兜底，部分重叠的情形目前拦不住。
+- **没有认证与授权**：`user_id` 直接来自请求体，`GET /api/reservations` 不传参返回全量。
+  仅适合本机演示，**不可直接对外暴露**。
 - **会话状态在进程内存里**：`SessionStore` 只保存「上一轮列出的备选」，用于对上「第 2 个」。
   多进程/多副本部署时会话会漂移，生产形态应当换 Redis 或数据库表。
+- **建表用 `create_all`**：开发够用，**没有迁移能力**。生产应当上 Alembic。
+- **无 CI / 无类型检查 / 无依赖锁定**：`requirements.txt` 是范围约束而非锁文件。
 - **向量检索路径是可选的**：默认走手写 BM25（零依赖）。装了 `chromadb` 才启用
   `vector`/`hybrid`；缺依赖时自动回退并**在 `/api/health` 里说明原因**，不静默降级。
-- **建表用 `create_all`**：开发够用。生产迁移应当上 Alembic（`requirements.txt` 里留了位置）。
 - **准入资质是种子数据**：真实场景应当对接培训记录系统，而不是 `users.certs` 这个 JSON 字段。
+- **`docker-compose.yml` 与 `start-lab-booking-agent.cmd` 未在开发环境实机验证**
+  （沙箱禁止 `wsl.exe` 与 `cmd.exe`）；其核心命令 `main.py serve` 已实测。
