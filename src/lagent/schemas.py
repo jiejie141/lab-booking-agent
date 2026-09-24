@@ -473,3 +473,32 @@ class CancelRequest(BaseModel):
     reservation_id: int
     reason: str = Field(default="", max_length=200)
     as_user_id: int | None = None
+
+
+class ReservationCreate(BaseModel):
+    """**表单式**下单（P0-3）。
+
+    为什么必须补这个接口：原来预约**只能**经过 ``/api/agent/chat`` 走模型 ——
+    模型不可用（断网 / 额度用完 / 端点挂了）时，预约功能是**整体停摆**的。
+    README 里那条"降级链只覆盖模型不听话、不覆盖模型不在"说的就是这件事，
+    而它的后果在当时是"所有人都约不了实验室"。学校系统不能接受这种失败形态。
+
+    所以这里提供一条**不经过模型**的确定性路径：
+    ``create_reservation`` 的全部不变式（资质 / 开放时间 / 粒度对齐 /
+    唯一索引兜底）原样生效，只是把"把中文需求翻译成槽位"这一步交给人。
+    对话入口降级为**可选的便捷方式**，不再是唯一入口。
+
+    身份同样取自令牌；管理员可用 ``as_user_id`` 代他人下单（与取消接口一致）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    equipment_id: int
+    # ISO 日期（"2026-09-25"）与 "HH:MM" 时刻 —— 交给 pydantic 解析，
+    # 业务层的粒度对齐校验仍然由 domain 负责（不在这里重复一遍，
+    # 两处规则一旦不一致就是"过了校验却下不了单"）。
+    date: dt.date
+    start: dt.time
+    end: dt.time
+    purpose: str = Field(default="", max_length=200)
+    as_user_id: int | None = None

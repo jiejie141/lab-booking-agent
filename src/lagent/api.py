@@ -68,7 +68,7 @@ from .domain.access import (
     verify_entry,
     verify_exit,
 )
-from .domain.booking import cancel_reservation, list_reservations
+from .domain.booking import cancel_reservation, create_reservation, list_reservations
 from .knowledge.retriever import build_retriever, fallback_reason
 from .metrics import (
     http_in_progress_dec,
@@ -113,6 +113,7 @@ from .schemas import (
     ChatResponse,
     InsideEntry,
     LoginRequest,
+    ReservationCreate,
     TokenResponse,
     UserOut,
 )
@@ -149,6 +150,26 @@ PROBE_PATHS = frozenset({HEALTH_PATH, READY_PATH, METRICS_PATH})
 # 请求没匹配到任何路由时用的路由标签。**必须是个常量**，不能退回真实 path ——
 # 那是个客户端可控的字符串，每个不同的值都会长出一条新的时间序列。
 UNMATCHED_ROUTE = "__unmatched__"
+
+# 下单失败原因 → HTTP 状态码。只映射 HTTP 本来就表达得了的**粗粒度**：
+# 没找到 / 参数不对 / 没权限 / 冲突。更细的方向（conflict 该多给替代时段、
+# contention 该扩容）由指标与审计承接 —— 把它们塞进状态码里只会得到一个
+# 谁都看不懂的新码。
+#
+# ``unknown`` 是**唯一的例外**，且必须显式写在这里：它表示的是
+# 「领域层返回了失败却没给分类」，也就是**我们的代码漏了 reason**，
+# 而不是用户做错了什么。映射成 409 会让前端提示"换个时间再试" ——
+# 而这件事重试一万次也不会变。给它 500 才能让监控响起来。
+# 其余一律是"业务上的失败"，客户端照着改就行。
+_BOOKING_STATUS = {
+    "not_found": 404,
+    "invalid": 422,
+    "forbidden": 403,
+    "state": 409,
+    "conflict": 409,
+    "contention": 409,
+    "unknown": 500,
+}
 
 # 进程启动时刻（monotonic）。用 monotonic 而不是墙钟：启动时长要能在
 # NTP 校正前后保持一致，否则会出现"运行时间变短了"这种没法解释的现象。
@@ -945,6 +966,66 @@ async def reservations(
     async with session_scope() as session:
         rows = await list_reservations(session, user_id=scope)
     return [row.model_dump(mode="json") for row in rows]
+
+
+@router.post("/api/reservations", status_code=201)
+async def create(body: ReservationCreate, request: Request, user: Principal = Depends(current_user)) -> dict:
+    """**表单式**下单 —— 不经过模型（P0-3）。
+
+    与对话入口共用 ``domain.booking.create_reservation``，
+    所以资质、开放时间、粒度对齐、唯一索引兜底这些不变式**一个都不少**；
+    差别只在于"谁把需求翻译成槽位"：这里由调用方直接给结构化字段。
+
+    失败时按 ``reason`` 选状态码，而不是一律 409：
+    P1-4 给下单结果加了七种机器可读的分类，如果 HTTP 层把它们又压成一个码，
+    那层分类就白做了。映射只覆盖 HTTP 本来就表达得了的粗粒度（没找到 / 参数不对 /
+    没权限 / 冲突），更细的方向由指标与审计承接。
+    """
+    target = user.user_id
+    if body.as_user_id is not None:
+        if not user.is_admin:
+            await audit.record(
+                action=audit.ACTION_BOOK,
+                outcome=audit.OUTCOME_DENIED,
+                actor_id=user.user_id,
+                actor_name=user.username,
+                target_type="equipment",
+                target_id=body.equipment_id,
+                detail="非管理员尝试用 as_user_id 代他人下单",
+                client_host=_client_host(request),
+            )
+            raise HTTPException(status_code=403, detail="只有管理员可以代他人预约")
+        target = body.as_user_id
+
+    outcome = await create_reservation(
+        user_id=target,
+        equipment_id=body.equipment_id,
+        date_=body.date,
+        start=body.start,
+        end=body.end,
+        purpose=body.purpose,
+    )
+    await audit.record(
+        action=audit.ACTION_BOOK,
+        outcome=audit.OUTCOME_OK if outcome.ok else audit.OUTCOME_DENIED,
+        actor_id=user.user_id,
+        actor_name=user.username,
+        target_type="equipment",
+        target_id=body.equipment_id,
+        detail=(
+            f"as_user_id={target} " if target != user.user_id else ""
+        ) + outcome.message,
+        client_host=_client_host(request),
+    )
+    if not outcome.ok:
+        # 默认分支给 500：走到这里的标签要么是新增的 ``BookingReason`` 忘了
+        # 在上面登记，要么是领域层漏了分类 —— 两种都是**我们的**问题。
+        # 假装成 409（冲突）会让用户去重试一个永远重试不成的操作。
+        raise HTTPException(
+            status_code=_BOOKING_STATUS.get(outcome.outcome_label, 500),
+            detail=outcome.message,
+        )
+    return outcome.model_dump(mode="json")
 
 
 @router.post("/api/reservations/cancel")
