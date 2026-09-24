@@ -54,6 +54,7 @@ python main.py
 
 ```bash
 python main.py doctor      # 环境自检：数据库 / 检索 / 模型 / 对话链路
+python main.py migrate     # 迁移数据库到最新 revision（结构变更的唯一入口）
 python main.py chat "明天下午两点想用荧光光谱仪两小时" --user 2
 python main.py eval        # 跑评测集，量出意图与槽位准确率
 python main.py loadtest --concurrency 40 --rounds 3   # 并发抢坑压测
@@ -66,9 +67,10 @@ python scripts/smoke_http.py     # 真实 uvicorn 进程上的冒烟 + 越权清
 
 ### 升级过代码之后报 `no such column: users.xxx`？
 
-这是**开发库过期**，不是程序缺陷。`create_all()` 只会创建缺失的**表**，
-从来不演进已有的表 —— 所以库一旦建立，之后再改 schema（比如 P0-2 给 `users`
-加了 `password_hash`）旧库一点都不会跟着变。
+这是**开发库过期**，不是程序缺陷，也是本项目引入迁移的直接原因：
+`create_all()` 只会创建缺失的**表**，从来不演进已有的表 ——
+所以库一旦建立，之后再改 schema（比如 P0-2 给 `users` 加了 `password_hash`）
+旧库一点都不会跟着变。
 
 它的失败形态很骗人：报错是五十行 SQLAlchemy 堆栈，而且**只有查 `users` 的路径才崩**，
 寒暄类对话照样正常，服务看起来是好的，一到真下单才炸。
@@ -80,7 +82,26 @@ python main.py seed --force   # 删表重建 + 重灌种子（会清空现有数
 ```
 
 `doctor` 会把它列成一条检查项并返回非 0，而不是自己也崩掉。
-真正的迁移能力（Alembic）是 P1 第一项，见「已知限制」。
+
+**P1 起，结构变更由 alembic 迁移维护**（见 [`migrations/README.md`](migrations/README.md)）：
+
+```bash
+python main.py migrate                        # 升到最新 revision
+python main.py migrate --revision base --down  # 回滚到空库（只留版本表）
+```
+
+升级到本版本时，一个「迁移之前建好的老库」会有两种命运，都由代码判定、不需要人猜：
+
+| 库的形态 | 处理 |
+| --- | --- |
+| 空库 / 换了库文件 | `upgrade head`，建出全部 10 张表 |
+| 有表、无版本号、结构与代码一致 | `stamp head` **接管** —— 一行 DDL 都不执行、不动数据 |
+| 有表、无版本号、结构与代码不一致 | 明确报错 + 给出重建命令（不猜） |
+| 有版本号 | `upgrade head`，应用尚未执行的迁移 |
+
+最后一种不自动猜是有意的：迁移的语义是「从一个已知结构往前走」，
+而一个不知道自己是哪个结构的库没有这个起点 —— 硬升上去的报错是
+`table xxx already exists` 加一屏堆栈，从那里看不出「你该重建库」。
 
 接入真实模型：`cp .env.example .env`，把 `LAB_APP_MODE` 改成 `live` 并填 `LAB_LLM_API_KEY`。
 任何 OpenAI 兼容端点都能用（官方 / 中转站 / 本地 ollama 的 `/v1`）。
@@ -480,6 +501,7 @@ $ python main.py access-demo      # 跑在一次性沙箱库上；pytest tests/t
 | `src/lagent/ratelimit.py` | 进程内滑动窗口限流 |
 | `src/lagent/api.py` | HTTP 层（15 个 API + 1 个页面），`create_app()` 工厂 + APIRouter |
 | `src/lagent/web/index.html` | 控制台：**零依赖单文件**，登录闸门 + 深浅色主题 |
+| `migrations/` + `alembic.ini` | 数据库迁移：**结构变更唯一被允许的入口**（`0001` 覆盖全部 10 张表），说明见 `migrations/README.md` |
 
 关键的边界：**模型不决定事实，也不决定权限**。资质够不够、时段有没有冲突、
 谁能看什么，全部由代码判定；模型只负责把中文需求抽成槽位、把结构化事实写成人话。
@@ -579,26 +601,45 @@ react ──模型故障 / 步数耗尽 / 不按格式回──▶ deterministic
 | 冒烟里「在馆者重复刷卡」这条**恒真** | 断言只写了 `granted is False`，于是"因为凭证刚好过期而被拒"也能让它变绿 | 收紧到断言 `reason_code == already_inside`。**只断"被拒"不断"为什么拒"，等于给假阴性留后门** |
 | 冒烟清单**突然每条都 404**，且与代码改动无关 | 开发机设了 `HTTP_PROXY`（CI / 公司网络 / 本地中间件都会设）而 `NO_PROXY` 没包含 `127.0.0.1`；httpx 默认 `trust_env=True`，于是**连发往本机端口的请求也走了代理**。代理用 absolute-form 请求行（`GET http://127.0.0.1:8200/`）转发，服务端匹配不到路由，于是全 404 | 本机探测一律 `trust_env=False`（`local_client()` 助手），子进程环境补 `NO_PROXY=127.0.0.1,localhost`。**症状像"应用路由全丢了"，实际一行业务代码都没错 —— 这类"环境冒充代码 bug"最该留下痕迹** |
 
+### P1-1（数据库迁移）期间新踩的
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| `alembic.ini` 里写了中文注释 → 迁移**在执行前就崩**，报 `UnicodeDecodeError: 'gbk' codec can't decode byte` | alembic 读 ini 用的是 **locale 编码**（`alembic/util/compat.py` 里 `read_config_parser(..., encoding="locale")`）。Windows 中文环境 locale 是 GBK，文件里任何一个中文字都会炸；报错位置（configparser）离原因（有个中文字）很远 | ini 保持**纯 ASCII**，中文说明移进 `migrations/README.md`。`tests/test_migrations.py` 直接断言 ini 可被 ASCII 解码 —— 这条不是洁癖，是启动崩溃点 |
+| `alembic upgrade head` **静默成功、没有任何输出**，运维时看不出升到哪了 | 守卫写成了 `if not logger.handlers`，而 alembic 自己给 `alembic` logger 挂了一个 `NullHandler`（库的常规做法），于是那个判断**永远为假**，handler 从未挂上 | 用一个自定义标记位表达"我们挂过了"（`_lagent_cli_handler`）。**判断"我有没有配过"不能拿别人可能已经动过的状态当依据** |
+| `python main.py migrate` 在老库上甩出一屏 SQLAlchemy 堆栈（`table audit_logs already exists`），完全看不出该做什么 | `migrate()` 直接调 `command.upgrade`，绕过了 `init_db` 里的"接管老库"判定 —— 判定写在调用方而不是被调方 | 把「接管 or 升级」的判定**移进 `migrate()` 自己**。两个入口（`ensure_schema` / `migrate`）各写一条回归测试钉住。**约束放在调用方 = 迟早有一条路径绕过它** |
+| `alembic upgrade base` 返回成功但**库一点没变** | `base` 不是前向目的地，`upgrade` 对它静默无效 | 拆成方向明确的 `migrate()` / `downgrade()`；CLI 收到 `--revision base` 但没加 `--down` 时**直接返回 2 并说明方向**。**「命令跑成功了但什么都没发生」是最难查的一类故障** |
+| README 写着"mypy 干净"，实际跑出来 **2 个报错**（`unused-ignore` + `ReActAgent` 参数类型） | `ReActAgent` 的 `client` 声明成完整的 `LLMClient`，但它只用到 `chat_tools` 一个方法；测试里只实现 `chat_tools` 的脚本化假模型因此类型不匹配。另一处是一个早已用不上的 `# type: ignore`（`disallow_untyped_defs` 本来就没开） | 按**实际需要**收窄契约：新增 `ModelIdentity`（只读 `name`）作为共同契约的最小要求，`ReActAgent.client` 改成 `ToolCallingLLM`。**"质量门是绿的"这句话本身也要有证据** —— 这次的证据是 `mypy` 的实际输出，不是上一次的印象 |
+
 ---
 
 ## 验证
 
 ```bash
-pytest -q                       # 425 passed
+pytest -q                       # 443 passed
 python main.py eval             # 14/14（mock 模型）
 python main.py loadtest -c 40 -r 3
 python main.py access-demo      # 8/8（人员准入：未预约拦截 / 单次核销 / 容量）
+python main.py migrate          # 0001 (head)，结构校验与代码一致
 python scripts/overlap_race.py  # 3/3
 python scripts/smoke_http.py    # 70/70（真实 uvicorn 进程，含 react 模式与降级链）
 ```
 
 ```
-pytest:            425 passed
+pytest:            443 passed
 评测报告:           意图准确率 100.0% · 槽位准确率 100.0% · 端到端通过率 100.0%（14/14）
 并发压测:           3 轮 × 40 并发，每轮恰好 1 成功
 区间重叠竞态:        3/3 未超卖
 人员准入:           8/8（含 2 人并发抢容量 1 的房间，恰好 1 人放行）
+数据库迁移:         18 项（迁移产物 vs 模型 diff 为空 / 部分索引 WHERE 未丢 / 回滚可往返 / 老库接管）
 HTTP 越权清单:       70/70（含 deterministic / react / degraded / 端点不可达四种启动配置）
+```
+
+静态检查（与 CI 同一套）：
+
+```bash
+ruff check .   # All checks passed!
+mypy           # Success: no issues found in 57 source files
 ```
 
 覆盖范围：意图分类、中文时间解析（「下午两点到四点」的时段继承）、六道约束判定、
@@ -659,11 +700,14 @@ docker compose up --build
   生产必须换成 Redis 计数器。
 - **没有 refresh token**：访问令牌 2 小时到期就得重新登录。刻意这么选 ——
   与其签一个 7 天的令牌假装很安全，不如把风险窗口压小。
-- **建表用 `create_all`**：开发够用，**没有迁移能力**。`create_all()` 只建缺失的表、
-  从不演进已有的表，所以改 schema 后旧库会静默停在老结构上。项目靠
-  `ensure_schema()` 在启动/自检/种子三条路径上做结构校验并**拒绝带病启动**，
-  修法是 `seed --force` 重建（见上文「升级过代码之后报 …」）。
-  真正的迁移能力应当上 Alembic —— 这是 P1 的第一项。
+- **迁移管不住「改了 `models.py` 却没生成迁移」**：迁移只保证「按 revision 升上来的库是对的」。
+  这种情况由 `tests/test_migrations.py` 在 CI 里守住 —— 它直接比对「迁移建出来的库」
+  与「模型定义」，diff 必须为空（含列类型变更，`compare_type=True`）。
+  这个断言的失效模式值得记住：**它一红，其余测试的通过就都不可信了**，
+  因为功能测试只会走到它用到的那几列。
+- **迁移没有做「生产回归演练」**：`0001` 是从空库一次性建起的初始 revision，
+  真正的考验是第二条 revision（`ALTER TABLE`）。SQLite 已经配好 batch 模式，
+  但没有真实数据量的演练，这一点尚未验证。
 - **上下文预算是估算，不是精确分词**：按 CJK 1 token / 其余 4 字符 1 token 折算，
   偏保守（宁可多裁）。不引 tiktoken 是为了避免一个带本地二进制资源的重依赖，
   且不同模型编码并不一致。要精确请按目标模型换 tokenizer。

@@ -33,8 +33,11 @@ from .config import get_settings
 from .db import (
     SchemaDriftError,
     dispose_engine,
+    downgrade,
     init_db,
     isolated_database,
+    migrate,
+    revision_status,
     schema_drift,
     session_scope,
 )
@@ -65,9 +68,10 @@ async def _doctor() -> int:
     # 「no such column ...」加一屏堆栈，看不出「该重建库」。自检命令的职责
     # 恰恰是把这种情况翻译成人能照着做的话 —— 而不是自己也崩掉
     # （它真崩过一次，所以这里是一条回归点）。
+    current, head = await revision_status()
     drift = await schema_drift()
     if drift:
-        print("  ✗ 数据库结构      : 与代码不一致")
+        print(f"  ✗ 数据库结构      : 与代码不一致（库 revision={current or '无'} / head={head}）")
         for item in drift:
             print(f"      · {item}")
         print("      修法 A：python main.py seed --force     重建演示库（会清空现有数据）")
@@ -75,6 +79,7 @@ async def _doctor() -> int:
         print("=" * 66)
         print("自检未通过：库结构过期。修好后请重新跑一次 python main.py doctor")
         return 1
+    print(f"  迁移 revision     : {current} (head={head})")
 
     info = await seed()
     print(f"  seed              : {'已灌入' if info['seeded'] else '跳过'} {info.get('reason', '')}")
@@ -479,6 +484,48 @@ async def _access_demo() -> int:
 
 
 # ==========================================================================
+# migrate
+# ==========================================================================
+async def _migrate(revision: str, *, down: bool = False) -> int:
+    """把库迁移到指定 revision，并打印前后版本。
+
+    为什么值得单独一个子命令，而不是让人直接敲 `alembic upgrade head`：
+    alembic 自己那条路径要额外带对 `-c alembic.ini`、环境变量也得先设好；
+    而 `python main.py migrate` 与 `doctor` / `serve` 用的是**同一套配置加载**，
+    不会出现「迁移升的库和服务连的库不是同一个」。
+    """
+    before, head = await revision_status()
+    print(f"  库当前 revision : {before or '（未纳入迁移管理 / 空库）'}")
+    print(f"  代码 head       : {head}")
+
+    if down:
+        after = await downgrade(revision)
+    else:
+        # `alembic upgrade base` 是**静默无效**的：base 不是前向目的地。
+        # 「命令跑成功了、库一点没变」是最难查的一类问题，所以在这里直接拦下来，
+        # 而不是让它返回 0 然后什么都不做。
+        if revision == "base":
+            print("  ✗ --revision base 是「回退到空库」，属于回退方向。")
+            print("    要回退请显式加 --down：python main.py migrate --revision base --down")
+            return 2
+        after = await migrate(revision)
+
+    if after == before:
+        print(f"  结果            : 已是最新，无需迁移（{after}）")
+    else:
+        print(f"  结果            : {before or '空库'} → {after}")
+
+    drift = await schema_drift()
+    if drift:
+        print("  ⚠ 迁移已执行，但结构仍与代码不一致：")
+        for item in drift:
+            print(f"      · {item}")
+        raise SchemaDriftError(drift)
+    print("  结构校验        : 与代码一致")
+    return 0
+
+
+# ==========================================================================
 # 入口
 # ==========================================================================
 def build_parser() -> argparse.ArgumentParser:
@@ -487,6 +534,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("doctor", help="环境自检：数据库、检索、模型、对话链路")
     sub.add_parser("tools", help="列出已注册的工具")
+
+    migrate_parser = sub.add_parser("migrate", help="把数据库迁移到指定 revision（默认 head）")
+    migrate_parser.add_argument(
+        "--revision", default="head", help="目标 revision（默认 head；回退时常用 base）"
+    )
+    migrate_parser.add_argument(
+        "--down",
+        action="store_true",
+        help="回退方向（downgrade）。不加 = 前向升级；--revision base --down 会倒空所有表",
+    )
 
     seed_parser = sub.add_parser("seed", help="灌入种子数据")
     seed_parser.add_argument("--force", action="store_true", help="清空并重建")
@@ -519,6 +576,8 @@ def build_parser() -> argparse.ArgumentParser:
 async def _run(args: argparse.Namespace) -> int:
     if args.command == "doctor":
         return await _doctor()
+    if args.command == "migrate":
+        return await _migrate(args.revision, down=args.down)
     if args.command == "tools":
         for spec in TOOL_SPECS:
             mark = "（写操作 · 默认不对模型暴露）" if spec["side_effect"] else ""

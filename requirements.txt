@@ -15,6 +15,8 @@ langgraph>=0.2.0
 # --- 数据层（SQLite 本地默认 / PostgreSQL 走 docker-compose） ---
 sqlalchemy[asyncio]>=2.0.0
 aiosqlite>=0.20.0
+# 迁移：结构变更唯一被允许的入口（见 migrations/README.md）
+alembic>=1.13.0
 
 # --- 配置与模型 ---
 pydantic>=2.7.0
@@ -40,7 +42,6 @@ pytest-asyncio>=0.24.0
 # ===========================================================================
 # 生产数据库：docker-compose 的 api 容器内已装
 # asyncpg>=0.29.0
-# alembic>=1.13.0
 #
 # 向量检索路径（RETRIEVAL_BACKEND=vector / hybrid）
 # chromadb>=0.5.0

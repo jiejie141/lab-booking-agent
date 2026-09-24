@@ -45,6 +45,26 @@ from .llm import LLMClient
 from .state import STORE, AgentState, SessionStore, pick_proposal
 
 
+class ModelIdentity(Protocol):
+    """契约里对模型客户端的**最小**要求。
+
+    自检（doctor）与健康检查用到客户端的地方只有两处：判「有没有模型」、
+    报「它叫什么」。所以这里只要 ``name``。
+
+    刻意比 :class:`~lagent.agent.llm.LLMClient` 窄：ReAct 模式需要的只是
+    「会调工具的模型」，把共同契约写宽了，就会强迫 ReAct 的每个测试替身
+    多实现四个用不到的 NLU 方法 —— 「为了过类型检查而写的空实现」
+    是最容易腐烂的一类代码。
+
+    声明成只读属性而不是可写变量：两个实现暴露的类型本来就不同
+    （``LLMClient | None`` 与 ``ToolCallingLLM | None``），可写变量会要求
+    不变性，只读属性只要求协变 —— 后者才符合「只是读一下」的事实。
+    """
+
+    @property
+    def name(self) -> str: ...
+
+
 class ChatAgent(Protocol):
     """执行入口的统一契约。
 
@@ -56,7 +76,8 @@ class ChatAgent(Protocol):
     那是运行环境的一部分，不该靠 isinstance 去猜实现。
     """
 
-    client: LLMClient | None
+    @property
+    def client(self) -> ModelIdentity | None: ...
 
     async def ainvoke(self, req: ChatRequest) -> ChatResponse: ...
 

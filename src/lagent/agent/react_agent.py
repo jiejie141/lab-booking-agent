@@ -31,7 +31,14 @@ from __future__ import annotations
 
 from ..clock import now_local
 from ..config import Settings, get_settings
-from ..harness import ContextBuilder, ReActOutcome, ReActRuntime, Span, ToolResult
+from ..harness import (
+    ContextBuilder,
+    ReActOutcome,
+    ReActRuntime,
+    Span,
+    ToolCallingLLM,
+    ToolResult,
+)
 from ..schemas import (
     ChatRequest,
     ChatResponse,
@@ -41,7 +48,6 @@ from ..schemas import (
     TraceStep,
 )
 from .graph import DEGRADED_REPLY, LabBookingAgent
-from .llm import LLMClient
 from .state import STORE, SessionStore
 from .tools import build_registry
 
@@ -72,7 +78,15 @@ class ReActAgent:
 
     def __init__(
         self,
-        client: LLMClient | None,
+        # 这里刻意**不**要完整的 ``LLMClient``，只要 ``ToolCallingLLM``：
+        # ReAct 路径用到客户端的地方只有 ``chat_tools`` 一处（第 106 行传给
+        # ReActRuntime）。少写一个过度宽的类型有两个好处 ——
+        #   * 测试可以用只实现 chat_tools 的脚本化假模型，不必为了满足协议
+        #     再补出四个用不到的 NLU 方法（那种"为通过类型检查而写"的空实现
+        #     是最容易腐烂的代码）；
+        #   * 类型本身说明了职责边界：NLU（意图/槽位）是 deterministic 路径与
+        #     降级链的事，不是 ReAct 的事。
+        client: ToolCallingLLM | None,
         store: SessionStore | None = None,
         *,
         settings: Settings | None = None,

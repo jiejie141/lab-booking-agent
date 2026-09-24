@@ -217,7 +217,7 @@ async def test_llm_failure_becomes_a_judgeable_value():
     class _Boom:
         name = "boom"
 
-        async def chat_tools(self, messages, tools):  # type: ignore[no-untyped-def]
+        async def chat_tools(self, messages, tools):
             raise RuntimeError("连接被重置")
 
     runtime = ReActRuntime(llm=_Boom(), registry=build_registry(user_id=1), max_steps=2)

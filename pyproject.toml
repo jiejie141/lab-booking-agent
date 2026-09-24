@@ -52,7 +52,7 @@ ignore = [
 # ---------------------------------------------------------------------------
 [tool.mypy]
 python_version = "3.10"
-files = ["src/lagent", "tests", "scripts"]
+files = ["src/lagent", "tests", "scripts", "migrations"]
 # 不追求 strict：本项目有完整标注，但 strict 会强迫给 SQLAlchemy 的
 # 动态属性和 pydantic 的 validator 加一堆无意义的 ignore。
 # 目标定在「能抓出真正的类型错误，且不需要靠 ignore 维持」。

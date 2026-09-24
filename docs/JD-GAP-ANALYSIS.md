@@ -223,7 +223,7 @@ Harness 运行时层 —— 新建，本 JD 的决胜点
 | 限流 | 进程内滑动窗口 | **Redis 计数器，用 Lua 保证原子性** | 两副本下配额不被乘 2 |
 | 缓存 | 无（检索器每请求重建） | Redis 缓存设备目录 / 实验室 / 检索器单例 | 单请求不再重建索引 |
 | 长任务 | 同步阻塞在请求里 | **MQ**（ARQ/Celery）+ 202 + task_id + SSE/轮询 | 模型慢时接口不超时 |
-| Schema | `create_all`（刚加了漂移检测） | **Alembic** | 变更可回滚 |
+| Schema | ~~`create_all`~~ → **Alembic 已落地**（`migrations/`，`0001` 覆盖全部 10 张表） | ✅ 完成 | 变更可回滚；CI 断言「迁移产物 vs 模型 diff 为空」 |
 | 基线 | 无 | 压测出 p95 / 错误率写进 README | 有数字可引用 |
 
 ⚠️ **口径要守住**：单机 40 并发**不是高并发**。这里的价值是
@@ -261,7 +261,7 @@ Harness 运行时层 —— 新建，本 JD 的决胜点
 | A 划清界限与对齐口径 | ✅ 完成 | README / `doctor` 都已写明路由机制（见 `9d248ed`） |
 | B 让模型拥有决策权 | 🟡 **部分完成** | ReAct 循环、schema 校验、非法参数回喂、结果截断、副作用护栏 —— **都已落地**（见 `ff747ff`）。**但 `tool_selection` 评测档没有做**，`live` 模式数字也没有 —— 缺的正是 B 的验收条件 |
 | C 抽出 Harness 层 | ✅ 完成 | `harness/` 四个模块 + 分层 AST 检查 + 23 项单测；两种执行模式配置切换；降级链落地 |
-| D 补齐基础设施 | ⬜ 未开始 | Redis / MQ / OTel / pgvector / Alembic |
+| D 补齐基础设施 | 🟡 **部分完成** | **Alembic 已落地**（见上表）；Redis / MQ / OTel / pgvector **仍未做** |
 | E 多智能体与真模型评测 | ⬜ 未开始 | 依赖 D |
 
 **B 为什么只算部分完成**：代码能力面已经全部落地（模型真的在 `llm.py` 里拿到了
@@ -313,7 +313,9 @@ Harness 运行时层 —— 新建，本 JD 的决胜点
 - **可观测**：`structlog` JSON 日志（request_id 贯穿）+ Prometheus `/metrics` + 自研 trace 转 OTel span。
 - **pgvector**：真 embedding 向量检索 + 混合检索，**并补检索质量评测（recall@k / MRR）**
   —— 有数字的 RAG 和"我用了 RAG"是两个层次。
-- **Alembic**：替换 `create_all`（正好接上刚修的那条 schema 漂移）。
+- **Alembic**：✅ 已落地 —— 替换了 `create_all`，正好接上刚修的那条 schema 漂移。
+  老库有两条出路（结构与代码一致 → `stamp head` 接管；不一致 → 明确要求重建），
+  这条边界值得单独讲，因为它回答的是「你怎么处理存量数据」。**其余四项仍未做**。
 - **验收**：**跑两个副本 + PostgreSQL，多轮对话不漂移**；压测 p95 与错误率基线写进 README。
 
 ### 阶段 E｜多智能体调度 + 真模型评测（3–5 天）—— 加分与差异化

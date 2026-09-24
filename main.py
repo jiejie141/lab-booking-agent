@@ -2,6 +2,7 @@
 
     python main.py                    # 启动 Web 控制台
     python main.py doctor             # 环境自检
+    python main.py migrate            # 迁移数据库到最新 revision
     python main.py loadtest           # 并发抢坑压测
     python main.py eval               # 跑评测集
     python main.py access-demo        # 人员准入实证（未预约拦截/单次核销/容量）
@@ -19,7 +20,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 
-SUBCOMMANDS = {"doctor", "tools", "seed", "chat", "loadtest", "eval", "access-demo", "serve"}
+SUBCOMMANDS = {
+    "doctor",
+    "migrate",
+    "tools",
+    "seed",
+    "chat",
+    "loadtest",
+    "eval",
+    "access-demo",
+    "serve",
+}
 
 
 def main() -> int:

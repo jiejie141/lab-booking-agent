@@ -110,7 +110,7 @@ class TestDriftDetection:
         assert "password_hash" in message
         # 而且必须给出**能照着做**的修法，不能只说「不一致」
         assert "seed --force" in message
-        assert "create_all()" in message, "要解释为什么会这样，否则用户会以为是 bug"
+        assert "alembic" in message, "要解释结构由谁维护，否则用户会以为是 bug"
 
     async def test_drift_is_exposed_as_data_not_only_an_exception(self, stale_db):
         """doctor 这类诊断工具需要的是「数据」而不是异常，否则它自己会崩。"""
