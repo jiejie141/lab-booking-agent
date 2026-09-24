@@ -16,7 +16,21 @@ if not exist ".venv\Scripts\python.exe" (
   if errorlevel 1 goto :fail
 )
 
+REM JWT secret: the service now refuses to start with the public built-in
+REM default (fail-closed), so a fresh clone would stop right here.
+REM Keep this launcher one-click by generating a random secret per run --
+REM random, never the published value, and never written to a file.
+if not defined LAB_JWT_SECRET (
+  for /f %%S in ('".venv\Scripts\python.exe" -c "import secrets;print(secrets.token_hex(32))"') do set "LAB_JWT_SECRET=%%S"
+)
+if not defined LAB_JWT_SECRET (
+  echo [fail] could not generate a JWT secret.
+  pause
+  exit /b 1
+)
+
 echo [run] http://127.0.0.1:8200  -  press Ctrl+C to stop
+echo [run] one-time random JWT secret generated for this session
 ".venv\Scripts\python.exe" main.py serve
 exit /b %errorlevel%
 

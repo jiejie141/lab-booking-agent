@@ -30,10 +30,14 @@ python -m venv .venv
 # source .venv/bin/activate       # macOS / Linux
 pip install -r requirements.txt
 
-# 2) 一键起服务（会自动建库 + 灌种子数据）
+# 2) 设一个签名密钥（服务**拒绝**用仓库内置的公开默认值启动，见 §9）
+export LAB_JWT_SECRET=$(python -c "import secrets;print(secrets.token_hex(32))")
+# Windows: set LAB_JWT_SECRET=<一串随机字符>   （双击 .cmd 会自动生成一个）
+
+# 3) 一键起服务（会自动建库 + 灌种子数据）
 python main.py
 
-# 或双击 start-lab-booking-agent.cmd（Windows）
+# 或双击 start-lab-booking-agent.cmd（Windows，会自己生成一次性随机密钥）
 ```
 
 打开 <http://127.0.0.1:8200> 会先看到**登录闸门**。演示账号：
@@ -958,7 +962,7 @@ react ──模型故障 / 步数耗尽 / 不按格式回──▶ deterministic
 ## 验证
 
 ```bash
-pytest                          # 633 passed
+pytest                          # 639 passed
 python main.py eval             # 14/14（mock 模型）
 python main.py loadtest -c 40 -r 3
 python main.py access-demo      # 8/8（人员准入：未预约拦截 / 单次核销 / 容量）
@@ -970,7 +974,7 @@ python scripts/smoke_http.py    # 83/83（真实 uvicorn 进程，含 react 模�
 ```
 
 ```
-pytest:            633 passed
+pytest:            639 passed
 评测报告:           意图准确率 100.0% · 槽位准确率 100.0% · 端到端通过率 100.0%（14/14）
 并发压测:           3 轮 × 40 并发，每轮恰好 1 成功
 区间重叠竞态:        3/3 未超卖
@@ -992,7 +996,8 @@ mypy           # Success: no issues found in 65 source files
 覆盖范围：意图分类、中文时间解析（「下午两点到四点」的时段继承）、六道约束判定、
 协商阶梯与排序、并发下单、**区间重叠与粒度对齐**、多轮合并与回归、图路由与 trace 累加、
 **JWT 签名/过期/篡改/alg 混淆/账号枚举**、**RBAC 与越权读写**、
-**请求体上限/CORS/限流/输入白名单**、**审计留痕与事务独立性**、数据库隔离、
+**请求体上限/CORS/限流/输入白名单**、**签名密钥 fail-closed（默认密钥/空值/纯空白一律拒绝启动，显式开关下打 CRITICAL）**、
+**审计留痕与事务独立性**、数据库隔离、
 **harness 分层边界（AST 静态检查）/工具注册与副作用护栏/上下文裁剪优先级/span 埋点**、
 **ReAct 循环收敛与降级**、**人员准入（资质有效期/单次核销/人卡一致/容量不变式）**、
 **后台清扫（幂等 / 失败隔离 / 归档不丢数据 / 清扫不是安全依赖 / lifespan 接线）**、
@@ -1036,7 +1041,10 @@ docker compose up --build
 ```
 
 生产部署前必须做的一件事：设置 `LAB_JWT_SECRET`。
-用仓库内置默认密钥时服务启动会打印告警 —— 那个默认值是公开的，任何人都能伪造令牌。
+**用仓库内置默认密钥（或留空）时服务会拒绝启动，而不是打一条告警继续跑 ——**
+那个默认值是公开的，任何人都能伪造令牌；一个能伪造管理员身份的密钥
+没有"先跑起来再说"的余地。本地演示可显式设 `LAB_ALLOW_INSECURE_DEFAULTS=true`
+（该模式下每次启动都会打一条 CRITICAL，可被告警规则抓到）。
 
 ---
 

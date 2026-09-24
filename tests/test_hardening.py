@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 from typing import Any, cast
 
 import httpx
+import pytest
 from conftest import auth_header, login
 
 
@@ -25,8 +27,13 @@ async def app_client(monkeypatch, **env):
     必须这样测：CORS 白名单和体积上限都是 ``create_app()`` 构造时读进来的，
     对着模块级单例测等于只测了"生产那一份配置"。
     """
+    # 默认**显式**允许不安全密钥：这一组用例测的是请求体 / CORS / 限流，
+    # 不该被「密钥不安全就拒绝启动」那道闸挡在门外。
+    # 要测那道闸本身时传 insecure_ok=False（见文末 TestInsecureSecretRefusesToStart）。
+    insecure_ok = env.pop("insecure_ok", True)
     for key, value in env.items():
         monkeypatch.setenv(f"LAB_{key.upper()}", str(value))
+    monkeypatch.setenv("LAB_ALLOW_INSECURE_DEFAULTS", "true" if insecure_ok else "false")
 
     from lagent.api import create_app
     from lagent.config import reset_settings_cache
@@ -279,3 +286,74 @@ class TestInputValidation:
             headers=await as_user("李娜"),
         )
         assert resp.status_code == 409
+
+
+# ==========================================================================
+# 签名密钥 fail-closed（原来只是打一条 WARNING 然后照常跑）
+# ==========================================================================
+class TestInsecureSecretRefusesToStart:
+    """★ 这道闸的价值在于「生产环境不可能忘了配」。
+
+    改之前：用仓库内置的公开默认密钥（或空密钥）也能照常起服务，
+    启动日志里只有一条 WARNING —— 而 WARNING 会被忽略，
+    结果是任何人都能签出管理员令牌。
+    """
+
+    async def test_the_built_in_default_refuses_to_start(self, monkeypatch):
+        """仓库里的默认值是公开的：用它启动必须失败，不是"警告一下继续"。"""
+        from lagent.security import InsecureSecretError
+
+        with pytest.raises(InsecureSecretError, match="公开默认密钥"):
+            async with app_client(monkeypatch, insecure_ok=False):
+                pass  # pragma: no cover —— 能进来就说明闸没生效
+
+    async def test_an_empty_secret_refuses_to_start(self, monkeypatch):
+        """``LAB_JWT_SECRET=``（写了键没给值）与默认密钥一样危险。
+
+        只判断"环境变量存在"是最容易漏的一种写法：空密钥照样能签，
+        而且看起来像是"我配过了"。
+        """
+        from lagent.security import InsecureSecretError
+
+        with pytest.raises(InsecureSecretError, match="未设置"):
+            async with app_client(monkeypatch, jwt_secret="", insecure_ok=False):
+                pass  # pragma: no cover
+
+    async def test_a_whitespace_only_secret_refuses_to_start(self, monkeypatch):
+        """纯空白是同一件事的另一种写法（.env 里手滑留了个空格）。"""
+        from lagent.security import InsecureSecretError
+
+        with pytest.raises(InsecureSecretError, match="未设置"):
+            async with app_client(monkeypatch, jwt_secret="   ", insecure_ok=False):
+                pass  # pragma: no cover
+
+    async def test_the_opt_in_flag_still_allows_local_demos(self, monkeypatch, caplog):
+        """显式打开开关仍然能起 —— 但必须留下一条 CRITICAL 让人/告警看得见。"""
+        with caplog.at_level(logging.CRITICAL):
+            async with app_client(monkeypatch, insecure_ok=True):
+                pass
+        messages = [record.message for record in caplog.records]
+        assert any("不安全的签名密钥" in str(message) for message in messages), messages
+
+    async def test_a_real_secret_starts_cleanly(self, monkeypatch, caplog):
+        """配了真密钥就不该有任何噪声 —— 否则告警会变成狼来了。"""
+        with caplog.at_level(logging.CRITICAL):
+            async with app_client(monkeypatch, jwt_secret="a-real-random-secret-value"):
+                pass
+        assert not [r for r in caplog.records if "签名密钥" in str(r.message)]
+
+    def test_secret_problem_returns_a_reason_not_a_bool(self, monkeypatch):
+        """返回原因而不是布尔值：调用方直接把它写进日志与异常消息，
+        于是"为什么起不来"不用靠人回头去猜配置。"""
+        from lagent.config import reset_settings_cache
+        from lagent.security import secret_problem
+
+        monkeypatch.setenv("LAB_JWT_SECRET", "")
+        reset_settings_cache()
+        assert secret_problem() is not None
+        assert "未设置" in str(secret_problem())
+
+        monkeypatch.setenv("LAB_JWT_SECRET", "something-random-enough")
+        reset_settings_cache()
+        assert secret_problem() is None
+        reset_settings_cache()

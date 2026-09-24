@@ -39,6 +39,10 @@ services:
       # mock = 不联网、不需要 key，开箱即可演示
       LAB_APP_MODE: mock
       LAB_RETRIEVAL_BACKEND: bm25
+      # ⚠️ 不给默认值：没设就**起不来**（compose 会在解析阶段报错退出）。
+      # 若在这里写死一个密钥，它和仓库里的默认密钥一样是公开的 ——
+      # 那等于把 fail-closed 这道闸又关掉了。
+      LAB_JWT_SECRET: ${LAB_JWT_SECRET:?请先在 .env 或环境中设置 LAB_JWT_SECRET}
     ports:
       - "8200:8200"
     restart: unless-stopped

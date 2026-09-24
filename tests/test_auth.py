@@ -24,7 +24,7 @@ from lagent.security import (
     decode_access_token,
     hash_password,
     principal_from_token,
-    uses_default_secret,
+    secret_problem,
     verify_password,
 )
 
@@ -175,8 +175,15 @@ class TestTokenIntegrity:
             reset_settings_cache()
 
     def test_default_secret_is_flagged(self):
-        assert uses_default_secret() is True
-        assert DEFAULT_JWT_SECRET  # 常量必须真的有值，否则告警逻辑形同虚设
+        """默认密钥必须被判为「有问题」—— 这条是 fail-closed 那道闸的前提。
+
+        闸门本身的行为（拒绝启动）在
+        ``tests/test_hardening.py::TestInsecureSecretRefusesToStart``；
+        这里只钉住判定：常量真的有值，且判定函数认得出它。
+        """
+        assert DEFAULT_JWT_SECRET  # 常量必须真的有值，否则判定形同虚设
+        assert secret_problem() is not None
+        assert "公开默认密钥" in str(secret_problem())
 
 
 # ==========================================================================

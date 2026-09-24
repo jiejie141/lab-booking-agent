@@ -255,6 +255,32 @@ def principal_from_token(token: str, *, now_ts: int | None = None) -> Principal:
 DEFAULT_JWT_SECRET = "dev-insecure-secret-change-me"
 
 
-def uses_default_secret() -> bool:
-    """是否仍在用仓库里公开的默认密钥 —— 生产环境必须具备此告警。"""
-    return get_settings().jwt_secret == DEFAULT_JWT_SECRET
+class InsecureSecretError(RuntimeError):
+    """签名密钥不安全 —— 服务拒绝启动。
+
+    刻意做成**异常**而不是「打一行日志继续跑」：日志会被忽略，
+    而一个能伪造任意身份（含管理员）的密钥，不该有任何"继续跑"的余地。
+    """
+
+
+def secret_problem() -> str | None:
+    """检查签名密钥，返回一句可直接打给人看的原因；``None`` 表示没问题。
+
+    返回**原因**而不是布尔值：调用方要把它写进日志与异常消息，
+    于是「为什么起不来」不用靠人回头去猜配置 —— 这个理由本身就是排障信息。
+
+    两个刻意覆盖的边界：
+
+    * ``LAB_JWT_SECRET=``（写了键没给值）与只有空白字符 ——
+      空密钥和默认密钥**一样是公开的**，不能因为"环境变量存在"就当成已配置。
+    * 默认密钥本身：它写在公开仓库里，任何人都能用它签出任意身份的令牌。
+
+    只判断**已知的公开值**，不猜"这个密钥够不够强" ——
+    强度策略（长度、熵）该由部署方定，代码假装能判断反而给出虚假的安全感。
+    """
+    raw = get_settings().jwt_secret
+    if raw.strip() == "":
+        return "LAB_JWT_SECRET 未设置（或只有空白字符）"
+    if raw == DEFAULT_JWT_SECRET:
+        return "仍在使用仓库内置的公开默认密钥，任何人都能伪造任意身份的令牌"
+    return None

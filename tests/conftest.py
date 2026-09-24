@@ -41,6 +41,12 @@ async def isolated_db(tmp_path, monkeypatch):
     # 于是"这条预约还在不在"会取决于调度顺序，表现为时灵时不灵。
     # 需要它的用例（见 test_sweep.py 的接线那组）自己显式打开。
     monkeypatch.setenv("LAB_SWEEP_ENABLED", "false")
+    # 签名密钥：测试**显式**承认自己用的是仓库内置的默认密钥。
+    # 默认情况下服务会因为这些密钥不安全而拒绝启动（fail-closed），
+    # 这里打开开关是为了让 600 多条用例不必各自去配一个密钥 ——
+    # 「测试环境允许不安全」由这一行统一声明，而不是散落各处。
+    # 真正验证 fail-closed 行为的用例在 tests/test_hardening.py。
+    monkeypatch.setenv("LAB_ALLOW_INSECURE_DEFAULTS", "true")
 
     from lagent import db as db_module
     from lagent.config import reset_settings_cache

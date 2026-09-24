@@ -224,7 +224,11 @@ mypy                                 Success: no issues found in 63 source files
 ### 仍然没做的（明确列出，不含糊）
 
 - **密钥托管**：`LAB_JWT_SECRET` 仍走 `.env`。未接 Docker secrets / 云 KMS。
-  目前只做到「用默认密钥时启动打告警」。
+  ~~目前只做到「用默认密钥时启动打告警」~~ → **已升级为 fail-closed**：
+  用公开默认密钥或空密钥时服务**拒绝启动**（`InsecureSecretError`），
+  本地演示需显式 `LAB_ALLOW_INSECURE_DEFAULTS=true`（该模式打 CRITICAL）。
+  另外 `.env` 原先没进 `.gitignore`，已补上 —— 密钥一旦进过版本库就该作废，
+  在源头挡住比"记得别提交"可靠。
 - **幂等键**：预约下单没有客户端生成的幂等键，重试会产生两条预约（P2）。
 - **指标只是"吐得出来"，没有后端**：时序存储（Prometheus）、面板（Grafana）、
   告警规则都不在本项目范围内，也没有跨副本聚合 —— 多副本要靠抓取端 `sum(rate(...))`。

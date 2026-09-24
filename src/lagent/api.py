@@ -117,12 +117,13 @@ from .schemas import (
     UserOut,
 )
 from .security import (
+    InsecureSecretError,
     Principal,
     TokenError,
     create_access_token,
     hash_password,
     principal_from_token,
-    uses_default_secret,
+    secret_problem,
     verify_password,
 )
 from .seed import seed
@@ -173,6 +174,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 服务起不来时，一个能按字段检索的 JSON 行比一句自由文本有用得多。
     configure_from_settings()
 
+    # ★ 签名密钥 **fail-closed**（原来是只打一条 WARNING 然后照常跑）。
+    # 一个能伪造任意身份（含管理员）的密钥，不该有"先跑起来再说"的余地：
+    # 告警会被忽略，异常不会。留的退路是**显式**的 LAB_ALLOW_INSECURE_DEFAULTS，
+    # 默认是关的 —— 所以生产环境不可能"忘了配"，只可能是有人主动打开。
+    #
+    # 位置刻意**在一切副作用之前**：建库、灌种子、起清扫循环都是有副作用的，
+    # 「先干完活再说你配置不对」会把一次干净的配置错误变成"库也建了、
+    # 种子也灌了、然后退出了"，排查时还得先分清楚哪些是它留下的。
+    problem = secret_problem()
+    if problem is not None:
+        if not get_settings().allow_insecure_defaults:
+            raise InsecureSecretError(
+                f"{problem}。请设置 LAB_JWT_SECRET；"
+                "仅限本地演示可显式设置 LAB_ALLOW_INSECURE_DEFAULTS=true"
+                "（该模式下每次启动都会打一条 CRITICAL）。"
+            )
+        # 允许了也要喊出来：结构化日志 + CRITICAL，
+        # 让「生产环境出现 insecure_secret_allowed」能成为一条告警规则。
+        _log.critical(
+            "已显式允许不安全的签名密钥：%s。仅限本地演示，"
+            "切勿用于任何可被他人访问的环境。",
+            problem,
+            extra={"event": "insecure_secret_allowed"},
+        )
+
     # seed() 内部第一步就是 ensure_schema()：建表 + 校验结构与代码一致。
     # 校验放在这里而不是等业务代码崩，是因为漂移的失败形态又难懂又不一致：
     # 库里缺 users.password_hash 时报的是「no such column」加五十行堆栈，
@@ -208,15 +234,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app_mode=settings.app_mode,
         retrieval_backend=settings.retrieval_backend,
     )
-    if uses_default_secret():
-        # 结构化日志里的一条 WARNING，而不是终端上一行醒目文字：
-        # 这条要能被日志系统上的告警规则抓到（「生产环境出现 uses_default_secret」），
-        # 而"刷在终端里"只有正好看着启动过程的人会看到。
-        _log.warning(
-            "正在使用仓库内置的默认 JWT 密钥，任何人都能伪造令牌。"
-            "生产部署前请设置 LAB_JWT_SECRET。",
-            extra={"event": "uses_default_secret"},
-        )
 
     # 后台清扫。挂在 app.state 上而不是模块级单例：每个应用实例一份，
     # 测试之间不会互相把对方的循环留下（模块级单例曾让第二个用例莫名 429）。
