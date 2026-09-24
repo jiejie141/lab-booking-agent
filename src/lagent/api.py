@@ -70,6 +70,7 @@ from .domain.access import (
 )
 from .domain.booking import (
     cancel_reservation,
+    count_reservations,
     create_reservation,
     decide_reservation,
     list_reservations,
@@ -1305,7 +1306,10 @@ async def audit_logs(
 
 @router.get("/api/reservations")
 async def reservations(
+    response: Response,
     user_id: int | None = Query(default=None),
+    limit: int | None = Query(default=None, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     user: Principal = Depends(current_user),
 ) -> list[dict]:
     """查询预约记录。
@@ -1314,10 +1318,20 @@ async def reservations(
     令牌里的身份，而不是报错 —— 这样前端不需要知道权限细节，
     而越权读取在服务端就断了（不依赖前端自觉）。
     管理员传 ``user_id`` 可看指定用户，不传则看全量。
+
+    分页（P2）是**可选**的：``limit`` 不传即不限，返回形状仍是数组。
+    刻意没改成 ``{"items": [...], "total": N}`` 那种信封 —— 那会让所有
+    既有调用方（含控制台）一起改一遍，而分页在「明确可延后」那一组里。
+    总数用 ``X-Total-Count`` 响应头给出：想分页的调用方拿得到，
+    不想分页的不受影响。等真到了必须信封的时候再一次性换掉。
     """
     scope = user_id if user.is_admin else user.user_id
     async with session_scope() as session:
-        rows = await list_reservations(session, user_id=scope)
+        rows = await list_reservations(
+            session, user_id=scope, limit=limit, offset=offset
+        )
+        total = await count_reservations(session, user_id=scope)
+    response.headers["X-Total-Count"] = str(total)
     return [row.model_dump(mode="json") for row in rows]
 
 

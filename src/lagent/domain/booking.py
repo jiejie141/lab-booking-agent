@@ -40,7 +40,7 @@ import functools
 from collections.abc import Awaitable, Callable, Sequence
 from typing import ParamSpec, cast
 
-from sqlalchemy import CursorResult, delete, select, text, update
+from sqlalchemy import CursorResult, delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -621,15 +621,38 @@ async def pending_reservations(session: AsyncSession) -> list[ReservationOut]:
 
 
 async def list_reservations(
-    session: AsyncSession, *, user_id: int | None = None, date_: dt.date | None = None
+    session: AsyncSession,
+    *,
+    user_id: int | None = None,
+    date_: dt.date | None = None,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> list[ReservationOut]:
+    """查询预约。
+
+    ``limit`` / ``offset`` 是 P2 补的：单院系的数据量下它不是瓶颈，
+    但"接口一次把全表读进内存"是个**迟早会炸**的形状 ——
+    而且炸的时候表现是"服务变慢、然后 OOM"，不会有人想到是分页没做。
+    """
     stmt = select(Reservation).order_by(Reservation.date.desc(), Reservation.start_time)
     if user_id is not None:
         stmt = stmt.where(Reservation.user_id == user_id)
     if date_ is not None:
         stmt = stmt.where(Reservation.date == date_)
+    if limit is not None:
+        stmt = stmt.limit(limit).offset(offset)
     rows = (await session.execute(stmt)).scalars().all()
     return await _to_outs(session, rows)
+
+
+async def count_reservations(
+    session: AsyncSession, *, user_id: int | None = None
+) -> int:
+    """配合分页：总数不跟着页走，否则前端算不出"还有几页"。"""
+    stmt = select(func.count()).select_from(Reservation)
+    if user_id is not None:
+        stmt = stmt.where(Reservation.user_id == user_id)
+    return int(await session.scalar(stmt) or 0)
 
 
 async def _to_outs(

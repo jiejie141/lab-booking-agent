@@ -223,6 +223,52 @@ class TestReservationScoping:
         assert len(rows) == 1
 
 
+class TestReservationPagination:
+    """分页（P2）：limit/offset 可选，总数走 X-Total-Count。
+
+    刻意**没**把返回形状改成信封 —— 那会让所有既有调用方一起改一遍，
+    而分页在「明确可延后」那一组里。所以这里钉住的是"可选的、不破坏现状"。
+    """
+
+    async def test_without_limit_nothing_is_dropped(self, http, as_user):
+        """不传 limit = 现状：全量返回。老调用方不该因为这次改动而少拿数据。"""
+        headers = await as_user("管理员")
+        resp = await http.get("/api/reservations", headers=headers)
+        assert len(resp.json()) == 2
+        assert resp.headers["X-Total-Count"] == "2"
+
+    async def test_limit_slices_and_total_stays_the_same(self, http, as_user):
+        """总数不跟着页走 —— 否则前端算不出"还有几页"。"""
+        headers = await as_user("管理员")
+        page = await http.get("/api/reservations?limit=1", headers=headers)
+        assert len(page.json()) == 1
+        assert page.headers["X-Total-Count"] == "2"
+
+    async def test_offset_walks_to_the_next_page(self, http, as_user):
+        headers = await as_user("管理员")
+        first = (await http.get("/api/reservations?limit=1&offset=0", headers=headers)).json()
+        second = (await http.get("/api/reservations?limit=1&offset=1", headers=headers)).json()
+        assert first[0]["id"] != second[0]["id"]
+
+    async def test_out_of_range_limit_is_rejected(self, http, as_user):
+        """上限要挡住 —— 不设上限的话 ?limit=99999999 就是一条免费的 OOM。"""
+        headers = await as_user("管理员")
+        assert (await http.get("/api/reservations?limit=0", headers=headers)).status_code == 422
+        assert (await http.get("/api/reservations?limit=501", headers=headers)).status_code == 422
+
+    async def test_pagination_does_not_widen_the_scope(self, http, as_user):
+        """★ 分页不能成为越权的旁道：翻到别人的页上也要被拦。"""
+        headers = await as_user("张伟")
+        rows = (
+            await http.get(
+                "/api/reservations?limit=10&offset=0",
+                params={"user_id": 2},
+                headers=headers,
+            )
+        ).json()
+        assert len(rows) == 1
+
+
 class TestChat:
     async def test_chat_returns_proposals(self, http, as_user):
         resp = await http.post(
