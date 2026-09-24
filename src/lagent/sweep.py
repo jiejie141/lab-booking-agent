@@ -82,6 +82,7 @@ from .models import (
     Reservation,
     ReservationSlot,
 )
+from .notify import sweep_notifications
 
 # 强制收尾时写进 gate_out 的标记。用 ``@`` 前缀是为了和真实的门禁编号区分开 ——
 # 事后统计"从哪个门出去的"时，这些不该被当成一台门禁设备。
@@ -378,6 +379,9 @@ DEFAULT_TASKS: tuple[SweepTask, ...] = (
     SweepTask("过期预约收尾", sweep_expired_reservations),
     SweepTask("凭证超时与关门收尾", sweep_stale_permits),
     SweepTask("审计与流水归档", sweep_archive_events),
+    # 通知投递（P1-6）放在清扫里，而不是要求运维自己配 cron：
+    # 配了 SMTP 就自动发，没配就如实报告"跳过 N 条"，两种状态都看得见。
+    SweepTask("通知投递", sweep_notifications),
 )
 
 

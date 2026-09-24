@@ -431,6 +431,44 @@ class CertGrant(Base):
     note: Mapped[str] = mapped_column(Text, default="")
 
 
+class Notification(Base):
+    """待发通知（P1-6）。
+
+    **这张表是"发信"这件事的唯一证据。** 通知最容易被做成"顺手发一下，
+    失败就算了" —— 于是"用户说没收到"永远查不出到底是没生成、
+    没发出去，还是邮件进了垃圾箱。写下来，三件事才能分开。
+
+    状态机：``pending → sent`` / ``pending → failed``。
+
+    刻意**不自动重发** failed：一封迟到的"预约成功"比没有更糟
+    （用户照着它去了实验室，而那条预约早就被取消了）。
+    重发要由人确认后手动触发。
+    """
+
+    __tablename__ = "notifications"
+    __table_args__ = (
+        # 投递归走查的索引：按状态捞一批待发的
+        Index("ix_notify_status", "status", "created_at"),
+        Index("ix_notify_user", "user_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    # 业务类型，如 reservation.created / reservation.rejected
+    kind: Mapped[str] = mapped_column(String(32))
+    title: Mapped[str] = mapped_column(String(200), default="")
+    body: Mapped[str] = mapped_column(Text, default="")
+    # 通道。先只做 email —— 评估里的建议就是"有"比"全"重要
+    channel: Mapped[str] = mapped_column(String(16), default="email")
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    # 关联的预约（可空：账号类通知没有它）
+    reservation_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now_local)
+    sent_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    # 失败原因。**必须留下来**：否则"用户没收到"只能靠猜
+    error: Mapped[str] = mapped_column(Text, default="")
+
+
 class EntryPermit(Base):
     """入室凭证：允许某人在某个时间窗内进入某个实验室。
 

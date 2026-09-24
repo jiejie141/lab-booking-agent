@@ -157,12 +157,17 @@ class TestMigrationsMatchModels:
         assert diff == [], f"迁移产物与模型不一致，请补一条 revision：{diff}"
 
     async def test_all_business_tables_are_created(self, migrated_db):
-        """十张表一张不少 —— 防的是「迁移只写了一半」。"""
+        """表一张不少 —— 防的是「迁移只写了一半」。
+
+        数字写死是**故意**的：加了新表就必须回到这里改一下，
+        顺便确认它的迁移也写好了（否则上一条"diff 为空"会先红）。
+        """
         from lagent.models import Base
 
         _, url = migrated_db
         expected = {table.name for table in Base.metadata.sorted_tables}
-        assert len(expected) == 10, f"模型里的表数变了（{sorted(expected)}），本断言要同步更新"
+        assert len(expected) == 11, f"模型里的表数变了（{sorted(expected)}），本断言要同步更新"
+        assert "notifications" in expected
         assert expected <= _table_names(url)
 
     async def test_compare_type_is_actually_enabled(self, migrated_db):

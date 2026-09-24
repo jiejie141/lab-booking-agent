@@ -600,6 +600,33 @@ async def _restore(source: str, *, yes: bool = False) -> int:
     return 0
 
 
+async def _notify(limit: int = 100) -> int:
+    """投递待发通知（P1-6）。
+
+    **SMTP 没配时也要如实说清楚**：这条命令最常见的用法恰恰是
+    "先看看有没有待发的" —— 如果它在这种情况下打印"发出 0 条"，
+    运维会以为一切正常，而实际上是一封都没配好。
+    """
+    from .notify import backlog, drain, smtp_problem
+
+    problem = smtp_problem()
+    pending = await backlog()
+    print("=" * 70)
+    print("lab-booking-agent · 通知投递")
+    print("=" * 70)
+    print(f"  待发 {pending['pending']} · 已发 {pending['sent']} · 失败 {pending['failed']}")
+    if problem is not None:
+        print(f"  ⚠ {problem}")
+        print("  通知仍会照常写入库里，配好 SMTP 后这一批可以补发。")
+        return 0
+
+    result = await drain(limit=limit)
+    print(f"  {result.describe()}")
+    for line in result.errors[:10]:
+        print(f"    ! {line}")
+    return 0 if result.ok else 1
+
+
 async def _sweep() -> int:
     """跑一轮清扫并打印每项处理了多少。
 
@@ -703,6 +730,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes", action="store_true", help="跳过交互确认（脚本里用）"
     )
 
+    notify_parser = sub.add_parser("notify", help="投递待发通知（邮件）")
+    notify_parser.add_argument(
+        "--limit", type=int, default=100, help="本次最多处理多少条（默认 100）"
+    )
+
     sub.add_parser("serve", help="启动 FastAPI 服务（等同 python main.py）")
     return parser
 
@@ -738,6 +770,9 @@ async def _run(args: argparse.Namespace) -> int:
         return await _backup(args.dir, args.name)
     if args.command == "restore":
         return await _restore(args.file, yes=args.yes)
+    if args.command == "notify":
+        await seed()
+        return await _notify(args.limit)
     if args.command == "sweep":
         # 先走一遍 seed()：它会 ensure_schema（迁移到 head + 校验结构），
         # 于是「库过期」这种情况在这里就报出可照做的提示，而不是等清扫 SQL 崩。

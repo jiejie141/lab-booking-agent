@@ -55,7 +55,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import selectinload
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from . import __version__, audit
+from . import __version__, audit, notify
 from .agent.graph import build_agent_from_settings, set_catalog
 from .agent.state import SessionStore
 from .agent.tools import TOOL_SPECS
@@ -109,6 +109,7 @@ from .models import (
     EntryPermit,
     Equipment,
     Laboratory,
+    Notification,
     Reservation,
     User,
 )
@@ -1030,6 +1031,61 @@ async def users(
 #
 # 不提供删除，理由写在 domain/catalog.py 的模块 docstring 里。
 # --------------------------------------------------------------------------
+async def _notify(
+    user_id: int,
+    kind: str,
+    title: str,
+    body: str,
+    reservation_id: int | None = None,
+) -> None:
+    """写一条待发通知。**绝不能让它把业务请求带崩**。
+
+    通知是"锦上添花"，预约才是主业：邮件服务器挂了不该导致下不了单。
+    但同样不能 try/except 吞掉就算了 —— 那样"用户说没收到"就永远查不出
+    到底是没生成还是没发出去。所以失败要**记下来**（WARNING + 事件名）。
+    """
+    try:
+        async with session_scope() as session:
+            await notify.enqueue(
+                session,
+                user_id=user_id,
+                kind=kind,
+                title=title,
+                body=body,
+                reservation_id=reservation_id,
+            )
+    except Exception as exc:  # noqa: BLE001 —— 理由见上
+        _log.warning(
+            "通知入队失败（业务操作不受影响）",
+            extra={"user_id": user_id, "kind": kind, "reason": str(exc),
+                   "event": "notify_enqueue_failed"},
+        )
+
+
+async def _notify_booking_result(outcome, user_id: int) -> None:
+    """把下单结果翻译成一条通知。
+
+    写清楚**下一步该做什么**，而不是一句"您的预约有更新"：
+    待审批要去等、约上了要按时到、这两种的后续动作完全不同。
+    """
+    reservation = outcome.reservation
+    if reservation is None:
+        return
+    slot = reservation.slot
+    if reservation.status == "pending":
+        await _notify(
+            user_id, notify.KIND_PENDING, "预约申请已提交，等待审批",
+            f"你申请的 {slot} 已提交，管理员审批通过后会再通知你。",
+            reservation.id,
+        )
+    else:
+        await _notify(
+            user_id, notify.KIND_CREATED, "预约成功",
+            f"你已预约 {slot}。请按时到场；如需取消请在系统中操作。",
+            reservation.id,
+        )
+
+
 async def _record_maintenance(
     request: Request,
     admin: Principal,
@@ -1322,6 +1378,7 @@ async def create(body: ReservationCreate, request: Request, user: Principal = De
             status_code=_BOOKING_STATUS.get(outcome.outcome_label, 500),
             detail=outcome.message,
         )
+    await _notify_booking_result(outcome, target)
     return outcome.model_dump(mode="json")
 
 
@@ -1332,6 +1389,44 @@ async def create(body: ReservationCreate, request: Request, user: Principal = De
 # 需要审批的设备下单后落到 ``pending``（它在 ACTIVE_STATUSES 里，所以
 # 申请即占坑），管理员通过 → confirmed，驳回 → cancelled 并释放占用格。
 # --------------------------------------------------------------------------
+@router.get("/api/notifications")
+async def notifications(
+    user_id: int | None = Query(default=None),
+    user: Principal = Depends(current_user),
+) -> list[dict]:
+    """我的通知（管理员可指定 ``user_id`` 看别人的）。
+
+    为什么要有这个接口：通知最常见的问题是"用户说没收到"。
+    有了它，管理员能当场看到"这条通知生成了没有、发出去没有、为什么没发出去" ——
+    不需要去翻库。
+    """
+    scope = user_id if user.is_admin and user_id is not None else user.user_id
+    async with session_scope() as session:
+        rows = (
+            await session.execute(
+                select(Notification)
+                .where(Notification.user_id == scope)
+                .order_by(Notification.created_at.desc())
+                .limit(200)
+            )
+        ).scalars().all()
+    return [
+        {
+            "id": row.id,
+            "kind": row.kind,
+            "title": row.title,
+            "body": row.body,
+            "channel": row.channel,
+            "status": row.status,
+            "reservation_id": row.reservation_id,
+            "created_at": row.created_at.isoformat(),
+            "sent_at": row.sent_at.isoformat() if row.sent_at else None,
+            "error": row.error,
+        }
+        for row in rows
+    ]
+
+
 @router.get("/api/reservations/pending")
 async def reservations_pending(admin: Principal = Depends(require_admin)) -> list[dict]:
     """待审批列表。**管理员专用**。"""
@@ -1392,7 +1487,30 @@ async def _review(
             status_code=_BOOKING_STATUS.get(outcome.outcome_label, 500),
             detail=outcome.message,
         )
+    # 审批结果要通知到申请人 —— 尤其是驳回，必须说清楚原因，
+    # 否则用户只会看到"我的预约没了"而不知道为什么。
+    owner = await _reservation_owner(reservation_id)
+    if owner is not None and outcome.reservation is not None:
+        slot = outcome.reservation.slot
+        if approve:
+            await _notify(
+                owner, notify.KIND_APPROVED, "预约申请已通过",
+                f"{slot} 的申请已通过，请按时到场。", reservation_id,
+            )
+        else:
+            await _notify(
+                owner, notify.KIND_REJECTED, "预约申请被驳回",
+                f"{slot} 的申请未通过" + (f"。原因：{reason}" if reason else "。"),
+                reservation_id,
+            )
     return outcome.model_dump(mode="json")
+
+
+async def _reservation_owner(reservation_id: int) -> int | None:
+    """这条预约是谁的（审批结果要通知到他）。"""
+    async with session_scope() as session:
+        row = await session.get(Reservation, reservation_id)
+        return row.user_id if row is not None else None
 
 
 @router.post("/api/reservations/cancel")
@@ -1440,6 +1558,12 @@ async def cancel(
     )
     if not outcome.ok:
         raise HTTPException(status_code=409, detail=outcome.message)
+    if outcome.reservation is not None:
+        await _notify(
+            target, notify.KIND_CANCELLED, "预约已取消",
+            f"{outcome.reservation.slot} 的预约已取消，该时段已释放。",
+            outcome.reservation.id,
+        )
     return outcome.model_dump(mode="json")
 
 

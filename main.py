@@ -33,6 +33,7 @@ SUBCOMMANDS = {
     "sweep",
     "backup",
     "restore",
+    "notify",
     "serve",
 }
 

@@ -637,9 +637,10 @@ class TestRunner:
         from lagent.sweep import DEFAULT_TASKS
 
         names = [task.name for task in DEFAULT_TASKS]
-        assert len(names) == 3
+        assert len(names) == 4
         joined = " ".join(names)
         assert "预约" in joined and "凭证" in joined and "归档" in joined
+        assert "通知" in joined
 
 
 # ==========================================================================
