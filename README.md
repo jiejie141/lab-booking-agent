@@ -53,8 +53,9 @@ python main.py
 ### 其他命令
 
 ```bash
-python main.py doctor      # 环境自检：数据库 / 检索 / 模型 / 对话链路
+python main.py doctor      # 环境自检：数据库 / 检索 / 模型 / 对话链路 / 清扫积压
 python main.py migrate     # 迁移数据库到最新 revision（结构变更的唯一入口）
+python main.py sweep       # 手动跑一轮后台清扫（与后台循环共用同一份实现）
 python main.py chat "明天下午两点想用荧光光谱仪两小时" --user 2
 python main.py eval        # 跑评测集，量出意图与槽位准确率
 python main.py loadtest --concurrency 40 --rounds 3   # 并发抢坑压测
@@ -62,6 +63,7 @@ python main.py tools       # 列出已注册的工具
 python main.py access-demo # 人员准入实证：未预约拦截 / 单次核销 / 容量不变式
 
 python scripts/overlap_race.py   # 区间重叠竞态复现（P0-1 的回归）
+python scripts/sweep_demo.py     # 后台清扫实证：忘刷出场 / 过期预约 / 归档
 python scripts/smoke_http.py     # 真实 uvicorn 进程上的冒烟 + 越权清单
 ```
 
@@ -108,7 +110,7 @@ python main.py migrate --revision base --down  # 回滚到空库（只留版本�
 
 ---
 
-## 六个真正花时间的地方
+## 七个真正花时间的地方
 
 ### 1. 并发抢同一时段：把不变式压到数据库层（含一次自我推翻）
 
@@ -422,6 +424,110 @@ $ python main.py access-demo      # 跑在一次性沙箱库上；pytest tests/t
 回归测试在 `TestCapacityInvariant::test_unaligned_window_still_protects_its_tail`，
 且已验证过"把实现改回旧写法它就红"（不是摆设）。
 
+### 7. 后台清扫：对付那些「放久了自己变坏」的状态
+
+前面六件都是在处理**有人发起的请求**。这一件不一样：有三类状态不需要任何人做错什么，
+只是**时间过去了**，它就从正确变成不正确 —— 而系统里没有任何一次用户操作会去修它。
+
+| 会自己变坏的东西 | 后果 | 谁会发现 |
+| --- | --- | --- |
+| 忘刷出场的凭证（`checked_in` 一直挂着） | `uq_permit_one_inside` 让他**再也进不了任何房间**，座位也一直占着 | 直到他第二天站在门口刷不开 —— 而这时人已经在现场了 |
+| 过期的预约（还挂在 `confirmed`） | 占用格不放，「今天还剩几个时段」把已经过去的时段算进去 | 有人发现明明没人的时段约不上 |
+| 审计表与通行流水（只追加） | 迟早是库里最大的两张表，翻查时 99% 只关心最近几天 | 某天备份/查询开始变慢 |
+
+`src/lagent/sweep.py` 把这三件事做成三个**可插拔的任务**，由一个后台循环每 5 分钟跑一轮：
+
+```python
+DEFAULT_TASKS = (
+    SweepTask("过期预约收尾", sweep_expired_reservations),
+    SweepTask("凭证超时与关门收尾", sweep_stale_permits),
+    SweepTask("审计与流水归档", sweep_archive_events),
+)
+```
+
+#### 四个决定性的设计选择
+
+**① 门禁的正确性不能依赖清扫。** 凭证过期了，即使这个循环一次都没跑过，
+`verify_entry` 照样会拒 —— 时间窗判定在核验里，不在任务里。
+把过期判定做成「靠清扫来标记」，就等于让定时任务变成门锁的一部分：任务一挂，门就开了。
+所以 `expire_stale_permits`（改状态，供展示与统计）与「释放座位 + 写审计」
+（有副作用，必须可单独审计）是**两件事**，后者只在 `sweep.py` 里。
+
+**② 收尾用「实验室关门时间 + 宽限」，不用凭证的 `valid_to`。**
+`valid_to` 是*入场*窗口的上限，不是离场时间 —— 一个人完全可以合法地在 21:00 进去、
+23:00 还在做实验。拿它当收尾依据会把正常做实验的人踢出「在馆」名单，
+而座位上确实还该占着：
+
+```python
+def _force_checkout_needed(lab, permit, now) -> bool:
+    if permit.date < now.date():
+        return True                      # 往日遗留：无论如何都不该还算在馆
+    window = open_window(lab, permit.date)
+    if window is None:
+        return True                      # 当天不开放，里面不该有人
+    _, close = window
+    return now >= dt.datetime.combine(permit.date, close) + grace
+```
+
+**③ 批量改写一律用「带条件的 UPDATE + rowcount」，不用「先读、判断、再写」。**
+清扫是最容易撞上「两个副本同时跑」的东西。所以状态切换都把前提写进 `WHERE`：
+
+```python
+update(EntryPermit).where(
+    EntryPermit.id == permit.id,
+    EntryPermit.status == PERMIT_CHECKED_IN,   # ★ 前提写进 WHERE
+).values(status=PERMIT_USED, checked_out_at=now, ...)
+if int(result.rowcount or 0) == 0:
+    continue                                   # 别人抢先改过了，这条不是我处理的
+```
+
+只有真正改到行的那一个事务才去写审计条目 —— 于是多副本重复跑**不会算错**，
+只是多花一点 CPU。这与 P0-1 学到的是同一条教训（check-then-act 在并发下必然失真）。
+
+**④ 归档必须先落盘、后删除；落盘本身要原子。**
+「删了但没归档」是这套东西里**唯一真正会丢数据**的组合，所以顺序不能商量：
+写 `.tmp` → `fsync` → `rename` → 才 `DELETE`。归档失败时一行都不删，
+宁可表继续涨。文件名带运行时刻（不是「一天一个文件」）—— 同一天跑第二批时，
+按天命名会把第一批覆盖掉，而那批源数据已经删了。
+
+#### 两处刻意的「不对称」
+
+* **审计粒度不对称**：「预约到期」是可由数据推导的状态（到期日一过它就是过期），
+  逐条记只会把审计表灌满噪声 → 只记**一条汇总**；
+  而「把一个人从在馆名单里请出去」直接关系到一个具体的人，事后一定会有人问
+  「他为什么被算作已离场」→ **逐条可查**。
+* **流水里的不对称**：强制收尾**不**往 `access_events` 里补一条假出场。
+  那张表的定义是「谁什么时候站在哪个门口」，这里根本没有门禁动作；
+  补一条查不到对应刷卡的记录，会让整条证据链的信噪比变差 ——
+  而它的全部价值就在于可信。收尾留在**审计表**里。
+
+#### 实证
+
+```bash
+$ python scripts/sweep_demo.py     # 跑在一次性临时库上，18/18
+$ python main.py sweep             # 手动跑一轮（与后台循环共用同一份实现）
+$ python main.py doctor            # 顺带打印待清扫积压
+```
+
+```
+① 忘刷出场 —— 只发生一次，却会一直占着
+    ✓ 李娜 14:00 进入分析楼 301：放行
+    ✓ 同一人去生物楼 205 被拒（她「还在」分析楼）：already_inside
+    ✓ 在馆 1 人 —— 其实人早走了：1 人
+    ✓ 座位仍被占着：28 格
+    ✓ 关门后自动收尾：标记过期 1 / 关门收尾 1
+    ✓ 标成「系统收尾」而不是他刷了卡：@auto
+    ✓ 在馆归零：0 人
+    ✓ 座位真的放开了：0 格
+    ✓ 第二天她能正常进生物楼 205：放行
+② 过期预约 …… 4 格 → 0 格，状态 confirmed → expired
+③ 审计与流水 …… 导成 JSONL 后从库里删除，没超期的一条都不动
+```
+
+最后两条（「座位真的放开了」+「第二天她能正常进门」）才是这套东西的**结论** ——
+只断言 `status == 'used'` 只能说明改了个字段，说明不了那个人第二天能不能进门。
+`tests/test_sweep.py` 里 32 项用的是同一条判断标准：**断言落在用户能感知的后果上**。
+
 ---
 
 ## 边界加固
@@ -488,6 +594,12 @@ $ python main.py access-demo      # 跑在一次性沙箱库上；pytest tests/t
                               │ lab_occupancy 唯一索引兜底（房间容量）  │
                               │ entry_permits 单次核销 · access_events 只追加│
                               │ audit_logs 只追加                       │
+                              └────────────▲──────────────────────────┘
+                                           │ 批量改写（带条件的 UPDATE + rowcount）
+                              ┌────────────┴──────────────────────────┐
+                              │ sweep.py 后台清扫（lifespan 内每 5 分钟）│
+                              │ 过期预约 ▸ 凭证超时/关门收尾 ▸ 审计归档  │
+                              │ 失败隔离 · 幂等 · 归档先落盘后删除（§7） │
                               └───────────────────────────────────────┘
 ```
 
@@ -499,6 +611,7 @@ $ python main.py access-demo      # 跑在一次性沙箱库上；pytest tests/t
 | `src/lagent/security.py` | 认证原语：scrypt 口令哈希 + HS256 JWT + RBAC 判定（零依赖） |
 | `src/lagent/audit.py` | 审计写入（独立事务）与读取 |
 | `src/lagent/ratelimit.py` | 进程内滑动窗口限流 |
+| `src/lagent/sweep.py` | **后台清扫**：过期预约 / 凭证超时与关门收尾 / 审计与流水归档（三个可插拔任务 + 循环，见 §7） |
 | `src/lagent/api.py` | HTTP 层（15 个 API + 1 个页面），`create_app()` 工厂 + APIRouter |
 | `src/lagent/web/index.html` | 控制台：**零依赖单文件**，登录闸门 + 深浅色主题 |
 | `migrations/` + `alembic.ini` | 数据库迁移：**结构变更唯一被允许的入口**（`0001` 覆盖全部 10 张表），说明见 `migrations/README.md` |
@@ -601,6 +714,15 @@ react ──模型故障 / 步数耗尽 / 不按格式回──▶ deterministic
 | 冒烟里「在馆者重复刷卡」这条**恒真** | 断言只写了 `granted is False`，于是"因为凭证刚好过期而被拒"也能让它变绿 | 收紧到断言 `reason_code == already_inside`。**只断"被拒"不断"为什么拒"，等于给假阴性留后门** |
 | 冒烟清单**突然每条都 404**，且与代码改动无关 | 开发机设了 `HTTP_PROXY`（CI / 公司网络 / 本地中间件都会设）而 `NO_PROXY` 没包含 `127.0.0.1`；httpx 默认 `trust_env=True`，于是**连发往本机端口的请求也走了代理**。代理用 absolute-form 请求行（`GET http://127.0.0.1:8200/`）转发，服务端匹配不到路由，于是全 404 | 本机探测一律 `trust_env=False`（`local_client()` 助手），子进程环境补 `NO_PROXY=127.0.0.1,localhost`。**症状像"应用路由全丢了"，实际一行业务代码都没错 —— 这类"环境冒充代码 bug"最该留下痕迹** |
 
+### P1-2（后台清扫）期间新踩的
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| `mypy` / `ruff` 本地全绿，README 也照着写了"干净"，但 CI 其实会红 | 我在子目录上跑检查（`ruff check src tests`），而 CI 跑的是 `ruff check .` —— `migrations/env.py` 不在我的命令覆盖范围内。**"我检查过了"和"CI 会拦什么"是两件不同的事** | 一律按 CI 的命令跑（`ruff check .` / `mypy`）。顺带发现 `# noqa: E402` 与 `per-file-ignores` 是**互斥**的两种写法：一旦用配置忽略 E402，`noqa` 就变成"多余的抑制指令"、反过来被 RUF100 抓住 |
+| 新增的后台循环让每个 HTTP 用例都跑起来了 —— 477 项仍然全绿，但断言开始依赖**调度顺序** | `api.py` 的 lifespan 一启动就拉起清扫循环，而它按自己的节奏写测试库。共享的可变后台状态，"这次绿"不代表"下次绿" | conftest 里显式 `LAB_SWEEP_ENABLED=false`，理由与"每例换一个库文件"是同一条；另写一组用例**显式打开**它，专门验接线（服务起来在跑、关服停下、关了就不跑） |
+| 三个用例是**假绿**，改数据/改断言口径后才暴露 | ① 按日期断言"还剩几条"，撞上了种子数据里同一天的预约；② 拿 `last_results` 去比两轮累计量，只在"每轮处理量相同"时成立；③ 归档失败用例没有"可归档内容"，任务在查库那步就空手返回、**根本走不到写文件** | 断言按 **id** 收口；累计量逐轮相加；失败用例必须先把待处理数据造出来。**"用例通过"不是证据，"这条用例能失败"才是** |
+| 归档用例断言"库里只剩未超期的那条"失败，多出来一行 `actor_name=''` | 那行是清扫**自己**写的归档汇总审计 —— 我自己的断言把自己的审计算成了"没清干净的残留" | 断言前先用 `action` 过滤。**副作用会混进你自己的断言里**，尤其是审计这种"谁都会写一行"的表 |
+
 ### P1-1（数据库迁移）期间新踩的
 
 | 现象 | 根因 | 修法 |
@@ -616,30 +738,33 @@ react ──模型故障 / 步数耗尽 / 不按格式回──▶ deterministic
 ## 验证
 
 ```bash
-pytest -q                       # 443 passed
+pytest                          # 477 passed
 python main.py eval             # 14/14（mock 模型）
 python main.py loadtest -c 40 -r 3
 python main.py access-demo      # 8/8（人员准入：未预约拦截 / 单次核销 / 容量）
 python main.py migrate          # 0001 (head)，结构校验与代码一致
+python main.py sweep            # 3/3 项完成
 python scripts/overlap_race.py  # 3/3
+python scripts/sweep_demo.py    # 18/18（真实 SQLite 文件上的清扫端到端）
 python scripts/smoke_http.py    # 70/70（真实 uvicorn 进程，含 react 模式与降级链）
 ```
 
 ```
-pytest:            443 passed
+pytest:            477 passed
 评测报告:           意图准确率 100.0% · 槽位准确率 100.0% · 端到端通过率 100.0%（14/14）
 并发压测:           3 轮 × 40 并发，每轮恰好 1 成功
 区间重叠竞态:        3/3 未超卖
 人员准入:           8/8（含 2 人并发抢容量 1 的房间，恰好 1 人放行）
+后台清扫:           18/18（忘刷出场被解开 / 过期预约释放占用格 / 归档先落盘后删除）
 数据库迁移:         18 项（迁移产物 vs 模型 diff 为空 / 部分索引 WHERE 未丢 / 回滚可往返 / 老库接管）
 HTTP 越权清单:       70/70（含 deterministic / react / degraded / 端点不可达四种启动配置）
 ```
 
-静态检查（与 CI 同一套）：
+静态检查（与 CI 同一套 —— 注意是 `ruff check .`，不是只在 `src tests` 上跑）：
 
 ```bash
 ruff check .   # All checks passed!
-mypy           # Success: no issues found in 57 source files
+mypy           # Success: no issues found in 60 source files
 ```
 
 覆盖范围：意图分类、中文时间解析（「下午两点到四点」的时段继承）、六道约束判定、
@@ -647,7 +772,8 @@ mypy           # Success: no issues found in 57 source files
 **JWT 签名/过期/篡改/alg 混淆/账号枚举**、**RBAC 与越权读写**、
 **请求体上限/CORS/限流/输入白名单**、**审计留痕与事务独立性**、数据库隔离、
 **harness 分层边界（AST 静态检查）/工具注册与副作用护栏/上下文裁剪优先级/span 埋点**、
-**ReAct 循环收敛与降级**、**人员准入（资质有效期/单次核销/人卡一致/容量不变式）**。
+**ReAct 循环收敛与降级**、**人员准入（资质有效期/单次核销/人卡一致/容量不变式）**、
+**后台清扫（幂等 / 失败隔离 / 归档不丢数据 / 清扫不是安全依赖 / lifespan 接线）**。
 
 > **关于这组数字要说实话**：默认 `LAB_APP_MODE=mock`，跑的是确定性假模型 ——
 > 它验证的是**代码链路自洽**（槽位抽取规则、约束判定、协商、下单、渲染都对），
@@ -668,7 +794,7 @@ mypy           # Success: no issues found in 57 source files
 | job | 跑什么 | 为什么单独拆 |
 |---|---|---|
 | `quality` | ruff（lint）→ mypy → pytest，**py3.10 与 py3.13 双版本矩阵** | 声明支持 3.10 就不能只在 3.13 上验证 |
-| `smoke` | `main.py eval` → `scripts/overlap_race.py` → `scripts/smoke_http.py` | 这三项都要起真实进程/真实 uvicorn，失败信号与单测不同类 |
+| `smoke` | `main.py eval` → `scripts/overlap_race.py` → `scripts/sweep_demo.py` → `scripts/smoke_http.py` | 这几项都要起真实进程 / 真实 uvicorn / 真实 SQLite 文件，失败信号与单测不同类 |
 | `docker` | `docker build`（不推送） | Dockerfile 坏了属于交付问题，不是代码问题 |
 
 CI **只强制 lint，不强制 formatter**：本项目的手写风格是「同类参数按语义分组压行」，
@@ -722,6 +848,18 @@ docker compose up --build
   `vector`/`hybrid`；缺依赖时自动回退并**在 `/api/health` 里说明原因**，不静默降级。
 - **准入资质是种子数据**：真实场景应当对接培训记录系统，而不是 `users.certs` 这个 JSON 字段。
 - **设备密钥是全局共享的一把**（`LAB_GATE_API_KEY`）：够用，但一台设备的密钥泄露就得全换。
+- **后台清扫只在**「服务进程内」跑，且**每个副本都会跑一遍**：任务写成幂等的、
+  状态切换全部用「带条件的 UPDATE + rowcount」，所以多副本**不会算错**，
+  只是白花 CPU、日志会重复。挪成独立 worker（避免重复扫）属于 P2。
+- **清扫的时效性依赖服务一直在跑**：服务停着的这段时间没人清扫。
+  这不影响正确性（凭证过期由 `verify_entry` 自己判，不靠清扫），
+  但「在馆人数」这类看板数字会短暂偏大。
+- **归档没有做回读校对**：只保证顺序是「先落盘、后删除」，落盘本身是原子的，
+  但没有对导出的 JSONL 做校验和、也没有做「导完再读回来比对」。
+  真正怕丢数据的部署应当再加一步校验 + 把归档写到对象存储（而不是本地目录）。
+- **清扫不清理 `cancelled` / `completed` 的预约**：那些已经不占资源，
+  重写只会把用户自己操作留下的痕迹抹掉。所以预约表会随历史单调增长 ——
+  归档它需要先定「保留多久」，那是业务决策，不是技术问题。
   生产形态应改成**逐设备签发**（设备表 + 单设备撤销），并能回答"是哪台门禁刷的"。
   默认留空 = 只有管理员能调门禁接口（fail-closed），不会因为忘配而敞开门。
 - **忘了刷出场的人会一直"在馆"**：`uq_permit_one_inside` 会让他在业务上再也进不了任何房间。

@@ -856,22 +856,33 @@ async def revoke_permit(
 async def expire_stale_permits(
     session: AsyncSession, *, now: dt.datetime | None = None
 ) -> int:
-    """把当天已过 valid_to 仍未入场的凭证标记为过期。返回处理条数。
+    """把已过 valid_to 仍未入场的凭证标记为过期。返回处理条数。
+
+    **必须同时覆盖「今天到点」和「往日遗留」两种。** 只判今天会出现一个很隐蔽的
+    残留：昨天签发但没用掉的凭证会永远停在 ``issued``（没人会去碰它），
+    于是"还有多少张没用的凭证"这个统计会一直虚高，而且是**单调增长**的。
 
     这只是一个"清理展示状态"的批处理：即使不跑，核验时的时间窗判定
     也一样会拒 —— 正确性不依赖这个任务。它挂掉不能让门禁失去保护。
+    所以它**没有**顺手去释放座位之类有副作用的动作：那些属于
+    :mod:`lagent.sweep`，需要能单独审计。
     """
     now = now or now_local()
-    from sqlalchemy import update
+    from sqlalchemy import and_, or_, update
 
     result = cast(
         CursorResult,
         await session.execute(
             update(EntryPermit)
             .where(
-                EntryPermit.date == now.date(),
                 EntryPermit.status == PERMIT_ISSUED,
-                EntryPermit.valid_to < now.time(),
+                or_(
+                    EntryPermit.date < now.date(),
+                    and_(
+                        EntryPermit.date == now.date(),
+                        EntryPermit.valid_to < now.time(),
+                    ),
+                ),
             )
             .values(status=PERMIT_EXPIRED)
         ),

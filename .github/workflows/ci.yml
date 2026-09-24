@@ -3,7 +3,7 @@
 #
 # 分三个 job，故意拆开 —— 失败时能一眼看出是哪一类问题：
 #   quality : 静态检查（ruff）+ 类型检查（mypy）+ 单元测试（pytest）
-#   smoke   : 真实进程上的端到端验证（评测集 / 重叠竞态 / HTTP 越权清单）
+#   smoke   : 真实进程上的端到端验证（评测集 / 重叠竞态 / 清扫演示 / HTTP 越权清单）
 #   docker  : 镜像能不能构建出来
 #
 # quality 跑两个 Python 版本：pyproject 声明 >=3.10，本地开发用 3.13，
@@ -87,6 +87,9 @@ jobs:
 
       - name: 区间重叠竞态（P0-1 的回归：必须恰好 1 条成功）
         run: python scripts/overlap_race.py
+
+      - name: 后台清扫端到端（P1-2：忘刷出场 / 过期预约 / 归档）
+        run: python scripts/sweep_demo.py
 
       - name: HTTP 冒烟 + 越权清单（起真实 uvicorn，跑渗透项）
         run: python scripts/smoke_http.py

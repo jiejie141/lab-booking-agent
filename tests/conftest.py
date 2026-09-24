@@ -36,6 +36,11 @@ async def isolated_db(tmp_path, monkeypatch):
     monkeypatch.setenv("LAB_DATABASE_URL", url)
     monkeypatch.setenv("LAB_APP_MODE", "mock")
     monkeypatch.setenv("LAB_PASSWORD_KDF_N", TEST_KDF_N)
+    # 后台清扫默认**关掉**。理由与「每例换一个库文件」是同一条：
+    # 它是一份跨用例共享的可变状态 —— 服务一起来就在后台按自己的节奏改库，
+    # 于是"这条预约还在不在"会取决于调度顺序，表现为时灵时不灵。
+    # 需要它的用例（见 test_sweep.py 的接线那组）自己显式打开。
+    monkeypatch.setenv("LAB_SWEEP_ENABLED", "false")
 
     from lagent import db as db_module
     from lagent.config import reset_settings_cache

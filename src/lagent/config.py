@@ -120,6 +120,25 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8200
 
+    # ---- 后台清扫（P1-2）--------------------------------------------------
+    # 为什么需要它：三件事会随时间自然变坏，而**没有任何用户操作会去修它们** ——
+    # 忘刷出场的人一直「在馆」（`uq_permit_one_inside` 让他再也进不了任何房间）、
+    # 过期预约一直挂在 confirmed、审计表只追加不清理。
+    sweep_enabled: bool = True
+    # 清扫间隔。默认 5 分钟：这些状态变化的时间尺度是「小时」，跑太勤只是白烧 CPU。
+    sweep_interval_seconds: int = 300
+    # 实验楼关门后多久强制收尾。给人留一点离场缓冲，也避免把「刚好在关门时出门」
+    # 的人误判成忘刷卡。
+    permit_checkout_grace_minutes: int = 30
+    # 审计 / 通行流水的保留天数。更早的先归档成 JSONL 再从库里删除。
+    # 两者分开配，因为用途不同：审计面向合规（低频），通行流水面向安全（高频）。
+    audit_retention_days: int = 90
+    access_event_retention_days: int = 180
+    archive_dir: str = "./var/archive"
+    # 归档单个文件的行数上限：一次导出几百万行会把内存吃光。
+    # 超过就分批，每批一个文件。
+    archive_batch_size: int = 5000
+
     @property
     def cors_origin_list(self) -> list[str]:
         """把逗号分隔的白名单拆成列表（空串 → 空列表 → 不发 CORS 头）。"""

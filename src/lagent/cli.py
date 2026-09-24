@@ -124,6 +124,20 @@ async def _doctor() -> int:
     print(f"  执行模式          : {settings.execution_mode}")
     print(f"  工具路由          : {routing}")
     print(f"  已注册工具        : {', '.join(t['name'] for t in TOOL_SPECS)}")
+
+    # 后台清扫是「不用人管的那部分」：这里只**看**当前积压，不做任何修改 ——
+    # 一个自称诊断的命令顺手改数据的话，出问题时就没法用它取证了。
+    from .sweep import count_pending
+
+    pending = await count_pending()
+    state = "已启用" if settings.sweep_enabled else "已关闭（LAB_SWEEP_ENABLED=false）"
+    print(f"  后台清扫          : {state}，间隔 {settings.sweep_interval_seconds}s")
+    print(
+        "  待清扫积压        : "
+        f"在馆 {pending['inside_people']} 人 · "
+        f"过期凭证 {pending['stale_permits']} 张 · "
+        f"可归档 {pending['archivable_audit_rows'] + pending['archivable_access_events']} 行"
+    )
     print("=" * 66)
     print("自检通过" if agent.client else "自检完成（模型不可用，属降级运行）")
     return 0
@@ -526,6 +540,53 @@ async def _migrate(revision: str, *, down: bool = False) -> int:
 
 
 # ==========================================================================
+# sweep —— 后台清扫的「手动跑一轮」入口
+# ==========================================================================
+async def _sweep() -> int:
+    """跑一轮清扫并打印每项处理了多少。
+
+    为什么运维命令和后台循环要共用同一份实现：如果 CLI 是另一套代码，
+    它就会慢慢长成「演示时好使、线上跑的是另一个东西」。
+    这里的每个任务与 ``SweepRunner`` 里跑的完全是同一个函数。
+
+    退出码非 0 表示**至少有一项失败**。刻意不给"部分成功"单独的码：
+    运维只需要一个可判断的信号 —— 有没有东西出错。
+    """
+    from .sweep import count_pending, run_once
+
+    before = await count_pending()
+    results = await run_once()
+
+    print("=" * 70)
+    print("lab-booking-agent · 后台清扫（单轮）")
+    print("=" * 70)
+    print("  清扫前待处理：")
+    for key, value in before.items():
+        print(f"    {key:<26} {value}")
+    print()
+    for result in results:
+        if result.error:
+            print(f"  ✗ {result.name:<20} 失败：{result.error}")
+        else:
+            print(f"  ✓ {result.name:<20} {result.processed:>4} 条   {result.detail}")
+
+    after = await count_pending()
+    print()
+    print("  清扫后待处理：")
+    for key, value in after.items():
+        mark = "" if before[key] == value else f"  （{before[key]} → {value}）"
+        print(f"    {key:<26} {value}{mark}")
+    print("=" * 70)
+
+    failed = [r for r in results if not r.ok]
+    if failed:
+        print(f"✗ {len(failed)} 项失败，见上")
+        return 1
+    print(f"✓ 全部 {len(results)} 项完成（处理 {sum(r.processed for r in results)} 条）")
+    return 0
+
+
+# ==========================================================================
 # 入口
 # ==========================================================================
 def build_parser() -> argparse.ArgumentParser:
@@ -569,6 +630,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="人员准入实证：未预约拦截 / 单次核销 / 人卡一致 / 容量不变式（沙箱库）",
     )
 
+    sub.add_parser(
+        "sweep",
+        help="后台清扫单轮：过期预约 / 凭证超时与关门收尾 / 审计归档（会改数据）",
+    )
+
     sub.add_parser("serve", help="启动 FastAPI 服务（等同 python main.py）")
     return parser
 
@@ -600,6 +666,11 @@ async def _run(args: argparse.Namespace) -> int:
         return await _eval(args.cases)
     if args.command == "access-demo":
         return await _access_demo()
+    if args.command == "sweep":
+        # 先走一遍 seed()：它会 ensure_schema（迁移到 head + 校验结构），
+        # 于是「库过期」这种情况在这里就报出可照做的提示，而不是等清扫 SQL 崩。
+        await seed()
+        return await _sweep()
     build_parser().print_help()
     return 0
 

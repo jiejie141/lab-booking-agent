@@ -30,8 +30,12 @@ _SRC = Path(__file__).resolve().parents[1] / "src"
 if str(_SRC) not in sys.path:  # pragma: no cover - 取决于调用方式
     sys.path.insert(0, str(_SRC))
 
-from lagent.config import get_settings
-from lagent.models import Base
+# 这两条必须在 sys.path 处理**之后**才能 import（E402），
+# 而且 noqa 不能换成 pyproject 里的 per-file-ignores：
+# 一旦 E402 被配置忽略，这里的 noqa 就变成「多余的抑制指令」，
+# 反过来会被 RUF100 抓住 —— 两种写法互为陷阱，只能用 noqa。
+from lagent.config import get_settings  # noqa: E402
+from lagent.models import Base  # noqa: E402
 
 config = context.config
 

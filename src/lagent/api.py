@@ -95,6 +95,7 @@ from .security import (
     verify_password,
 )
 from .seed import seed
+from .sweep import build_runner
 
 WEB_DIR = __import__("pathlib").Path(__file__).parent / "web"
 
@@ -146,9 +147,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "[security] ⚠ 正在使用仓库内置的默认 JWT 密钥，任何人都能伪造令牌。"
             "生产部署前请设置 LAB_JWT_SECRET。"
         )
+
+    # 后台清扫。挂在 app.state 上而不是模块级单例：每个应用实例一份，
+    # 测试之间不会互相把对方的循环留下（模块级单例曾让第二个用例莫名 429）。
+    runner = build_runner()
+    app.state.sweeper = runner
+    if settings.sweep_enabled:
+        runner.start()
+        print(f"[sweep] 后台清扫已启动，间隔 {runner.interval_seconds}s（关掉：LAB_SWEEP_ENABLED=false）")
+
     try:
         yield
     finally:
+        # 必须真的停：否则热重载 / 测试里会累积出多个循环同时写库。
+        await runner.stop()
         await dispose_engine()
 
 

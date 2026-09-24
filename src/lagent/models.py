@@ -312,6 +312,13 @@ ACTION_LOGIN_FAILED = "auth.login_failed"
 ACTION_BOOK = "reservation.create"
 ACTION_CANCEL = "reservation.cancel"
 ACTION_ADMIN_READ = "admin.read"
+# 后台清扫的动作名。它们**必须**与用户动作分开命名 ——
+# 「谁改了什么业务数据」这条审计里，值班人员最想一眼分清
+# 「是用户自己出的门」还是「是系统到点替他收的尾」。
+# 混用同一个动作名会让这条区分永远丢失。
+ACTION_SWEEP_RESERVATION_EXPIRED = "sweep.reservation_expired"
+ACTION_SWEEP_FORCE_CHECKOUT = "sweep.force_checkout"
+ACTION_SWEEP_ARCHIVED = "sweep.archived"
 
 OUTCOME_OK = "ok"
 OUTCOME_DENIED = "denied"

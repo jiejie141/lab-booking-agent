@@ -39,7 +39,8 @@
 | 收尾修复 · `tools` 子命令崩溃 | ✅ 已完成 | `a9028fd` | 对外响应结构的字段类型改了而**没有测试钉它的形状**，365 个测试全绿却只有 CLI 崩。补 `test_catalog_shape_is_a_stable_contract` |
 | 功能升级 · Agent Harness + 真 function calling | ✅ 已完成 | `ff747ff` | 抽出 `harness/`（工具注册表 / 上下文预算 / span / ReAct 循环，**不 import 任何业务模块**，用 AST 静态检查钉住边界）；新增 `deterministic` / `react` 双执行模式；写操作带 `side_effect` 护栏 |
 | 功能升级 · 人员准入（门禁） | ✅ 已完成 | `208f074` | 需求是"每个人进实验室都必须提前预约，没预约的进不去"。独立成 `domain/access.py`（房间容量与设备时段是两类不同不变式）；4 张新表 + 3 个接口；`access-demo` **8/8**；`tests/test_access.py` 49 项；冒烟新增 [9] 门禁边界 **11/11**。**顺带修掉两个被自己的演示/冒烟戳出来的真漏洞**（未对齐窗口的尾巴不受容量保护；`now±1h` 跨午夜导致凭证被判过期） |
-| P1-1 · Alembic 数据库迁移 | ✅ 已完成 | 本次 | `create_all` 退役：结构变更只走 `migrations/versions/`。`0001` 覆盖全部 10 张表（含 3 条部分唯一索引的 `WHERE` 子句，已人工复核）；`ensure_schema()` 改为「迁移到 head + 校验结构与模型一致」；老库分两种命运（结构一致→`stamp head` 接管、不一致→明确报错要求重建）；新增 `python main.py migrate`；`tests/test_migrations.py` **20 项**，核心断言是「迁移产物 vs 模型 diff 为空」。实测：443 passed / ruff 与 mypy 均干净 / 冒烟 70/70 |
+| P1-1 · Alembic 数据库迁移 | ✅ 已完成 | `ba58381` | `create_all` 退役：结构变更只走 `migrations/versions/`。`0001` 覆盖全部 10 张表（含 3 条部分唯一索引的 `WHERE` 子句，已人工复核）；`ensure_schema()` 改为「迁移到 head + 校验结构与模型一致」；老库分两种命运（结构一致→`stamp head` 接管、不一致→明确报错要求重建）；新增 `python main.py migrate`；`tests/test_migrations.py` **20 项**，核心断言是「迁移产物 vs 模型 diff 为空」。实测：443 passed / ruff 与 mypy 均干净 / 冒烟 70/70 |
+| P1-2 · 过期清扫后台任务 | ✅ 已完成 | 本次 | `src/lagent/sweep.py`：三个可插拔任务（过期预约收尾 / 凭证超时与关门收尾 / 审计与流水归档）+ 进程内循环（lifespan 起停，间隔可配）。**四条硬约束**：门禁正确性不依赖清扫（`verify_entry` 自己判过期）、状态切换一律「带条件的 UPDATE + rowcount」、归档先落盘后删除（失败一行不删）、每项任务异常隔离。顺带补齐 `expire_stale_permits` 的往日遗留分支。新增 `python main.py sweep`、`scripts/sweep_demo.py`（**18/18**）、`tests/test_sweep.py` **32 项**。实测：477 passed / ruff 与 mypy 均干净 / 冒烟 70/70 |
 
 ### 与原方案的差异（为什么没照抄）
 
@@ -94,21 +95,23 @@ mypy src                             Success: no issues found in 33 source files
 （`mypy` 的"42 → 33 个文件"不是代码变少：前者是 `mypy` 不带参数（按 pyproject 配置扫全仓，
 含 `scripts/`），后者是显式只扫 `src`。口径不同，别当成删了文件。）
 
-### 当前实测（P1-1 · Alembic 迁移）
+### 当前实测（P1-2 · 后台清扫）
 
 ```
-pytest -q                            443 passed
+pytest                               477 passed
 python main.py eval                  14/14（mock 模型）
 python main.py access-demo           8/8 场景
 python main.py migrate               0001 (head)，结构校验与代码一致
+python main.py sweep                 3/3 项完成
 python main.py loadtest -c 40 -r 3   3 轮 × 40 并发，每轮恰好 1 成功
 python scripts/overlap_race.py       3/3
+python scripts/sweep_demo.py         18/18（真实 SQLite 文件上的清扫端到端）
 python scripts/smoke_http.py         70/70（真实 uvicorn 进程，12 节）
 ruff check .                         All checks passed
-mypy                                 Success: no issues found in 57 source files
+mypy                                 Success: no issues found in 60 source files
 ```
 
-关于最后两行的口径，这次把话说清楚（上一轮就是在这里含糊了）：
+关于最后两行的口径，这轮又补了一条：
 
 * `ruff check .` 与 `mypy`（不带参数、按 `pyproject.toml` 的 `files` 扫
   `src/lagent` + `tests` + `scripts` + `migrations`）—— **这正是 CI 里跑的两条命令**，
@@ -118,13 +121,18 @@ mypy                                 Success: no issues found in 57 source files
   那次只显式扫了 `src`，恰好绕过了出问题的那两个位置。
   本轮已按实际需要收窄契约（`ModelIdentity` / `ToolCallingLLM`）并修掉，
   现在不带参数扫全仓也是干净的。见 README 的「工程复盘」表。
+* **同一个口径问题在 P1-2 又犯了一次**：这次是 `ruff check src tests` 漏掉了
+  `migrations/env.py` 的 `E402` —— CI 跑 `ruff check .` 会拦，本地却看不到。
+  **"我检查过了"和"CI 会拦什么"是两个不同的命题**，必须按 CI 的命令跑。
 
 ### 仍然没做的（明确列出，不含糊）
 
 - **密钥托管**：`LAB_JWT_SECRET` 仍走 `.env`。未接 Docker secrets / 云 KMS。
   目前只做到「用默认密钥时启动打告警」。
-- **P1 的其余各项**：过期清扫后台任务、结构化日志 / `/metrics` / request_id 贯穿、
-  幂等键、`/api/v1` 前缀 —— **除已完成的 Alembic 外，其余一条都没做**。
+- **P1 的其余各项**：结构化日志 / `/metrics` / request_id 贯穿、幂等键 —— 均未做。
+- **清扫出进程**：目前循环跑在服务进程内，多副本时每个副本都会扫一遍
+  （任务幂等、状态切换带条件，所以**不会算错**，只是白花 CPU）。
+  挪成独立 worker 属于 P2。
 - **生产回归演练**：`0001` 是从空库一次性建起的初始 revision，
   真正的考验是第二条 revision（`ALTER TABLE`）。SQLite 已配 batch 模式，
   但没有真实数据量的演练。
@@ -146,7 +154,7 @@ mypy                                 Success: no issues found in 57 source files
 | 模型访问 | httpx 直连 OpenAI 兼容 | 0.28.1 | ✅ 主流（有取舍） | 不引 `langchain-openai`，少一层黑盒，可解释性更强 |
 | 检索 | 手写 BM25 + 可选 Chroma + RRF | — | ⚠️ 部分主流 | RRF 融合是主流做法；手写 BM25 是**刻意零依赖**，属设计决策 |
 | 前端 | 单文件原生 HTML/CSS/JS | — | ❌ 非主流 | 刻意的零构建；企业级必须替换（见 §3-P1） |
-| 测试 | pytest + pytest-asyncio | 9.1.1 / 1.4.0 | ✅ 主流 | 443 条用例，含并发、迁移与回归 |
+| 测试 | pytest + pytest-asyncio | 9.1.1 / 1.4.0 | ✅ 主流 | 477 条用例，含并发、迁移、清扫与回归 |
 | 容器 | Dockerfile + compose | — | ✅ 主流 | 但**未实机验证**（沙箱限制） |
 
 ### 1.2 缺位的部分（这才是「不完整」的真正含义）
@@ -273,6 +281,11 @@ python scripts/overlap_race.py
 加上没有保留策略、没有备份、没有软删除、没有独立审计表
 （现在只有 `created_at/updated_at/cancel_reason`，答不出「谁在何时改了什么」）。
 
+> **这两条已在 P1 里被处理掉一半**（评估基准时确实都是空的）：
+> **迁移能力**由 P1-1 落地（Alembic，见 `migrations/README.md`）；
+> **保留策略**由 P1-2 落地（`sweep.py` 的三个任务 + 归档）。
+> 仍然没有的是：备份与恢复演练、软删除、「谁改了什么」的字段级审计。
+
 ### 2.6 【中·AI 工程】评测与成本两条线都是空的
 
 - **评测只覆盖 mock 模型**：14/14 是确定性假模型的成绩，**不能外推到真实模型**。
@@ -345,6 +358,7 @@ P0 不装任何新中间件就能做完——它全是「把已有的说法补�
 | 模块 | 技术组件 | 目标 |
 |---|---|---|
 | Schema 迁移 | **Alembic** ✅ 已落地（`migrations/`） | `create_all` 退役；变更可回滚 |
+| 数据生命周期 | 进程内清扫循环 ✅ 已落地（`sweep.py`） | 过期预约 / 凭证超时 / 审计归档有主 |
 | 会话持久化 | **LangGraph checkpointer**（`AsyncPostgresSaver` / `SqliteSaver`） | 替换 `SessionStore`，多副本无状态 |
 | 缓存 | 进程内 LRU（单副本）→ **Redis**（多副本） | 设备目录 / 实验室 / 检索器单例化 |
 | 可观测 | **structlog**（JSON 日志）+ **prometheus-fastapi-instrumentator** + **OpenTelemetry** | request_id 贯穿；自研 trace 作为 span 上报；`/metrics` 出 p95/错误率 |
@@ -464,11 +478,11 @@ P0 不装任何新中间件就能做完——它全是「把已有的说法补�
 
 | 状态 | 可以写的内容 | 追问风险 |
 |---|---|---|
-| ✅ **现在就能写** | 多约束协商算法（阶梯放宽 + 接近度打分 + 多样性截断）、结构化拒绝原因、RRF 融合检索、模型不可用降级、443 条测试（含 20 项数据库迁移）、14 条评测集 | 低。都能指到具体代码 |
+| ✅ **现在就能写** | 多约束协商算法（阶梯放宽 + 接近度打分 + 多样性截断）、结构化拒绝原因、RRF 融合检索、模型不可用降级、**数据生命周期（过期清扫 / 归档先落盘后删除 / 幂等多副本安全）**、477 条测试（含 20 项数据库迁移、32 项后台清扫）、14 条评测集 | 低。都能指到具体代码 |
 | ⚠️ **有前提地写** | 「并发安全由 DB 唯一索引兜底」→ 必须限定为**同一开始时间**，或补一句「正在加固为区间级约束」 | **高**。不限定就等着被 `overlap_race.py` 打脸 |
 | ⚠️ | 「评测准确率 100%」→ **必须标注是 mock/model 确定性链路，非真实模型** | 高。不标注就是虚报 |
 | 🔜 **做完 P0 后可写** | 区间级不变式下沉（排除重叠的唯一约束 / 时段占用表）、JWT + RBAC、审计日志、越权防护 | 中。能讲清设计取舍即可 |
-| 🔜 **做完 P1 后可写** | Alembic 迁移、checkpointer 无状态化、CI 全绿、OpenTelemetry 可观测、真实模型评测与成本数字 | 中。需要能展示真实运行证据 |
+| 🔜 **做完 P1 后可写** | checkpointer 无状态化、OpenTelemetry 可观测、真实模型评测与成本数字（Alembic 与数据生命周期已落地） | 中。需要能展示真实运行证据 |
 
 **升级的先后顺序，本质上就是「你希望面试官先问到哪一条」的顺序。**
 建议从 P0-1 开始：它是唯一一条「不改就会在追问中当场崩掉」的问题。
@@ -481,6 +495,11 @@ P0 不装任何新中间件就能做完——它全是「把已有的说法补�
 python scripts/overlap_race.py        # §2.1 超卖复现（P0-1 修复前 1/3，修复后 3/3 全绿）
 python main.py loadtest -c 40 -r 3    # 同开始时间对照组（每轮恰好 1 成功）
 python main.py eval                   # 14/14（mock 模型，仅证明链路自洽）
-pytest -q                             # 322 passed（评估当时的数字；当前 443）
+pytest                                # 322 passed（评估当时的数字；当前 477）
 grep -n "user_id" src/lagent/schemas.py src/lagent/api.py   # §2.2 身份来自请求体
+
+# P1 落地后新增的复现命令
+python main.py migrate                # §2.5 迁移能力（P1-1）
+python main.py sweep                  # §2.5 保留策略（P1-2）
+python scripts/sweep_demo.py          # §2.5 清扫端到端 18/18（P1-2）
 ```

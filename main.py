@@ -6,6 +6,7 @@
     python main.py loadtest           # 并发抢坑压测
     python main.py eval               # 跑评测集
     python main.py access-demo        # 人员准入实证（未预约拦截/单次核销/容量）
+    python main.py sweep              # 后台清扫单轮（过期预约/凭证超时/归档）
     python main.py chat "明天下午两点想用荧光光谱仪两小时" --user 2
 
 之所以要有这个文件：把 src 加进 sys.path 这件事集中在一处，
@@ -29,6 +30,7 @@ SUBCOMMANDS = {
     "loadtest",
     "eval",
     "access-demo",
+    "sweep",
     "serve",
 }
 
