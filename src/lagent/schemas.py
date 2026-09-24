@@ -236,14 +236,47 @@ class ReservationOut(BaseModel):
     slot: str = ""
 
 
+# 下单/取消的**机器可读**结果分类。刻意只有这七个：
+# 指标要按它分组，而"分类太细"和"分类错了"一样会让图表失去意义。
+BookingReason = Literal[
+    "ok",          # 成功
+    "not_found",   # 用户 / 设备 / 预约不存在
+    "invalid",     # 参数或业务规则不过（资质、开放时间、粒度不对齐、时间已过去）
+    "forbidden",   # 越权（想动别人的预约）
+    "state",       # 当前状态不允许该操作（已取消 / 已完成 / 自己已是该状态）
+    "conflict",    # 目标时段已被占用（复检时发现的：坑没了）
+    "contention",  # 并发争抢，重试到上限仍未成功（系统承压的信号）
+]
+
+
 class BookingOutcome(BaseModel):
-    """下单结果。``retries`` 暴露乐观并发重试了几次，评测与压测都看这个数。"""
+    """下单/取消的结果。``retries`` 暴露乐观并发重试了几次，评测与压测都看这个数。
+
+    ``reason`` 是**机器可读**的结果分类（P1-4 加的），与 ``message`` 分工明确：
+    message 给人看、可以随便改文案；reason 给指标分组、**不能**靠解析 message 得到。
+
+    为什么值得单开一个字段：抓"从人话里找关键词"当分类依据，是典型的
+    「改一句文案，指标就静默错位」—— 而且它不会报错，只会让图上的数字
+    慢慢变得没有意义。这种错误发现得极晚，代价却是整条可观测性链路。
+    """
 
     ok: bool
     message: str
     reservation: ReservationOut | None = None
     retries: int = 0
     conflict_with: ReservationOut | None = None
+    reason: BookingReason | None = None
+
+    @property
+    def outcome_label(self) -> str:
+        """给指标用的分组标签。
+
+        ``reason`` 没填时兜底成 ``unknown`` 而**不是** ``ok``：一个漏了分类的
+        返回点应该在指标上露出来，而不是混进"成功"里被永久掩盖。
+        """
+        if self.reason:
+            return self.reason
+        return "ok" if self.ok else "unknown"
 
 
 # --------------------------------------------------------------------------

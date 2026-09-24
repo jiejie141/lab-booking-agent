@@ -110,7 +110,7 @@ python main.py migrate --revision base --down  # 回滚到空库（只留版本�
 
 ---
 
-## 八个真正花时间的地方
+## 九个真正花时间的地方
 
 ### 1. 并发抢同一时段：把不变式压到数据库层（含一次自我推翻）
 
@@ -240,7 +240,7 @@ Agent：这个需求不是换个时间能解决的：缺少「离心」准入资
 
 | 端点 | 要求 |
 |---|---|
-| `GET /api/health`、`POST /api/auth/login`、`GET /`（登录页） | 公开（存活探针 / 拿令牌 / 页面本身） |
+| `GET /api/health`、`GET /api/health/ready`、`POST /api/auth/login`、`GET /`（登录页） | 公开（存活探针 / 就绪探针 / 拿令牌 / 页面本身）。**业务数字（`/api/health/details`）与 `/metrics` 都要凭据** |
 | 其余全部业务端点 | 需要 `Authorization: Bearer <token>` |
 | `GET /api/users`、`GET /api/audit` | 额外要求管理员（`ROLE_ADMIN`/`ROLE_SYSADMIN`） |
 
@@ -661,6 +661,65 @@ $ python main.py migrate                        # 数据仍在，老行的 reque
 
 ---
 
+### 9. 指标：让「日志回答不了的那类问题」有答案
+
+`request_id` 能回答「这一次请求发生了什么」，但回答不了
+「最近 5 分钟 p95 多少 / 错误率涨了没 / 限流拒了几次 / 清扫还活着吗」。
+这不是同一个问题的两种问法 —— **日志是下钻**（值可以无界），
+**指标是发现**（值必须是有界集合）。两边都留着，谁也替不了谁。
+
+**① 标签基数是监控杀死服务的头号方式，防线在标签的取值上。**
+真实 `path` 是**客户端可控**的（`/api/labs/1`、`/api/labs/2`… 一个 id 一条时间序列），
+所以埋的是**路由模板** `/api/labs/{id}` —— 取值集合等于路由条数，天然有界。
+没命中路由的请求（404，以及被体积限制在路由之前就拒掉的 413）**没有模板可拿**，
+统一落到一个常量 `__unmatched__` —— **绝不是退回真实 path**，那等于把防线拆了。
+
+由此留下一个**如实说明**的盲区：413 从不进路由，所以
+「哪个接口被体积限制拒了」在指标里只能看到 `__unmatched__{status="413"}`，
+答不出来 —— 只能去访问日志里答（那里记的是真实 path）。
+这恰恰是"两个通道都要有"的理由，不是缺陷。
+
+**② 桶宽就是分位数的精度天花板。**
+Prometheus 只存桶计数，p95 是**插值**出来的，误差不超过所在桶的宽度。
+所以桶不是照抄的，是按本应用的真实延迟形状摆的：HTTP 桶在 50~300ms 最密
+（登录走 scrypt ≈140ms），LLM 桶在 1~16s 这个"要不要告警"的区间按 ~1.5 倍步进。
+实测：本应用真实混合负载上 p95 偏差 **0.1%~2.7%**；LLM 桶在 8~16s 之间
+特意加了一档 `10`，加之前同一批样本最差 **13.7%**、加之后降到 ~3~6%
+（`tests/test_metrics.py::TestQuantileAccuracy` 把这些数字钉成了断言）。
+
+**③ 三档健康检查，因为它们是三个不同的问题。**
+
+| 端点 | 回答什么 | 谁访问 |
+|---|---|---|
+| `GET /api/health` | **存活**：进程还能不能响应 | 编排系统（公开，且**刻意不碰数据库**） |
+| `GET /api/health/ready` | **就绪**：每个依赖分别好不好 | 编排系统（公开，**但不带业务数字**） |
+| `GET /api/health/details` | 业务统计（在馆人数等） | 控制台（**需要登录**） |
+
+合在一起会出的事故很具体：存活探针一旦碰数据库，数据库抖一下探针就失败，
+编排系统于是不停重启一个**完全健康**的进程 —— 而重启永远修不好数据库，
+它只会把「降级」放大成「一直在重启」。`ready` 额外比对
+`current_revision() == head_revision()`：库停在旧版本上会"部分可用"，
+那正是 P1-1 存在的理由。
+
+`critical` 与 `ok` 是**两个字段**：`degraded` 部署（设计上就没有模型）、
+向量检索缺 `chromadb` 回退 BM25、清扫被关掉 —— 都**不算** critical。
+否则探针永久红，而永久红的探针下一次是真的也没人看了。
+
+**④ 有的东西刻意不记。**
+抓取 `/metrics` 的**那次请求自己不进指标** —— Prometheus 每 15 秒来一次，
+而业务可能一分钟才几次，记进去的话 QPS 曲线反映的就只是抓取频率。
+只测 `RealLLMClient`：`MockLLMClient` 是本地确定性规则，把它算进"模型延迟"
+会让那张图废掉。**一个假的指标比没有指标更糟，因为它看起来是真的。**
+客户端断开（`CancelledError`）单独记成 `cancelled` 而不是 `error` ——
+把「用户手快」报成「模型不稳」，告警就会指向错误的方向。
+
+**⑤ 清扫的死活有了机器可读的证据。**
+`lagent_sweep_last_success_timestamp_seconds{task}` 是 P1-2 那一节论点的落点：
+「清扫死了不能悄悄死」必须能被判读，而不是靠人去看日志。
+告警式：`time() - lagent_sweep_last_success_timestamp_seconds > 1800`。
+
+---
+
 ## 边界加固
 
 | 项 | 做法 | 为什么这么做 |
@@ -670,6 +729,7 @@ $ python main.py migrate                        # 数据仍在，老行的 reque
 | CORS | 默认**空**白名单 = 不发任何 CORS 头 = 只允许同源 | 刻意不用 `allow_origins=["*"]`：带 `Authorization` 的跨域本就不该对任意源开放 |
 | 限流 | `/api/agent/chat` 按**用户**滑动窗口（默认 30/分钟） | 按 IP 会误伤（同一实验室出口 IP 后面几十个人）；固定窗口会在边界放过 2 倍配额 |
 | 输入白名单 | 写接口 `extra="forbid"`，长度上限 | 拼错的字段应当 422，而不是被静默忽略后让人以为"生效了" |
+| `/metrics` 需凭据 | 预共享密钥（`X-Metrics-Key`）或管理员令牌；**未配密钥 = 只认管理员** | 指标里有业务量（QPS / 冲突率 / 模型调用数），公开等于把容量与增长曲线送出去（见 §9） |
 
 实证（`python scripts/smoke_http.py`，对着真实 uvicorn 进程）：
 
@@ -683,10 +743,11 @@ $ python main.py migrate                        # 数据仍在，老行的 reque
 [7]  滥用与边界（413/411/422/429/CORS）  7/7   ✓
 [8]  审计留痕               6/6   ✓
 [9]  门禁边界（准入）        11/11 ✓   ← 未登录/普通用户 401、原因码、单次核销
-[10] react 执行模式          11/11 ✓
-[11] 降级链末端              5/5   ✓
-[12] 模型端点不可达           4/4   ✓
-结果：70/70 项全部通过
+[10] 指标与就绪探针          13/13 ✓   ← 路由模板而非真实 path / 抓取自身不进 QPS
+[11] react 执行模式          11/11 ✓
+[12] 降级链末端              5/5   ✓
+[13] 模型端点不可达           4/4   ✓
+结果：83/83 项全部通过
 ```
 
 ---
@@ -699,7 +760,15 @@ $ python main.py migrate                        # 数据仍在，老行的 reque
                     │  RequestCtx ▸ BodySize ▸ CORS ▸ 认证 ▸ 限流  │
                     │  ├─ /api/auth/*  登录 / 身份                 │
                     │  └─ current_user / require_admin / chat_quota│
+                    │  /api/health(存活) /health/ready(就绪)        │
+                    │  /health/details(需登录) /metrics(需凭据)     │
                     └────────────────┬─────────────────────────────┘
+                                     │ 旁路上报（不参与业务返回）
+                    ┌────────────────▼─────────────────────────────┐
+                    │ metrics.py 进程级注册表（§9）                 │
+                    │ 路由模板做标签 · 序列上限 + 丢弃计数          │
+                    │ HTTP / 预约 / 模型 / 清扫 四条线              │
+                    └──────────────────────────────────────────────┘
                                      │ ChatRequest（身份由 token 覆盖）
                     ┌────────────────▼─────────────────────────────┐
                     │        LangGraph 编排 (agent/graph.py)       │
@@ -740,7 +809,8 @@ $ python main.py migrate                        # 数据仍在，老行的 reque
 | `src/lagent/domain/` | 纯业务：约束判定、找空闲窗口、协商阶梯、并发安全下单、`access.py` 人员准入 |
 | `src/lagent/agent/` | 编排：LangGraph 图、工具定义、Mock/真实模型客户端、会话状态 |
 | `src/lagent/security.py` | 认证原语：scrypt 口令哈希 + HS256 JWT + RBAC 判定（零依赖） |
-| `src/lagent/obs.py` | **可观测性**：JSON 单行日志、`request_id` 的 `ContextVar` 传递、入站 id 白名单校验（见 §8） |
+| `src/lagent/obs.py` | **日志**：JSON 单行日志、`request_id` 的 `ContextVar` 传递、入站 id 白名单校验（见 §8） |
+| `src/lagent/metrics.py` | **指标**：零依赖实现 Prometheus 文本格式 + 进程级注册表（见 §9） |
 | `src/lagent/audit.py` | 审计写入（独立事务）与读取 |
 | `src/lagent/ratelimit.py` | 进程内滑动窗口限流 |
 | `src/lagent/sweep.py` | **后台清扫**：过期预约 / 凭证超时与关门收尾 / 审计与流水归档（三个可插拔任务 + 循环，见 §7） |
@@ -888,7 +958,7 @@ react ──模型故障 / 步数耗尽 / 不按格式回──▶ deterministic
 ## 验证
 
 ```bash
-pytest                          # 555 passed
+pytest                          # 633 passed
 python main.py eval             # 14/14（mock 模型）
 python main.py loadtest -c 40 -r 3
 python main.py access-demo      # 8/8（人员准入：未预约拦截 / 单次核销 / 容量）
@@ -896,26 +966,27 @@ python main.py migrate          # 0001 → 0002，结构校验与代码一致
 python main.py sweep            # 3/3 项完成
 python scripts/overlap_race.py  # 3/3
 python scripts/sweep_demo.py    # 18/18（真实 SQLite 文件上的清扫端到端）
-python scripts/smoke_http.py    # 70/70（真实 uvicorn 进程，含 react 模式与降级链）
+python scripts/smoke_http.py    # 83/83（真实 uvicorn 进程，含 react 模式与降级链）
 ```
 
 ```
-pytest:            555 passed
+pytest:            633 passed
 评测报告:           意图准确率 100.0% · 槽位准确率 100.0% · 端到端通过率 100.0%（14/14）
 并发压测:           3 轮 × 40 并发，每轮恰好 1 成功
 区间重叠竞态:        3/3 未超卖
 人员准入:           8/8（含 2 人并发抢容量 1 的房间，恰好 1 人放行）
 后台清扫:           18/18（忘刷出场被解开 / 过期预约释放占用格 / 归档先落盘后删除）
 日志与请求关联:      75 项（JSON 单行 / id 跨审计与门禁贯穿 / 注入被丢弃 / 413 也带 id / 身份不串味）
+指标与健康检查:      72 项（文本格式逐行校验 / 路由模板而非真实 path / 基数上限与丢弃计数 / p95 误差实测 / 三档健康检查）
 数据库迁移:         23 项（产物 vs 模型 diff 为空 / 部分索引 WHERE 未丢 / 回滚可往返 / 老库接管 / **给有数据的表加列**）
-HTTP 越权清单:       70/70（含 deterministic / react / degraded / 端点不可达四种启动配置）
+HTTP 越权清单:       83/83（含 deterministic / react / degraded / 端点不可达四种启动配置）
 ```
 
 静态检查（与 CI 同一套 —— 注意是 `ruff check .`，不是只在 `src tests` 上跑）：
 
 ```bash
 ruff check .   # All checks passed!
-mypy           # Success: no issues found in 63 source files
+mypy           # Success: no issues found in 65 source files
 ```
 
 覆盖范围：意图分类、中文时间解析（「下午两点到四点」的时段继承）、六道约束判定、
@@ -925,7 +996,9 @@ mypy           # Success: no issues found in 63 source files
 **harness 分层边界（AST 静态检查）/工具注册与副作用护栏/上下文裁剪优先级/span 埋点**、
 **ReAct 循环收敛与降级**、**人员准入（资质有效期/单次核销/人卡一致/容量不变式）**、
 **后台清扫（幂等 / 失败隔离 / 归档不丢数据 / 清扫不是安全依赖 / lifespan 接线）**、
-**结构化日志与请求关联（id 跨访问日志/审计/门禁贯穿 / 入站 id 白名单 / 边界拒绝也带 id / 身份不串味）**。
+**结构化日志与请求关联（id 跨访问日志/审计/门禁贯穿 / 入站 id 白名单 / 边界拒绝也带 id / 身份不串味）**、
+**指标（文本格式逐行校验 / 标签只用路由模板 / 序列上限与丢弃计数 / 桶宽对 p95 精度的实测 / 抓取自身不进 QPS / 取消≠失败）**、
+**三档健康检查（存活不碰库 / 就绪逐项报告且比对齐 alembic 版本 / 业务数字需登录 / 设计性降级不算 critical）**。
 
 > **关于这组数字要说实话**：默认 `LAB_APP_MODE=mock`，跑的是确定性假模型 ——
 > 它验证的是**代码链路自洽**（槽位抽取规则、约束判定、协商、下单、渲染都对），
@@ -1004,10 +1077,17 @@ docker compose up --build
   那里的 `set` 回不到中间件，访问日志里就会少一个 `user_id`。
   本项目所有端点都是 `async def`，所以成立 ——
   这一点由 `tests/test_obs.py` 里那条"访问日志带 user_id"的用例钉着。
-- **只有日志，没有指标**：`request_id` 能回答「这一次请求发生了什么」，
-  但回答不了「最近 5 分钟 p95 是多少 / 错误率涨了没 / 限流拒了多少次」——
-  前者要的是单条链路的细节，后者要的是**跨请求的聚合**，
-  靠日志是算不出来的（或者说只能事后离线算）。`/metrics` 是 P1-4 的事，目前没做。
+- **指标是进程级的，重启即归零，也没有做持久化聚合**：`/metrics`
+  反映的是「**这个进程**自启动以来做了什么」。多副本部署必须靠抓取端汇总
+  （`sum(rate(...))`），而"上周的 p95"这类问题需要一个时序库 ——
+  本项目没有 Prometheus / Grafana 那一段，只做到"把指标以标准格式吐出来"。
+- **`/metrics` 与 `/api/health` 的"关掉"语义值得看一眼**：`LAB_METRICS_ENABLED=false`
+  时 `/metrics` 回 **404 而不是空表**（"功能关掉了"与"开着但没数据"必须分得开），
+  且这个 404 **先于**鉴权 —— 未带凭据的探测不该能确认"这里有个需要凭据的接口"。
+  代价是同一份配置下，`/metrics` 的 404 无法区分"关掉了"和"路径错了"。
+- **只测真实模型客户端，mock 调用不进指标**：`LAB_APP_MODE=mock` 时
+  `lagent_llm_*` 一条都不会有。这不是漏了 —— 假模型的耗时是本地规则算出来的，
+  把它算进"模型延迟"会让那张图失去意义（见 §9 ④）。
 - **刻意不记请求体与查询串**：只记 `method` / `path` / `status` / `duration_ms` / `client`。
   查询串可能带用户输入甚至参数化的令牌，而"哪个接口、多慢、什么结果"这三件事不需要它。
   代价是「这次请求传了什么参数」查不到，需要时得靠审计表里那条业务记录。
@@ -1022,7 +1102,7 @@ docker compose up --build
   没有做「把长任务拆到多轮、中途询问用户」的规划能力。
 - **`requirements.txt` 是范围约束不是锁文件**；依赖版本尚未用 `uv lock` 之类锁定。
 - **向量检索路径是可选的**：默认走手写 BM25（零依赖）。装了 `chromadb` 才启用
-  `vector`/`hybrid`；缺依赖时自动回退并**在 `/api/health` 里说明原因**，不静默降级。
+  `vector`/`hybrid`；缺依赖时自动回退并**在 `/api/health/details` 里说明原因**，不静默降级。
 - **准入资质是种子数据**：真实场景应当对接培训记录系统，而不是 `users.certs` 这个 JSON 字段。
 - **设备密钥是全局共享的一把**（`LAB_GATE_API_KEY`）：够用，但一台设备的密钥泄露就得全换。
 - **后台清扫只在**「服务进程内」跑，且**每个副本都会跑一遍**：任务写成幂等的、

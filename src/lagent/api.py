@@ -26,6 +26,13 @@
    中间件（CORS 白名单、体积上限）的配置必须在构造时读进来，
    如果写成模块级单例，测试就没法用不同的配置各造一个应用 ——
    只能去测"生产那一份"，等于没法验证白名单真的生效。
+
+6. **健康检查分三档，因为「活着」「能干活」「有多少家底」是三件事。**
+   ``/api/health`` 只证明进程还能响应（**不碰数据库**），
+   ``/api/health/ready`` 逐项报告依赖，``/api/health/details`` 才是业务统计。
+   合并成一个接口有一个很具体的后果：数据库一抖，存活探针就跟着失败，
+   编排系统于是不停地重启一个**完全健康**的进程 —— 重启永远修不好数据库，
+   但会把故障放大成"服务一直在重启"。所以存活探针不许依赖任何下游。
 """
 
 from __future__ import annotations
@@ -37,23 +44,24 @@ import hmac
 import json
 import time
 from collections.abc import AsyncIterator, MutableMapping
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import selectinload
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from . import audit
+from . import __version__, audit
 from .agent.graph import build_agent_from_settings, set_catalog
 from .agent.state import SessionStore
 from .agent.tools import TOOL_SPECS
 from .clock import now_local
 from .config import Settings, get_settings
-from .db import SchemaDriftError, dispose_engine, session_scope
+from .db import SchemaDriftError, dispose_engine, revision_status, session_scope
 from .domain.access import (
     EntryDecision,
     issue_permit,
@@ -62,6 +70,17 @@ from .domain.access import (
 )
 from .domain.booking import cancel_reservation, list_reservations
 from .knowledge.retriever import build_retriever, fallback_reason
+from .metrics import (
+    http_in_progress_dec,
+    http_in_progress_inc,
+    init_sweep_gauges,
+    record_http_request,
+    record_rate_limited,
+    set_build_info,
+)
+from .metrics import (
+    render as render_metrics,
+)
 from .models import (
     ACTIVE_STATUSES,
     DENY_IDENTITY_MISMATCH,
@@ -116,6 +135,23 @@ _log = get_logger("lagent.api")
 # 存活探针的路径。单独提出来是因为访问日志要对它降级（见 RequestContextMiddleware）——
 # 探针可能每几秒一次，按 INFO 记会把业务日志冲掉。
 HEALTH_PATH = "/api/health"
+READY_PATH = "/api/health/ready"
+DETAILS_PATH = "/api/health/details"
+METRICS_PATH = "/metrics"
+
+# 被监控系统按固定节奏打的那些路径。访问日志对它们一律降到 DEBUG：
+# 它们的量由自己的节奏决定，与业务无关 —— 一个 15 秒一次的抓取
+# 攒一天就是 5760 行日志，足够把真出问题时那几行淹没。
+# （P1-3 只降了 /api/health；P1-4 加了 /metrics 与就绪探针，同理。）
+PROBE_PATHS = frozenset({HEALTH_PATH, READY_PATH, METRICS_PATH})
+
+# 请求没匹配到任何路由时用的路由标签。**必须是个常量**，不能退回真实 path ——
+# 那是个客户端可控的字符串，每个不同的值都会长出一条新的时间序列。
+UNMATCHED_ROUTE = "__unmatched__"
+
+# 进程启动时刻（monotonic）。用 monotonic 而不是墙钟：启动时长要能在
+# NTP 校正前后保持一致，否则会出现"运行时间变短了"这种没法解释的现象。
+_PROCESS_STARTED = time.monotonic()
 
 # 口令校验是 CPU 密集的（scrypt ≈140ms）。为了让"用户不存在"与"口令错误"
 # 两种路径耗时接近（否则响应时间本身就是一个账号枚举侧信道），
@@ -165,6 +201,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 测试之间不会互相把配额用光（模块级单例曾让第二个用例莫名 429）。
     settings = get_settings()
     app.state.chat_limiter = SlidingWindowLimiter(settings.rate_limit_per_minute, 60.0)
+    # 把「这批指标是哪个版本、什么模式」写进指标本身：排障时第一个要回答的
+    # 问题是「指标变化的那个时刻，代码/配置变了没有」，而这个标签就是答案。
+    set_build_info(
+        version=__version__,
+        app_mode=settings.app_mode,
+        retrieval_backend=settings.retrieval_backend,
+    )
     if uses_default_secret():
         # 结构化日志里的一条 WARNING，而不是终端上一行醒目文字：
         # 这条要能被日志系统上的告警规则抓到（「生产环境出现 uses_default_secret」），
@@ -180,6 +223,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     runner = build_runner()
     app.state.sweeper = runner
     if settings.sweep_enabled:
+        # 开启之前先把「从未成功过」显式写成 0：这样「从没跑成」与「很久没跑成」
+        # 可以用同一条告警表达式覆盖，不必再写一个 absent() 分支
+        # （详见 metrics.init_sweep_gauges）。
+        init_sweep_gauges([task.name for task in runner.tasks])
         runner.start()
         _log.info(
             "后台清扫已启动",
@@ -208,6 +255,24 @@ async def _reject(send: Send, status: int, detail: str) -> None:
         ],
     })
     await send({"type": "http.response.body", "body": body})
+
+
+def _route_label(scope: Scope) -> str:
+    """取这次请求命中的**路由模板**，没命中就用常量 ``__unmatched__``。
+
+    为什么不能退回真实 path：真实 path 是客户端可控的
+    （``/api/labs/1``、``/api/labs/2``……），拿它当指标标签，每来一个新 id
+    就长出一条新的时间序列 —— 一个把可观测性做成故障源的经典死法。
+    模板的取值集合 = 路由条数，天然有界。
+
+    实测（``_probe_route.py`` 验过）：FastAPI 在路由匹配时把命中的 route 写回
+    **同一个** ``scope``，所以最外层中间件在**响应阶段**读得到它；
+    没进路由的请求（404、被体积校验在读 body 前拦下的 413/411）读不到，
+    统一落到 ``__unmatched__``。
+    """
+    route = scope.get("route")
+    template = getattr(route, "path", "")
+    return template if isinstance(template, str) and template else UNMATCHED_ROUTE
 
 
 class RequestContextMiddleware:
@@ -270,6 +335,9 @@ class RequestContextMiddleware:
                 message["headers"] = headers
             await send(message)
 
+        # 并发量必须在这里增减，而且**递减要放在最外层 finally** ——
+        # 异常路径上少减一次，这个 gauge 就会一路往上爬，读起来像"服务卡住了"。
+        http_in_progress_inc(method)
         with bind_request_id(request_id):
             try:
                 await self.app(scope, receive, send_with_id)
@@ -277,29 +345,44 @@ class RequestContextMiddleware:
                 outcome["failed"] = True
                 raise
             finally:
-                elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+                elapsed = time.perf_counter() - started
+                route = _route_label(scope)
                 fields = {
                     "method": method,
                     "path": path,
+                    "route": route,
                     "status": outcome["status"],
-                    "duration_ms": elapsed_ms,
+                    "duration_ms": round(elapsed * 1000, 1),
                     "client": (scope.get("client") or ("", 0))[0],
                 }
                 if outcome["failed"]:
                     # 异常已经由上层转成 500，这里负责留下"哪个请求炸了"
                     _log.error("请求处理异常", extra=fields)
-                elif path == HEALTH_PATH:
-                    # 存活探针可能每几秒一次，按 INFO 记会把业务日志冲掉。
+                elif path in PROBE_PATHS:
+                    # 探针/抓取按固定节奏打，与业务量无关：按 INFO 记会把业务日志
+                    # 冲掉（15 秒一次的抓取攒一天就是 5760 行）。
                     # 降成 DEBUG 而不是丢掉：要查探针本身是否正常时仍然拿得到。
                     _log.debug("探针", extra=fields)
                 else:
                     _log.info("请求", extra=fields)
+                # 抓取 /metrics 的这次请求**自己不进指标**：Prometheus 每 15 秒来一次，
+                # 而真实业务可能一分钟才几次 —— 记进去的话 QPS 曲线主要反映
+                # "抓取频率"，那个指标就废了。
+                # （日志那边同理降到了 DEBUG，两处是同一个理由。）
+                if path != METRICS_PATH:
+                    record_http_request(
+                        method=method,
+                        route=route,
+                        status=int(outcome["status"]),
+                        duration_seconds=elapsed,
+                    )
                 # ⚠️ 顺序不能反：身份必须在**写完访问日志之后**才清掉，
                 # 否则这条日志就丢了自己的 user_id。清掉的理由见 obs.clear_user_context：
                 # request_id 靠 token 还原，而身份只 set 不还原 ——
                 # 上下文一旦被复用（测试的 ASGI 传输层就是），
                 # 下一条匿名请求的日志就会带着上一条请求的身份。
                 clear_user_context()
+        http_in_progress_dec(method)
 
 
 class BodySizeLimitMiddleware:
@@ -351,7 +434,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application = FastAPI(
         title="lab-booking-agent",
         description="带真实约束协商能力的智能实验室预约 Agent（JWT + RBAC + 审计）",
-        version="1.2.0",
+        version=__version__,
         lifespan=lifespan,
     )
     application.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_body_bytes)
@@ -433,6 +516,9 @@ async def chat_quota(
     if limiter is not None and limiter.enabled:
         allowed, retry_after = limiter.hit(f"user:{user.user_id}")
         if not allowed:
+            # 限流拒绝数（P1-4）：这个数字是"该扩容还是该让人少刷"的唯一依据。
+            # 只看 429 的日志回答不了"是一两个人刷还是所有人都被限"。
+            record_rate_limited("chat")
             raise HTTPException(
                 status_code=429,
                 detail=f"请求过于频繁，请 {retry_after} 秒后再试",
@@ -510,8 +596,158 @@ async def me(user: Principal = Depends(current_user)) -> UserOut:
 # ==========================================================================
 # 健康与元信息
 # ==========================================================================
+# 三档分开，因为「活着」「能干活」「有多少家底」是三件不同的事，
+# 而且它们的**调用方**也不同：编排系统看前两个（且不带凭据），人看第三个。
+#
+# 合并成一个接口的后果很具体：数据库一抖，存活探针跟着失败，
+# 编排系统于是一直重启一个完全健康的进程 —— 重启修不好数据库，
+# 却把一次降级放大成"服务一直在重启"。
+@dataclass(frozen=True)
+class HealthCheck:
+    """一个检查项。
+
+    ``critical`` 与 ``ok`` 分开是这套设计的核心：**"没通过"不等于"不能用"**。
+    刻意降级的部署（app_mode=degraded）、缺可选依赖因而回退到 BM25 的检索、
+    停掉的清扫循环，都不该被算成"服务不可用" —— 把它们混进 critical，
+    结果就是没人再相信这个探针。
+    """
+
+    name: str
+    ok: bool
+    critical: bool
+    detail: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "ok": self.ok,
+            "critical": self.critical,
+            "detail": self.detail,
+        }
+
+
+async def _check_database() -> HealthCheck:
+    """数据库可达 + **结构版本与代码一致**。
+
+    版本这一条不能省：库停在一个旧 revision 上时，服务的失败形态是
+    「部分可用」（寒暄正常、一下单就报 no such column），那正是 P1-1 花力气
+    消灭的东西。宁可明确报"没就绪"，也不要对外宣称自己是好的。
+
+    只做 ``SELECT 1`` 与读一次版本号，**不调 ``schema_drift()``** ——
+    后者要遍历全部模型与表，那是启动路径该付的成本，不是每几秒一次的探针该付的。
+    """
+    try:
+        async with session_scope() as session:
+            await session.execute(text("SELECT 1"))
+        current, head = await revision_status()
+    except Exception as exc:  # noqa: BLE001 - 探针的职责是"如实报告失败"，不是把异常冒成 500
+        return HealthCheck("database", False, True, f"不可用：{type(exc).__name__}: {exc}")
+    if current != head:
+        return HealthCheck(
+            "database",
+            False,
+            True,
+            f"结构版本 {current or '未由迁移接管'} ≠ 代码 head {head}；"
+            f"请先 python main.py migrate",
+        )
+    return HealthCheck("database", True, True, f"可用，revision={current}")
+
+
+def _check_agent(request: Request) -> HealthCheck:
+    settings = get_settings()
+    agent = getattr(request.app.state, "agent", None)
+    available = bool(agent and agent.client is not None)
+    # degraded 模式**刻意**不建 Agent（退化为引导式表单，这是产品承诺的降级路径）。
+    # 把它算成"没就绪"，等于让一个按设计运行的部署永远不被认为可用。
+    critical = settings.app_mode != "degraded"
+    if available:
+        return HealthCheck("agent", True, critical, f"可用（{settings.app_mode}）")
+    return HealthCheck(
+        "agent",
+        False,
+        critical,
+        "不可用：降级为引导式表单" if not critical else "不可用：app_mode 要求 Agent 在线",
+    )
+
+
+def _check_retrieval() -> HealthCheck:
+    reason = fallback_reason()
+    # 缺可选依赖（chromadb）会自动回退到内置 BM25 —— 那是**设计内的降级**，
+    # 检索仍然可用。所以 ok=not reason，但永远不是 critical。
+    detail = reason or f"backend={get_settings().retrieval_backend}"
+    return HealthCheck("retrieval", not reason, False, detail)
+
+
+def _check_sweeper(request: Request) -> HealthCheck:
+    settings = get_settings()
+    if not settings.sweep_enabled:
+        # 配置关掉的不算异常。报告它，但明确说清"这是配置"而不是"它坏了"。
+        return HealthCheck("sweeper", True, False, "已按配置关闭")
+    runner = getattr(request.app.state, "sweeper", None)
+    running = bool(runner and runner.running)
+    # 清扫停了**不会**让门禁失守（verify_entry 自己判凭证过期，见 sweep.py），
+    # 所以它不是 critical。但它必须被看见 —— 这就是这个检查项存在的全部理由，
+    # 对应的告警见 metrics 的 lagent_sweep_last_success_timestamp_seconds。
+    return HealthCheck(
+        "sweeper", running, False, "运行中" if running else "未在运行（门禁安全性不受影响）"
+    )
+
+
 @router.get(HEALTH_PATH)
-async def health(request: Request) -> dict:
+async def health() -> dict:
+    """存活探针（liveness）：只证明「进程还能响应」。
+
+    **刻意不碰数据库、不碰任何下游。** 原因见本段开头的注释。
+    """
+    settings = get_settings()
+    return {
+        "status": "ok",
+        "app": settings.app_name,
+        "app_mode": settings.app_mode,
+        "now": now_local().isoformat(timespec="seconds"),
+        # 一个在崩溃重启的进程，uptime 会一直很小 —— 这是"它在反复重启"最直接的
+        # 证据，而且不需要读任何外部系统。墙钟被 NTP 校正也不会让它跳变
+        # （用的是 monotonic，见模块顶部的 _PROCESS_STARTED）。
+        "uptime_seconds": round(time.monotonic() - _PROCESS_STARTED, 1),
+    }
+
+
+@router.get(READY_PATH)
+async def ready(request: Request, response: Response) -> dict:
+    """就绪探针（readiness）：逐项报告依赖，**任一致命项失败就回 503**。
+
+    公开是刻意的：编排系统的探针默认不带凭据，要凭据的探针等于没探针。
+    所以这里只回「哪些检查通过/失败」，**不回任何计数与业务量** ——
+    那些在 ``/api/health/details`` 里，需要登录。
+    """
+    checks = [
+        await _check_database(),
+        _check_agent(request),
+        _check_retrieval(),
+        _check_sweeper(request),
+    ]
+    usable = all(check.ok or not check.critical for check in checks)
+    if not usable:
+        # 用 503 而不是 200 + 正文里写 not_ready：编排系统看的是状态码，
+        # 一个恒为 200 的就绪探针在编排系统眼里永远就绪 —— 等于没做。
+        response.status_code = 503
+    return {
+        "status": "ready" if usable else "not_ready",
+        "checks": [check.as_dict() for check in checks],
+        "now": now_local().isoformat(timespec="seconds"),
+    }
+
+
+@router.get(DETAILS_PATH)
+async def health_details(
+    request: Request, _: Principal = Depends(current_user)
+) -> dict:
+    """业务统计与控制台需要的运行信息。**需要登录。**
+
+    P1-4 把它从公开的 ``/api/health`` 上搬过来并挂了认证：原来任何人不需要凭据
+    就能读到"库里有多少用户、多少条预约"。单看不致命，但那是免费的容量情报，
+    而这类"顺手公开"的信息一旦被别人依赖上就很难再收回去。
+    """
     settings = get_settings()
     async with session_scope() as session:
         counts = {
@@ -540,6 +776,63 @@ async def health(request: Request) -> dict:
         "now": now_local().isoformat(timespec="seconds"),
         "counts": counts,
     }
+
+
+# ==========================================================================
+# 指标（P1-4）
+# ==========================================================================
+_METRICS_KEY_HEADER = "X-Metrics-Key"
+
+
+async def metrics_caller(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> None:
+    """放行抓取端：预共享密钥，或管理员令牌（便于人工 curl 排障）。
+
+    与门禁的 ``gate_caller`` 是同一套「默认拒绝」逻辑：**没配密钥 = 只认管理员
+    令牌**，不会因为忘了配就敞开。刻意不把它抽象成一个参数化的鉴权工厂 ——
+    两处各写一遍，读的人一眼能看完整，而且这两个接口的风险面并不相同
+    （一个决定"开不开门"，一个只泄露容量数字）。
+
+    ⚠️ **先判"功能关了没"，再判身份**：关掉的时候要回 404 而不是 401。
+    顺序反了的话，一个未带凭据的探测会拿到 401 —— 那等于对外承认
+    "这里有个需要凭据的接口"。功能关掉就该看起来像是**不存在**。
+    """
+    if not get_settings().metrics_enabled:
+        raise HTTPException(status_code=404, detail="未启用指标端点")
+    expected = get_settings().metrics_api_key
+    presented = request.headers.get(_METRICS_KEY_HEADER, "")
+    if expected and presented and hmac.compare_digest(presented, expected):
+        return
+    if credentials is not None and credentials.credentials:
+        with contextlib.suppress(TokenError):
+            if principal_from_token(credentials.credentials).is_admin:
+                return
+    raise HTTPException(
+        status_code=401,
+        detail="指标接口需要设备密钥或管理员令牌",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+@router.get(METRICS_PATH, include_in_schema=False)
+async def metrics(_: None = Depends(metrics_caller)) -> Response:
+    """Prometheus 文本格式（0.0.4）抓取端点。
+
+    ``include_in_schema=False``：它不是给业务方调用的接口，
+    列进 /docs 只会让"公开接口清单"变得不可读。
+
+    认证与「关掉」的行为都由 ``metrics_caller`` 一处决定
+    （关掉 → 404，未授权 → 401）—— 策略放在两个地方就会漂移。
+    """
+    return Response(
+        content=render_metrics(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+        # 不让任何中间层缓存抓取结果：否则看到的是缓存时刻的数据，
+        # 而"指标不更新"这件事极难被怀疑到缓存头上。
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 # ==========================================================================

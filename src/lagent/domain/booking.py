@@ -36,7 +36,9 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
-from typing import cast
+import functools
+from collections.abc import Awaitable, Callable
+from typing import ParamSpec, cast
 
 from sqlalchemy import CursorResult, delete, select, text, update
 from sqlalchemy.exc import IntegrityError
@@ -46,6 +48,11 @@ from sqlalchemy.orm import selectinload
 from ..clock import minutes_between, now_local, overlaps
 from ..config import get_settings
 from ..db import session_scope
+from ..metrics import (
+    record_booking_outcome,
+    record_booking_retry,
+    record_cancel_outcome,
+)
 from ..models import (
     ACTIVE_STATUSES,
     DEFAULT_SLOT_GRANULARITY_MINUTES,
@@ -58,6 +65,40 @@ from ..models import (
     slot_indexes_for,
 )
 from ..schemas import BookingOutcome, ReservationOut
+
+_P = ParamSpec("_P")
+
+
+def _counted(
+    recorder: Callable[[str], None],
+) -> Callable[
+    [Callable[_P, Awaitable[BookingOutcome]]],
+    Callable[_P, Awaitable[BookingOutcome]],
+]:
+    """把「按结果计数」这件事集中到一个地方（P1-4）。
+
+    为什么不在这十来个 ``return`` 旁边各写一次 ``record_...``：
+    **漏掉一个返回点不会报任何错**，只会让那个结果的计数永远偏小 ——
+    与 P1-3 在审计里遇到的完全是同一个坑（构造点有七八处，逐个传必然漏）。
+    包一层的代价是"埋点在哪"不那么显眼，所以这里写了这段注释，
+    并且用 ``functools.wraps`` 保住原函数的签名与文档。
+
+    ``ParamSpec`` 而不是 ``**kwargs``：后者会让 mypy 和 IDE 都丢掉真实签名，
+    而这两个函数是领域层的对外入口，签名本身就是文档。
+    """
+
+    def decorate(
+        fn: Callable[_P, Awaitable[BookingOutcome]],
+    ) -> Callable[_P, Awaitable[BookingOutcome]]:
+        @functools.wraps(fn)
+        async def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> BookingOutcome:
+            outcome = await fn(*args, **kwargs)
+            recorder(outcome.outcome_label)
+            return outcome
+
+        return wrapper
+
+    return decorate
 
 
 # --------------------------------------------------------------------------
@@ -253,6 +294,7 @@ async def _load_equipment(session: AsyncSession, equipment_id: int) -> Equipment
 # --------------------------------------------------------------------------
 # 下单
 # --------------------------------------------------------------------------
+@_counted(record_booking_outcome)
 async def create_reservation(
     *,
     user_id: int,
@@ -275,23 +317,37 @@ async def create_reservation(
 
                 user = await session.get(User, user_id)
                 if user is None:
-                    return BookingOutcome(ok=False, message=f"用户 {user_id} 不存在", retries=attempt)
+                    return BookingOutcome(
+                        ok=False,
+                        message=f"用户 {user_id} 不存在",
+                        retries=attempt,
+                        reason="not_found",
+                    )
 
                 equipment = await _load_equipment(session, equipment_id)
                 if equipment is None:
                     return BookingOutcome(
-                        ok=False, message=f"设备 {equipment_id} 不存在", retries=attempt
+                        ok=False,
+                        message=f"设备 {equipment_id} 不存在",
+                        retries=attempt,
+                        reason="not_found",
                     )
 
                 problems = await _validate(session, user, equipment, date_, start, end)
                 if problems:
                     return BookingOutcome(
-                        ok=False, message="；".join(problems), retries=attempt
+                        ok=False,
+                        message="；".join(problems),
+                        retries=attempt,
+                        reason="invalid",
                     )
 
                 if dt.datetime.combine(date_, start) <= now:
                     return BookingOutcome(
-                        ok=False, message="该时间点已经过去，请选择之后的时间", retries=attempt
+                        ok=False,
+                        message="该时间点已经过去，请选择之后的时间",
+                        retries=attempt,
+                        reason="invalid",
                     )
 
                 # 锁内复检：这是「不被别人抢走」的实际判据
@@ -302,6 +358,9 @@ async def create_reservation(
                         message=f"该时段刚被占用：{conflict.slot_label}",
                         retries=attempt,
                         conflict_with=_to_out(conflict, equipment.name, equipment.lab.label),
+                        # conflict：复检就发现被占 —— 用户看到的是"这坑没了"，
+                        # 是真实业务冲突，不是系统打架（后者是 contention）。
+                        reason="conflict",
                     )
 
                 res = Reservation(
@@ -326,11 +385,16 @@ async def create_reservation(
                     message=f"预约成功：{out.slot} {equipment.name}（{equipment.lab.label}）",
                     reservation=out,
                     retries=attempt,
+                    reason="ok",
                 )
 
         except IntegrityError:
             # 占用格唯一索引拦下了重叠（或同坑重复）—— 抢坑的是并发请求，重试即可。
             # 注意：重试前事务已回滚，不会留下半条预约或半个占用格。
+            #
+            # 这个计数与"复检发现被占"分开记：它衡量的是**并发争抢的强度**，
+            # 也就是"该扩容了吗"。合成一个数字就把产品问题和容量问题混在一起了。
+            record_booking_retry()
             await asyncio.sleep(0.005 * (attempt + 1))
             continue
 
@@ -338,12 +402,14 @@ async def create_reservation(
         ok=False,
         message=f"并发冲突，已重试 {settings.booking_max_retry} 次仍未成功，请稍后再试",
         retries=retries,
+        reason="contention",
     )
 
 
 # --------------------------------------------------------------------------
 # 取消（乐观锁）
 # --------------------------------------------------------------------------
+@_counted(record_cancel_outcome)
 async def cancel_reservation(
     *,
     reservation_id: int,
@@ -366,17 +432,24 @@ async def cancel_reservation(
             res = await session.get(Reservation, reservation_id)
             if res is None:
                 return BookingOutcome(
-                    ok=False, message=f"预约 {reservation_id} 不存在", retries=attempt
+                    ok=False,
+                    message=f"预约 {reservation_id} 不存在",
+                    retries=attempt,
+                    reason="not_found",
                 )
             if res.user_id != user_id:
                 return BookingOutcome(
-                    ok=False, message="只能取消自己的预约", retries=attempt
+                    ok=False,
+                    message="只能取消自己的预约",
+                    retries=attempt,
+                    reason="forbidden",
                 )
             if res.status not in ACTIVE_STATUSES:
                 return BookingOutcome(
                     ok=False,
                     message=f"该预约当前状态为 {res.status}，无需取消",
                     retries=attempt,
+                    reason="state",
                 )
 
             target_version = expected_version if expected_version is not None else res.version
@@ -414,10 +487,16 @@ async def cancel_reservation(
                     equipment.lab.label if equipment and equipment.lab else "",
                 ),
                 retries=attempt,
+                reason="ok",
             )
 
     return BookingOutcome(
-        ok=False, message=f"取消失败：已重试 {limit} 次仍有并发修改", retries=limit
+        ok=False,
+        message=f"取消失败：已重试 {limit} 次仍有并发修改",
+        retries=limit,
+        # contention：「取消失败」以前是一句人话，谁也答不出它到底是
+        # 权限问题还是并发打架。分类之后这两件事在指标上是分开的。
+        reason="contention",
     )
 
 

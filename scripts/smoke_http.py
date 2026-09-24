@@ -22,6 +22,7 @@ import contextlib
 import json
 import os
 import pathlib
+import re
 import shutil
 import socket
 import subprocess
@@ -400,6 +401,41 @@ def run_checks(base: str) -> None:
     inside = client.get("/api/access/inside", headers=admin)
     expect("管理员读在馆名单 → 200", inside, 200)
 
+    print("\n[10] 指标与就绪探针（§9）")
+    # 这一段刻意放在最后：前面九段已经在**真实进程**里攒下了真实流量，
+    # 此刻 /metrics 里看到的不是空表，才算"埋点真的接上了"。
+    expect("存活探针公开可读", client.get("/api/health"), 200,
+           lambda r: "counts" not in r.json() and "database" not in r.json())
+    ready = client.get("/api/health/ready")
+    expect("就绪探针公开可读", ready, 200)
+    if ready.status_code == 200:
+        names = {c["name"] for c in ready.json()["checks"]}
+        check("就绪逐项报告依赖（不是一句 ok）",
+              {"database", "agent", "retrieval", "sweeper"} <= names, str(sorted(names)))
+        check("就绪探针不带业务数字",
+              "counts" not in ready.text, ready.text[:160])
+
+    expect("业务数字需要登录（原来是公开的）", client.get("/api/health/details"), 401)
+    expect("/metrics 未带凭据 → 401", client.get("/metrics"), 401)
+
+    client.get("/api/definitely-not-a-route")  # 制造一条未命中路由的请求
+    metrics = client.get("/metrics", headers=admin)
+    expect("管理员可读 /metrics", metrics, 200,
+           lambda r: r.headers["content-type"].startswith("text/plain"))
+    body = metrics.text if metrics.status_code == 200 else ""
+    check("文本以换行结束（规范要求，少了会丢最后一条）", body.endswith("\n"))
+    check("带版本/模式元信息", 'lagent_info{' in body and 'version="' in body)
+    check("埋的是路由模板而不是真实路径",
+          not re.search(r'route="/api/(labs|users|reservations)/\d+', body),
+          "出现了带具体 id 的 route 标签 —— 基数会随数据量增长")
+    check("未命中路由的请求收敛到 __unmatched__",
+          'route="__unmatched__"' in body, "没有 __unmatched__ 序列")
+    check("抓取 /metrics 本身不进 QPS",
+          'route="/metrics"' not in body,
+          "把抓取自己记进去了 —— 那条曲线反映的会是抓取频率而不是业务量")
+    check("清扫成功时间戳已上报（死了不会静默）",
+          "lagent_sweep_last_success_timestamp_seconds" in body)
+
     client.close()
 
 
@@ -422,7 +458,7 @@ def run_react_checks(base: str) -> None:
     client = local_client(base)
     lina = bearer(login(client, "李娜", "lina@123"))
 
-    print("\n[10] react 执行模式（模型自主选工具）")
+    print("\n[11] react 执行模式（模型自主选工具）")
     before = len(client.get("/api/reservations", headers=lina).json())
 
     resp = client.post(
@@ -478,7 +514,7 @@ def run_no_model_checks(base: str) -> None:
     client = local_client(base)
     lina = bearer(login(client, "李娜", "lina@123"))
 
-    print("\n[11] 降级链末端（模型显式关闭 → 引导式表单）")
+    print("\n[12] 降级链末端（模型显式关闭 → 引导式表单）")
     resp = client.post(
         "/api/agent/chat",
         json={"message": "明天下午两点想用荧光光谱仪两小时", "session_id": "smoke-nomodel"},
@@ -516,7 +552,7 @@ def run_unreachable_model_checks(base: str) -> None:
     client = local_client(base, timeout=60)
     lina = bearer(login(client, "李娜", "lina@123"))
 
-    print("\n[12] 模型端点不可达（失败要干净）")
+    print("\n[13] 模型端点不可达（失败要干净）")
     resp = client.post(
         "/api/agent/chat",
         json={"message": "明天下午两点想用荧光光谱仪两小时", "session_id": "smoke-dead"},

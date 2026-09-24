@@ -15,23 +15,116 @@ TOMORROW = dt.date.today() + dt.timedelta(days=1)
 
 
 class TestPublicEndpoints:
-    """无需令牌的端点白名单。它短且集中，是本次鉴权设计的核心约束。"""
+    """无需令牌的端点白名单。它短且集中，是鉴权设计的核心约束。
 
-    async def test_health(self, http):
+    P1-4 之后这个白名单**没有变长**，反而更精确了：健康检查拆成三档，
+    公开的只有「存活」与「就绪」——它们**必须**公开（编排系统的探针不带凭据，
+    要凭据的探针等于没探针），但都只回"能不能用"，不回任何业务数字。
+    """
+
+    async def test_health_is_liveness_only(self, http):
+        """存活探针只证明「进程还能响应」，**一个业务字段都没有**。"""
         resp = await http.get("/api/health")
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "ok"
         assert body["app_mode"] == "mock"
+        assert isinstance(body["uptime_seconds"], (int, float))
+        # 这几个字段是 P1-4 从公开接口上**搬走**的：匿名调用者不该读到
+        # "库里有多少用户、多少条预约"。断言"它们不在"才是这条用例的重点。
+        assert "counts" not in body
+        assert "database" not in body
+        assert "retrieval_backend" not in body
+
+    async def test_health_survives_a_dead_database(self, http, monkeypatch):
+        """★ 存活探针不许依赖任何下游 —— 这是"健康检查为什么要拆"的全部理由。
+
+        数据库一抖，如果存活探针跟着失败，编排系统就会不停地重启一个
+        **完全健康**的进程：重启修不好数据库，却把一次降级放大成"服务一直在重启"。
+        所以这里把数据库调用整个打断，存活探针必须仍然是 200。
+        """
+        import lagent.api as api_module
+
+        def boom():
+            raise RuntimeError("数据库不可达（模拟）")
+
+        monkeypatch.setattr(api_module, "session_scope", boom)
+        resp = await http.get("/api/health")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+
+    async def test_ready_reports_each_dependency(self, http):
+        resp = await http.get("/api/health/ready")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "ready"
+        checks = {check["name"]: check for check in body["checks"]}
+        assert set(checks) == {"database", "agent", "retrieval", "sweeper"}
+        for check in checks.values():
+            assert isinstance(check["ok"], bool)
+            assert isinstance(check["critical"], bool)
+            assert check["detail"], "每一项都要说明白为什么是这个结论"
+        # 就绪探针也**不能**泄露业务量 —— 它是公开的
+        assert "counts" not in body
+
+    async def test_ready_is_503_when_the_database_is_dead(self, http, monkeypatch):
+        """★ 同一件事在就绪探针上必须**相反**：数据库没了，服务就是不能干活。
+
+        两条要求合起来才是完整设计：「能响」与「能干活」是两件事，
+        用一个接口回答它们必然是错的（要么探针误杀、要么编排系统永远以为就绪）。
+        """
+        import lagent.api as api_module
+
+        def boom():
+            raise RuntimeError("数据库不可达（模拟）")
+
+        monkeypatch.setattr(api_module, "session_scope", boom)
+        resp = await http.get("/api/health/ready")
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["status"] == "not_ready"
+        database = next(c for c in body["checks"] if c["name"] == "database")
+        assert database["ok"] is False
+        assert database["critical"] is True
+        assert "数据库不可达（模拟）" in database["detail"]
+
+    async def test_a_designed_degradation_does_not_block_readiness(self, http, monkeypatch):
+        """一次**设计内**的降级不该把服务判成"不能用"。
+
+        检索缺可选依赖会回退到内置 BM25 —— 服务照常工作、检索也照常返回结果。
+        若把它算成致命项，探针会一直红，然后就没有人再看探针了。
+        所以这条钉的是 ``critical=False`` 这个字段真的在起作用。
+        """
+        import lagent.api as api_module
+
+        monkeypatch.setattr(api_module, "fallback_reason", lambda: "未安装 chromadb")
+        resp = await http.get("/api/health/ready")
+        assert resp.status_code == 200
+        retrieval = next(c for c in resp.json()["checks"] if c["name"] == "retrieval")
+        assert retrieval["ok"] is False
+        assert retrieval["critical"] is False
+
+    async def test_details_requires_a_token(self, http):
+        resp = await http.get("/api/health/details")
+        assert resp.status_code == 401
+        assert resp.headers.get("www-authenticate") == "Bearer"
+
+    async def test_details_returns_counts_to_a_logged_in_user(self, http, as_user):
+        resp = await http.get("/api/health/details", headers=await as_user("张伟"))
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "ok"
         assert body["agent_available"] is True
         assert body["counts"]["labs"] == 3
         assert body["counts"]["equipment"] == 6
 
-    async def test_health_never_leaks_secrets(self, http):
-        body = (await http.get("/api/health")).json()
-        assert "llm_api_key" not in body
-        assert "jwt_secret" not in body
-        assert "api_key" not in str(body).lower()
+    async def test_health_never_leaks_secrets(self, http, as_user):
+        headers = await as_user("张伟")
+        for path in ("/api/health", "/api/health/ready", "/api/health/details"):
+            body = (await http.get(path, headers=headers)).json()
+            assert "llm_api_key" not in body, path
+            assert "jwt_secret" not in body, path
+            assert "api_key" not in str(body).lower(), path
 
     async def test_index_served(self, http):
         resp = await http.get("/")

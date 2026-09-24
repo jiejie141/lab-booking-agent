@@ -58,7 +58,7 @@
 | 职责1 | 后台服务、App 接口的开发/调试/维护 | 能否独立交付可联调的接口 | FastAPI + 40 KB 单文件控制台，8 组端点，真进程冒烟 70/70 | **L3** |
 | 职责2 | 大模型编排、**Tool/Function Calling 工具调用**、RAG、向量检索 | 模型侧协议，不是应用侧路由 | 编排 L3；**工具调用 L1（见 §2）**；BM25+RRF L3；**pgvector/Milvus L0** | **L1–L3** |
 | 职责3 | **Agent Harness 运行时**：上下文管理、工具加载、多智能体调度 | **能不能造/改运行时** | 上下文 = 一个 `history` 字符串 + 进程内 dict；工具 = 硬编码调用；多智能体 = 无 | **L1 ← 断崖缺口** |
-| 职责4 | 迭代重构、性能优化、**评测/日志/监控**、线上稳定 | 生产意识 | 重构 L3；压测 L2；**结构化日志 L3（P1-3 已落地：JSON 单行 + request_id 跨审计/门禁贯穿 + 入站 id 白名单）**；**指标仍 L0**；降级链 L3 | **L0–L3** |
+| 职责4 | 迭代重构、性能优化、**评测/日志/监控**、线上稳定 | 生产意识 | 重构 L3；压测 L2；**结构化日志 L3（P1-3 已落地：JSON 单行 + request_id 跨审计/门禁贯穿 + 入站 id 白名单）**；**指标 L3（P1-4 已落地：`/metrics` 出 p95/错误率/QPS/限流/预约结果分类/模型耗时/清扫心跳，健康检查分存活·就绪·业务三档）**；**追踪仍 L0**（自研 trace 是节点级，未接 OTel）；降级链 L3 | **L0–L3** |
 | 职责5 | 技术文档、代码评审、接口联调 | 协作与表达 | 文档 **L4**（README 踩坑表）；代码评审 L0 | **L0 / L4** |
 | 要求2 | Python / FastAPI / MySQL / **Redis / 消息队列** | 后端基本功 | Python+FastAPI L3；裸 SQL 偏弱 L2；**Redis L0；MQ L0** | **L0–L3** |
 | 要求3 | OpenAI/Claude API、Prompt、工具调用、对话上下文 | LLM 基础概念 | API L3（httpx 直连、mock/live 双模）；Prompt L2；**上下文 L1** | **L1–L3** |
@@ -154,7 +154,7 @@ README 与 `doctor` 输出里的「已注册工具：query_availability, ⋯」�
 | **上下文管理** | 一个 `history` 字符串 | 分层（system / 长期记忆 / 近轮 / 工具结果）+ token 预算 + 超限策略（丢工具结果 → 摘要近轮 → 截断） | 32 k 上下文塞满时你先丢什么、保什么、为什么？摘要用什么模型、代价多少？ |
 | **向量检索** | 手写 BM25，语料仅 ~10 chunk | 真 embedding + pgvector + 分块策略 + 混合检索 + **检索质量评测（recall@k / MRR）** | chunk 切多大、为什么？两路融合的权重怎么定的？向量在你这个场景真的比 BM25 好吗（拿数字说）？ |
 | **Harness** | 无 | 见 §3.4 | LangGraph 给了什么、没给什么？你为什么还要在上面补一层？ |
-| **可观测** | 自研节点级 trace + **JSON 日志与 `request_id` 跨访问日志/审计/门禁贯穿**（P1-3 已完成）；指标仍空白 | span 化 + OTel + `/metrics` | 线上一次慢请求，你从哪三个地方看出来它慢在哪？ |
+| **可观测** | 自研节点级 trace + **JSON 日志与 `request_id` 跨访问日志/审计/门禁贯穿**（P1-3）+ **`/metrics` 与三档健康检查**（P1-4） | span 化 + OTel | 线上一次慢请求，你从哪三个地方看出来它慢在哪？<br>✅**现在能答**：① `/metrics` 里按路由模板的 p95 先定位到是哪个接口；② 拿响应头的 `X-Request-Id` 去 JSON 日志里看这一次请求的下钻；③ trace 里看是模型慢还是检索慢。 |
 
 ### 3.2 功能完整度
 
@@ -204,7 +204,7 @@ Harness 运行时层 —— 新建，本 JD 的决胜点
   LLM 客户端（mock / live 双模，OpenAI 兼容）
   持久化：PostgreSQL(+pgvector) · Redis(会话/限流/缓存) · Alembic(迁移)
   异步：ARQ / Celery（模型调用异步化 → 202 + task_id）
-  可观测：structlog JSON · Prometheus /metrics · OpenTelemetry
+  可观测：structlog JSON ✅（标准库自实现）· Prometheus /metrics ✅（标准库自实现）· OpenTelemetry ⏳
 ```
 
 **必须能讲的架构取舍**（这是区分 L3 和 L5 的地方）：
@@ -243,7 +243,7 @@ Harness 运行时层 —— 新建，本 JD 的决胜点
 | 不满足时说**为什么**（硬条件不满足 ≠ 候选没档期） | `blocker_kind`：`no_target` / `constraint` / `no_date` |
 | 不可满足时给**放宽方案**并说明放宽了什么 | `Proposal.relaxations` + 阶梯放宽 + 接近度打分 |
 | 生成**沟通策略/话术** | `compose` 节点（模型只负责措辞，事实由代码给） |
-| 「发现—触达—交互」全流程要可观测、可降级 | 节点级 trace + 三档降级链 |
+| 「发现—触达—交互」全流程要可观测、可降级 | 节点级 trace + 三档降级链 + **JSON 日志（request_id 贯穿）** + **`/metrics`（p95/错误率/限流/清扫心跳）** + **三档健康检查** |
 
 **这段话这么说**（诚实版）：
 
@@ -316,7 +316,11 @@ Harness 运行时层 —— 新建，本 JD 的决胜点
   这个需求（一行一个 JSON + 从上下文补字段 + 幂等装配）标准库的
   `logging.Formatter` + `ContextVar` 就够了，少一个依赖就少一条供应链；
   真要换 `structlog` 只是替换 `obs.py` 里两个类的实现。
-  剩下的 Slack：Prometheus `/metrics` + 自研 trace 转 OTel span。
+  **Prometheus `/metrics` 也已落地（P1-4）**，同样刻意**没引 `prometheus_client`**：
+  文本格式只有 HELP / TYPE / 样例三种行，桶的语义与序列上限都要自己定，
+  引一个库并不能替你做这些决定；自己写反而把"标签基数"和"桶宽 = 精度天花板"
+  这两件事摆到了明面上。
+  剩下的 Slack：自研 trace 转 OTel span。
 - **pgvector**：真 embedding 向量检索 + 混合检索，**并补检索质量评测（recall@k / MRR）**
   —— 有数字的 RAG 和"我用了 RAG"是两个层次。
 - **Alembic**：✅ 已落地 —— 替换了 `create_all`，正好接上刚修的那条 schema 漂移。
@@ -383,8 +387,9 @@ Harness 运行时层 —— 新建，本 JD 的决胜点
 | **你的工具调用怎么实现的？** | 「我在图里按意图路由到对应函数」→ 这是诚实答法，不会翻车，但**这一项直接丢分**（JD 点名了 Function Calling） | ✅**现在就能答**：两条执行模式共存。`react` 下模型真的通过 function calling 选工具（`llm.py` 传 `tools`/`tool_choice`，harness 跑 think→tool_call→tool_result 循环）；`deterministic` 保留条件边路由，因为预约是强约束业务、模型自由选工具有幻觉风险。非法参数回喂重试、结果超长截断、写操作由护栏拦住 —— 这几点都有测试。<br>⚠️ **但不能说"量了两条路径的工具选择正确率"** —— 那个数字没有。工具选择质量没有真实模型数据，要主动说清 |
 | **上下文怎么管理？** | 「把历史拼成字符串传进去」→ 弱 | ✅**现在就能答，而且能答得很具体**：分层 + CJK 感知的 token 预算 + **确定的**裁剪顺序。必留 `system + 当前消息 + 这一轮刚拿到的工具结果`，然后依次牺牲历史 → 摘要（截尾）→ 较早的工具轮次。工具层按"轮"整组取舍，因为 OpenAI 协议要求 `tool` 消息必须有 assistant 父消息，逐条裁会留下孤儿让真实 API 400。<br>**最值钱的一句**：为什么本轮工具结果必须必留 —— 丢了它模型看不到答案，会把同一个工具再调一遍直到步数耗尽。*裁剪策略直接决定 ReAct 能不能收敛，这是正确性问题不是性能调优*。这条是真踩过的坑，且有回归测试 |
 | **为什么用 LangGraph？** | 「因为它能画流程图」→ 弱 | 我要**持久化执行 + 中断恢复 + 人工介入**（HITL），这三样是 checkpointer 给的。但我不满意它把上下文管理留给使用者，所以抽了 harness 层自己管（`context.py`） |
+| **线上一次慢请求，你怎么定位？** | 「看日志」→ 太泛，而且日志回答不了聚合问题 | ✅**现在就能答，而且是三个通道**：① `/metrics` 里按**路由模板**的 p95 先定位是哪个接口（模板不是真实 path —— 真实 path 是客户端可控的，一条 id 一条时间序列，那是监控杀死服务的头号方式）；② 拿响应头的 `X-Request-Id` 去 JSON 日志里看**这一次**请求的下钻；③ trace 里看是模型慢还是检索慢。<br>**加分的一句**：这三个通道谁也替不了谁 —— 日志是下钻（值可以无界），指标是发现（值必须有界）。而「哪个接口被体积限制拒了」在指标里**答不出来**（413 在路由之前就被拒，只能看到 `__unmatched__`），只能去日志里答。**敢说出一个自己监控的盲区，比把三个通道都吹成全能更像真做过**。<br>⚠️ 追踪（OTel）与告警规则仍是空白，别说 |
 | **RAG 为什么用 BM25 不用向量？** | 「因为零依赖」→ 弱 | 语料小、是规范条文、术语密度高，BM25 在这种分布上 recall 不输向量；~~我实测过两路 RRF 融合的 recall@3~~ ⚠️**这句现在不能说** —— 检索质量评测（recall@k / MRR）属阶段 D，还没做 |
-| **怎么保证 Agent 线上稳定？** | 「有降级」→ 只答一半 | ✅**现在就能答**：降级链（react→deterministic→表单）+ 超时 + 重试 + 副作用护栏 + trace 可下钻（span 按 kind 聚合、失败也留痕）。<br>并且**能把这条链的边界说准**：它只覆盖"模型不听话"，不覆盖"模型不在" —— 后者两条路径都需要模型做 NLU，退回没意义，契约是接口明确失败 + 前端切表单（两种模式返回值逐字对照过）。**敢说边界比敢吹覆盖面更像懂行**。<br>⚠️ `/metrics`、Redis 限流属阶段 D，**别说**（结构化日志已经不是空白的了，见下一条） |
+| **怎么保证 Agent 线上稳定？** | 「有降级」→ 只答一半 | ✅**现在就能答**：降级链（react→deterministic→表单）+ 超时 + 重试 + 副作用护栏 + trace 可下钻（span 按 kind 聚合、失败也留痕）。<br>并且**能把这条链的边界说准**：它只覆盖"模型不听话"，不覆盖"模型不在" —— 后者两条路径都需要模型做 NLU，退回没意义，契约是接口明确失败 + 前端切表单（两种模式返回值逐字对照过）。**敢说边界比敢吹覆盖面更像懂行**。<br>⚠️ Redis 限流属阶段 D，**别说**（结构化日志与指标都已经不是空白的了，见下一条） |
 | **Redis 用来干嘛？** | 「没用过」→ **JD 明确点名，直接掉分** | 会话（替换进程内 dict）、限流计数器、目录缓存。限流**必须用 Lua 保证读-改-写原子性**，否则多副本下配额会被乘副本数。<br>⚠️ 这是"我打算这么做"，不是"我做了" —— 现在讲必须带上这一句 |
 | **压测多少并发？** | 「40 并发」→ 会被追问穿 | 说清口径：40 并发是为了验证**区间不重叠不变式**在部分重叠下的正确性（每轮恰好 1 成功），**不是性能压测**；性能基线还没测 |
 | **代码质量怎么保证？** | 「我写了测试」 | ✅**现在就能答**：ruff + mypy **零 `type: ignore`**（可当场 grep 验证）+ **555** 测试 + CI 三 job 按失败信号拆开（quality / smoke / docker）。<br>**分层边界不是靠约定**：`harness/` 不许 import 业务模块，这条用 AST 静态检查钉在测试里 —— 比 import-linter 少一个依赖，且能区分"包内相对导入"与"跳出本包的导入"。<br>⚠️ **没有覆盖率门禁**，别说有 |
@@ -439,8 +444,15 @@ Harness 运行时层 —— 新建，本 JD 的决胜点
 grep -n "response_format\|tools\|tool_choice" src/lagent/agent/llm.py
 grep -n "TOOL_SPECS\|^async def tool_" src/lagent/agent/tools.py
 
-# 核实 Redis / MQ / 可观测 / 向量库是否真的没有（§1）
-grep -ril "redis\|kafka\|celery\|opentelemetry\|prometheus\|pgvector\|milvus" src docs
+# 核实 Redis / MQ / OTel / 向量库确实**没有被使用**（§1）
+# ⚠️ 只看关键字会得到 3 个假阳性（state.py / trace.py / ratelimit.py 的注释里写着
+#    "将来换成 Redis 计数器""为将来导出 OTel span 预留"），所以这条只认 import：
+grep -rnE "^\s*(import|from)\s+(redis|celery|kafka|opentelemetry|pgvector|pymilvus)" src   # 应无匹配
+grep -n "redis\|celery\|opentelemetry" requirements.txt pyproject.toml                     # 应无匹配
+
+# 核实指标是标准库自实现、没有引第三方客户端（§1 职责4 / P1-4）
+grep -n "prometheus_client\|structlog" requirements.txt pyproject.toml   # 应无匹配
+grep -nE "^(import|from) " src/lagent/metrics.py                          # 只应出现标准库
 
 # 核实检索层构成与语料规模（§3.1）
 grep -n "class .*Index\|class .*Retriever\|RRF" src/lagent/knowledge/retriever.py

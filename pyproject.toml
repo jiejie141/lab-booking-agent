@@ -1,6 +1,6 @@
 [project]
 name = "lab-booking-agent"
-version = "1.2.0"
+version = "1.3.0"
 description = "带真实约束协商能力的智能实验室预约 Agent（FastAPI + LangGraph + JWT/RBAC + 审计）"
 requires-python = ">=3.10"
 readme = "README.md"

@@ -426,7 +426,7 @@ async function enterApp(){
 /* ---------- 顶部与统计 ---------- */
 async function loadHealth(){
   try{
-    const h=await api("/api/health");
+    const h=await api("/api/health/details");
     $("#dot-health").className="dot"+(h.agent_available?"":" warn");
     $("#badge-mode").innerHTML='<span class="dot'+(h.agent_available?"":" warn")+'" id="dot-health"></span>'+esc(h.app_mode)+" · "+esc(h.database);
     $("#badge-backend").textContent=h.retrieval_backend+(h.retrieval_degraded_reason?"（降级）":"");

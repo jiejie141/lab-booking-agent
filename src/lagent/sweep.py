@@ -50,6 +50,7 @@ import contextlib
 import datetime as dt
 import json
 import os
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,6 +64,7 @@ from .config import get_settings
 from .db import session_scope
 from .domain.access import expire_stale_permits, release_seats
 from .domain.availability import open_window
+from .metrics import record_sweep_task
 from .models import (
     ACTION_SWEEP_ARCHIVED,
     ACTION_SWEEP_FORCE_CHECKOUT,
@@ -384,17 +386,32 @@ async def run_once(*, tasks: Sequence[SweepTask] = DEFAULT_TASKS) -> list[SweepR
 
     **逐个隔离异常**：一个任务失败不影响后面的。否则「归档目录没权限」这种
     局部问题会把「凭证收尾」也一起拖停 —— 而后者才是真正要紧的那个。
+
+    每个任务的耗时与结果在这里**统一**记进指标（P1-4）：这是 CLI 与后台循环
+    两条路径的**唯一**汇合点，记在这里就两条都覆盖，不必各自埋一遍。
     """
     results: list[SweepResult] = []
     for task in tasks:
+        started = time.perf_counter()
         try:
             processed, detail = await task.run()
         except asyncio.CancelledError:
+            # 被取消不是"失败"：进程正在退出，这一轮没跑完而已。
+            # 记成 error 会在每次正常停机时留下一条假的失败记录。
             raise
         except Exception as exc:  # noqa: BLE001 - 任务是可插拔的，不能假定异常类型
             results.append(SweepResult(task.name, error=f"{type(exc).__name__}: {exc}"))
+            record_sweep_task(
+                task.name, ok=False, duration_seconds=time.perf_counter() - started
+            )
         else:
             results.append(SweepResult(task.name, processed, detail))
+            record_sweep_task(
+                task.name,
+                ok=True,
+                duration_seconds=time.perf_counter() - started,
+                processed=processed,
+            )
     return results
 
 
@@ -407,8 +424,9 @@ class SweepRunner:
     所以多跑不会算错，只多花一点 CPU。把它挪出进程是 P2 的事
     （见 ``docs/ENTERPRISE-UPGRADE.md``）。
 
-    ``runs`` / ``total_processed`` / ``failures`` 是给 ``/metrics`` 用的累计量。
-    只存**计数**不存历史 —— 运维组件自己最容易犯的错就是计数器无界增长。
+    ``runs`` / ``total_processed`` / ``failures`` 是**本进程内**的累计量，
+    供 CLI / doctor 显示。对外的指标在 ``metrics.py`` 里（`lagent_sweep_*`），
+    P1-4 之后那边才是运维真正看的东西 —— 这里的字段只图本地看一眼方便。
     """
 
     interval_seconds: int = 300

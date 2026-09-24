@@ -41,7 +41,8 @@
 | 功能升级 · 人员准入（门禁） | ✅ 已完成 | `208f074` | 需求是"每个人进实验室都必须提前预约，没预约的进不去"。独立成 `domain/access.py`（房间容量与设备时段是两类不同不变式）；4 张新表 + 3 个接口；`access-demo` **8/8**；`tests/test_access.py` 49 项；冒烟新增 [9] 门禁边界 **11/11**。**顺带修掉两个被自己的演示/冒烟戳出来的真漏洞**（未对齐窗口的尾巴不受容量保护；`now±1h` 跨午夜导致凭证被判过期） |
 | P1-1 · Alembic 数据库迁移 | ✅ 已完成 | `ba58381` | `create_all` 退役：结构变更只走 `migrations/versions/`。`0001` 覆盖全部 10 张表（含 3 条部分唯一索引的 `WHERE` 子句，已人工复核）；`ensure_schema()` 改为「迁移到 head + 校验结构与模型一致」；老库分两种命运（结构一致→`stamp head` 接管、不一致→明确报错要求重建）；新增 `python main.py migrate`；`tests/test_migrations.py` **20 项**，核心断言是「迁移产物 vs 模型 diff 为空」。实测：443 passed / ruff 与 mypy 均干净 / 冒烟 70/70 |
 | P1-2 · 过期清扫后台任务 | ✅ 已完成 | `f3a9f0c` | `src/lagent/sweep.py`：三个可插拔任务（过期预约收尾 / 凭证超时与关门收尾 / 审计与流水归档）+ 进程内循环（lifespan 起停，间隔可配）。**四条硬约束**：门禁正确性不依赖清扫（`verify_entry` 自己判过期）、状态切换一律「带条件的 UPDATE + rowcount」、归档先落盘后删除（失败一行不删）、每项任务异常隔离。顺带补齐 `expire_stale_permits` 的往日遗留分支。新增 `python main.py sweep`、`scripts/sweep_demo.py`（**18/18**）、`tests/test_sweep.py` **32 项**。实测：477 passed / ruff 与 mypy 均干净 / 冒烟 70/70 |
-| P1-3 · 结构化日志与请求关联 | ✅ 已完成 | 本次 | `src/lagent/obs.py`：一行一个 JSON + **`request_id` 贯穿访问日志 / 审计表 / 门禁流水**。关联 id 用 `ContextVar` 而不是 `thread_local`（async 下一个线程跑成百上千协程，thread_local 会让并发请求串味）；入站 `X-Request-Id` 是**不可信输入**，按字符白名单 + 长度上限**丢弃**而不是清洗（否则 `X-Request-Id: abc\n{"level":"ERROR",…}` 能伪造告警）；中间件挂在**最外层**，所以被 413/411 挡下的请求也有关联 id。迁移 `0002` 给 `audit_logs` / `access_events` 加 `request_id` 列（空串而非 NULL）与索引。新增 `tests/test_obs.py` **75 项**、`tests/test_migrations.py` 新增 **3 项**（专门测「给**有数据的表**加列」，这是 `0001` 从空库生成时证明不了的那件事）。实测：555 passed / ruff 与 mypy 均干净 / 冒烟 70/70，并在**真实 uvicorn 进程**上核对过日志与 id |
+| P1-3 · 结构化日志与请求关联 | ✅ 已完成 | `5af8f97` | `src/lagent/obs.py`：一行一个 JSON + **`request_id` 贯穿访问日志 / 审计表 / 门禁流水**。关联 id 用 `ContextVar` 而不是 `thread_local`（async 下一个线程跑成百上千协程，thread_local 会让并发请求串味）；入站 `X-Request-Id` 是**不可信输入**，按字符白名单 + 长度上限**丢弃**而不是清洗（否则 `X-Request-Id: abc\n{"level":"ERROR",…}` 能伪造告警）；中间件挂在**最外层**，所以被 413/411 挡下的请求也有关联 id。迁移 `0002` 给 `audit_logs` / `access_events` 加 `request_id` 列（空串而非 NULL）与索引。新增 `tests/test_obs.py` **75 项**、`tests/test_migrations.py` 新增 **3 项**（专门测「给**有数据的表**加列」，这是 `0001` 从空库生成时证明不了的那件事）。实测：555 passed / ruff 与 mypy 均干净 / 冒烟 70/70，并在**真实 uvicorn 进程**上核对过日志与 id |
+| P1-4 · `/metrics` 与健康检查细分 | ✅ 已完成 | 本次 | `src/lagent/metrics.py`（**零依赖**实现 Prometheus 文本格式，不引 `prometheus_client`）：HTTP / 预约 / 模型 / 清扫四条线 + 进程级注册表。**三条刻意的设计**：① 标签只能用**路由模板**（`/api/labs/{id}`）—— 真实 `path` 是客户端可控的，一条 id 一条时间序列，是监控杀死服务的头号方式；未命中路由的请求统一记为常量 `__unmatched__`；另有序列上限 + `lagent_metrics_dropped_series_total` 让"丢了序列"不等于"从没发生"。② 桶宽就是 p95 的精度天花板（Prometheus 只存桶计数、分位数是插值的），所以桶按本应用真实延迟形状摆，并把误差**量成数字**钉进测试。③ 只测 `RealLLMClient`，mock 那套确定性规则不进模型延迟 —— 假的指标比没有指标更糟。健康检查拆成三档：`/api/health`（存活，**刻意不碰数据库**）/ `/api/health/ready`（就绪，逐项报告 + 比对 alembic 版本，公开但不带业务数字）/ `/api/health/details`（业务统计，**需登录**）。合在一起会出的具体事故：存活探针一旦碰库，库抖一下编排系统就重启一个完全健康的进程，而重启永远修不好数据库 —— 只会把「降级」放大成「一直在重启」。新增 `tests/test_metrics.py` **72 项**（含一个**独立实现**的文本格式校验器，它当场抓出了两处真错：`_sum` 写到了标签后面、标签之间多了个空格）；冒烟新增 [10] **13/13**。实测：**633 passed** / ruff 与 mypy 均干净 / 冒烟 **83/83** |
 
 ### 与原方案的差异（为什么没照抄）
 
@@ -126,7 +127,56 @@ mypy                                 Success: no issues found in 60 source files
   `migrations/env.py` 的 `E402` —— CI 跑 `ruff check .` 会拦，本地却看不到。
   **"我检查过了"和"CI 会拦什么"是两个不同的命题**，必须按 CI 的命令跑。
 
-### 当前实测（P1-3 · 结构化日志与请求关联）
+### 当前实测（P1-4 · `/metrics` 与健康检查细分）
+
+```
+pytest                               633 passed（新增 test_metrics 72 项）
+python main.py eval                  14/14（mock 模型）
+python main.py access-demo           8/8 场景
+python main.py migrate               0001 → 0002，结构校验与代码一致
+python main.py sweep                 3/3 项完成
+python main.py loadtest -c 40 -r 3   3 轮 × 40 并发，每轮恰好 1 成功
+python scripts/overlap_race.py       3/3
+python scripts/sweep_demo.py         18/18
+python scripts/smoke_http.py         83/83（真实 uvicorn 进程，13 节）
+ruff check .                         All checks passed
+mypy                                 Success: no issues found in 65 source files
+```
+
+冒烟新增的 **[10] 指标与就绪探针**那一节（真实进程上的输出）：
+
+```
+[10] 指标与就绪探针（§9）
+  ✓ 存活探针公开可读
+  ✓ 就绪探针公开可读
+  ✓ 就绪逐项报告依赖（不是一句 ok）
+  ✓ 就绪探针不带业务数字
+  ✓ 业务数字需要登录（原来是公开的）
+  ✓ /metrics 未带凭据 → 401
+  ✓ 管理员可读 /metrics
+  ✓ 文本以换行结束（规范要求，少了会丢最后一条）
+  ✓ 带版本/模式元信息
+  ✓ 埋的是路由模板而不是真实路径
+  ✓ 未命中路由的请求收敛到 __unmatched__
+  ✓ 抓取 /metrics 本身不进 QPS
+  ✓ 清扫成功时间戳已上报（死了不会静默）
+```
+
+这一段刻意放在清单**最后**：前面九段已经在这个真实进程里攒下了真实流量，
+所以此刻 `/metrics` 里看到的不是空表 —— 埋点有没有真的接上，一眼能看出来。
+
+分位数的误差是**量出来的**，不是嘴上说的（`TestQuantileAccuracy`）：
+
+| 分布 | p95 相对误差 |
+|---|---|
+| 本应用真实混合负载（80% 快请求 + 14% 中等 + 5% 登录 scrypt + 1% 慢请求） | **0.1% ~ 2.7%** |
+| 对数正态 median=6s / sigma=0.5（LLM 桶，1~16s 带内） | **~3% ~ 6%**（加 `10` 这一档之前同一样本最差 **13.7%**） |
+
+误差的**硬上界是所在桶的宽度**（插值不会跑出桶外），这条也在测试里钉着。
+
+### 历史快照（P1-3 时点 · 结构化日志与请求关联）
+
+> 下面是 **P1-3 收尾时**那一轮的输出，按当时的状态原样保留（历史值，不是当前值）。
 
 ```
 pytest                               555 passed（新增 test_obs 75 项 + 迁移 3 项）
@@ -175,7 +225,11 @@ mypy                                 Success: no issues found in 63 source files
 
 - **密钥托管**：`LAB_JWT_SECRET` 仍走 `.env`。未接 Docker secrets / 云 KMS。
   目前只做到「用默认密钥时启动打告警」。
-- **P1 的其余各项**：结构化日志 / `/metrics` / request_id 贯穿、幂等键 —— 均未做。
+- **幂等键**：预约下单没有客户端生成的幂等键，重试会产生两条预约（P2）。
+- **指标只是"吐得出来"，没有后端**：时序存储（Prometheus）、面板（Grafana）、
+  告警规则都不在本项目范围内，也没有跨副本聚合 —— 多副本要靠抓取端 `sum(rate(...))`。
+- **`/metrics` 只做到"需要凭据"**：更彻底的做法是绑到独立内部端口 + 网络策略隔离，
+  那样连"这个端点存在"都不对外暴露。
 - **清扫出进程**：目前循环跑在服务进程内，多副本时每个副本都会扫一遍
   （任务幂等、状态切换带条件，所以**不会算错**，只是白花 CPU）。
   挪成独立 worker 属于 P2。
@@ -210,7 +264,7 @@ mypy                                 Success: no issues found in 63 source files
 | 身份与权限 | **完全没有** | 认证（JWT/OIDC）、授权（RBAC 只是枚举了角色没用上）、密钥托管 |
 | Schema 演进 | `create_all()` | Alembic 迁移；**没有迁移能力 = schema 无法演进** |
 | 会话持久化 | 进程内 `SessionStore` | Redis / LangGraph checkpointer（`langgraph-checkpoint 4.2.0` 装了但没接） |
-| 可观测性 | 自研节点级 trace | 结构化日志、指标（`/metrics`）、分布式追踪、request_id 贯穿、告警 |
+| 可观测性 | 自研节点级 trace | 结构化日志**✅**、指标（`/metrics`）**✅**、分布式追踪 ⏳、request_id 贯穿 **✅**、告警 ⏳ |
 | 缓存 | 无 | 设备目录、实验室、检索器均每次重建/查询 |
 | 异步任务 | 无 | 模型调用同步阻塞在请求里，无队列、无 202+轮询/SSE |
 | 限流与配额 | 无 | `/api/agent/chat` 是免费算力入口；无 token 成本核算 |
@@ -315,8 +369,13 @@ python scripts/overlap_race.py
 > **「无结构化日志」这一格已由 P1-3 补上**（评估基准时确实是空的）：
 > 一行一个 JSON、`request_id` 贯穿访问日志 / 审计表 / 门禁流水、
 > 入站 `X-Request-Id` 按白名单校验、响应头回传、探针降级到 DEBUG。
-> **仍然缺的是指标那一格**（p95 / 错误率 / QPS / 限流拒绝数），
-> 这一格排在 P1-4（`/metrics`），本文件不把它算作已完成。
+> **「无指标」这一格已由 P1-4 补上**：`/metrics` 出标准 Prometheus 文本格式，
+> 覆盖 p95（按路由模板分）、错误率、QPS、限流拒绝数、预约结果分类、
+> 模型调用耗时与重试、清扫成功时间戳；健康检查拆成存活 / 就绪 / 业务三档。
+>
+> 仍然缺的是**分布式追踪那一格**（跨服务断链）—— 自研 trace 仍是节点级、
+> 只随响应返回，没有接 OpenTelemetry，也没有持久化后端。
+> 另外指标"吐得出来"不等于"有人看着"：时序存储、面板与告警规则不在本项目范围内。
 
 ### 2.5 【中·数据生命周期】没有迁移能力与治理
 
@@ -413,7 +472,7 @@ P0 不装任何新中间件就能做完——它全是「把已有的说法补�
 | 数据生命周期 | 进程内清扫循环 ✅ 已落地（`sweep.py`） | 过期预约 / 凭证超时 / 审计归档有主 |
 | 会话持久化 | **LangGraph checkpointer**（`AsyncPostgresSaver` / `SqliteSaver`） | 替换 `SessionStore`，多副本无状态 |
 | 缓存 | 进程内 LRU（单副本）→ **Redis**（多副本） | 设备目录 / 实验室 / 检索器单例化 |
-| 可观测 | **structlog**（JSON 日志）+ **prometheus-fastapi-instrumentator** + **OpenTelemetry** | request_id 贯穿；自研 trace 作为 span 上报；`/metrics` 出 p95/错误率 |
+| 可观测 | **structlog**（JSON 日志）+ **prometheus-fastapi-instrumentator** + **OpenTelemetry** | request_id 贯穿；自研 trace 作为 span 上报；`/metrics` 出 p95/错误率<br>**实际落地**：三个都**没引** —— JSON 日志与指标各约 700 行标准库实现（少三条供应链，且这两个东西的边界很清楚）；OpenTelemetry 仍未接 |
 | 长任务 | **ARQ / Celery / Dramatiq** 或 FastAPI 的 `BackgroundTasks` + 轮询 | 模型调用异步化，返回 202 + task_id |
 | API 治理 | 游标分页、过滤、`/api/v1` 前缀、**幂等键**（`Idempotency-Key`） | 重复提交不产生重复预约 |
 | 交付 | **ruff + mypy + pytest + docker build** 的 CI；`uv lock` 锁依赖 | 每次提交自动验证 |
@@ -530,7 +589,7 @@ P0 不装任何新中间件就能做完——它全是「把已有的说法补�
 
 | 状态 | 可以写的内容 | 追问风险 |
 |---|---|---|
-| ✅ **现在就能写** | 多约束协商算法（阶梯放宽 + 接近度打分 + 多样性截断）、结构化拒绝原因、RRF 融合检索、模型不可用降级、**数据生命周期（过期清扫 / 归档先落盘后删除 / 幂等多副本安全）**、**可观测性（JSON 日志 + request_id 贯穿访问日志/审计/门禁，入站 id 按白名单校验）**、555 条测试（含 23 项数据库迁移、32 项后台清扫、75 项日志与请求关联）、14 条评测集 | 低。都能指到具体代码 |
+| ✅ **现在就能写** | 多约束协商算法（阶梯放宽 + 接近度打分 + 多样性截断）、结构化拒绝原因、RRF 融合检索、模型不可用降级、**数据生命周期（过期清扫 / 归档先落盘后删除 / 幂等多副本安全）**、**可观测性（JSON 日志 + request_id 贯穿访问日志/审计/门禁，入站 id 按白名单校验；`/metrics` 出 p95/错误率/限流/预约结果分类/模型耗时/清扫心跳，健康检查分存活·就绪·业务三档）**、633 条测试（含 23 项数据库迁移、32 项后台清扫、75 项日志与请求关联、72 项指标）、14 条评测集 | 低。都能指到具体代码 |
 | ⚠️ **有前提地写** | 「并发安全由 DB 唯一索引兜底」→ 必须限定为**同一开始时间**，或补一句「正在加固为区间级约束」 | **高**。不限定就等着被 `overlap_race.py` 打脸 |
 | ⚠️ | 「评测准确率 100%」→ **必须标注是 mock/model 确定性链路，非真实模型** | 高。不标注就是虚报 |
 | 🔜 **做完 P0 后可写** | 区间级不变式下沉（排除重叠的唯一约束 / 时段占用表）、JWT + RBAC、审计日志、越权防护 | 中。能讲清设计取舍即可 |
@@ -555,6 +614,9 @@ python main.py migrate                # §2.5 迁移能力（P1-1）
 python main.py sweep                  # §2.5 保留策略（P1-2）
 python scripts/sweep_demo.py          # §2.5 清扫端到端 18/18（P1-2）
 pytest tests/test_obs.py -v           # §2.4 日志与请求关联 75 项（P1-3）
+pytest tests/test_metrics.py -v       # §2.4 指标与三档健康检查 72 项（P1-4）
+curl -H "Authorization: Bearer <管理员令牌>" http://127.0.0.1:8200/metrics
+                                      # 真实进程上的指标（需凭据；未带凭据是 401）
 pytest tests/test_migrations.py -v    # §2.5 含「给有数据的表加列」3 项（P1-3）
 LAB_LOG_FORMAT=text python main.py doctor   # §2.4 人读格式（默认是 JSON）
 ```

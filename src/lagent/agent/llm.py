@@ -22,7 +22,20 @@ from typing import Any, Protocol
 from ..clock import now_local
 from ..config import Settings
 from ..harness import ToolCall, TurnResult
+from ..metrics import record_llm_retry, track_llm_call
 from ..schemas import HARD_CONSTRAINTS, IntentKind, IntentResult, Proposal, Requirement
+
+# 埋点只做在 RealLLMClient 上（见下面每个方法的说明）。
+#
+# ⚠️ 这里本来写的是一个 ``@_measured("op")`` 装饰器，5 个方法各挂一行，很干净 ——
+# 但它挂上去之后 **mypy 立刻报错**：``RealLLMClient`` 不再满足 ``LLMClient`` 协议。
+# 原因是 ``functools.wraps`` + ``ParamSpec`` 装饰出来的方法，mypy 没法再和
+# Protocol 里那一行 ``async def classify_intent(self, message: str) -> IntentResult: ...``
+# 对上（最小复现见 README 的踩坑记录）。
+# 所以退回到最直白的写法：在**方法体里**用 ``async with track_llm_call(op)`` 包住。
+# 代价是缩进多一层，换来的是类型契约完整 —— 而这里的类型契约是有实际用处的：
+# ``build_client()`` 返回的就是 ``LLMClient``，协议一旦被绕过，
+# "两种客户端可以互换"这件事就没有任何东西在守着了。
 
 
 class LLMError(RuntimeError):
@@ -420,21 +433,68 @@ class RealLLMClient:
         if not settings.llm_api_key:
             raise LLMError("live 模式需要配置 LAB_LLM_API_KEY")
 
-    async def _json(self, system: str, user: str) -> dict:
+    async def _json(self, system: str, user: str, op: str) -> dict:
+        """发一次要 JSON 的调用，失败重试。
+
+        ``op`` 是必须的（没有默认值）：重试次数要归到**具体哪个操作**上 ——
+        「compose 在重试」和「classify_intent 在重试」指向完全不同的原因
+        （前者多半是输出太长/被截断，后者多半是并发打满）。给个默认值的话，
+        新增调用点时忘了传也不会报错，只会让那个操作的重试永远算到别人头上。
+        """
         import httpx
 
-        url = self.settings.llm_base_url.rstrip("/") + "/chat/completions"
-        payload = {
-            "model": self.settings.llm_model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": 0,
-            "response_format": {"type": "json_object"},
-        }
-        last: Exception | None = None
-        for _ in range(self.settings.llm_max_retry + 1):
+        # 量的是**逻辑调用**（含内部重试的总耗时），所以包在最外层；
+        # 重试次数单独记（见下面 record_llm_retry 的说明）。
+        async with track_llm_call(op):
+            url = self.settings.llm_base_url.rstrip("/") + "/chat/completions"
+            payload = {
+                "model": self.settings.llm_model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": 0,
+                "response_format": {"type": "json_object"},
+            }
+            last: Exception | None = None
+            for attempt in range(self.settings.llm_max_retry + 1):
+                try:
+                    async with httpx.AsyncClient(timeout=self.settings.llm_timeout) as client:
+                        resp = await client.post(
+                            url,
+                            json=payload,
+                            headers={"Authorization": f"Bearer {self.settings.llm_api_key}"},
+                        )
+                        resp.raise_for_status()
+                        content = resp.json()["choices"][0]["message"]["content"]
+                        return json.loads(content)
+                except Exception as exc:  # noqa: BLE001
+                    last = exc
+                    # 记「额外的 HTTP 次数」而不是"失败了的调用"：一个 op 重试两次
+                    # 最终成功，与它直接失败，在成功率上是两件事，在"模型端有多不稳"
+                    # 上却是同一件事 —— 后者才是要提前看到的信号。
+                    if attempt < self.settings.llm_max_retry:
+                        record_llm_retry(op)
+            raise LLMError(f"模型调用失败：{last}")
+
+    async def _text(self, system: str, user: str, op: str) -> str:
+        """发一次要自由文本的调用（不重试）。
+
+        ``op`` 同样必须显式传：它决定这次耗时算在 ``ask_missing`` 还是 ``compose``
+        头上，而这两个操作该看的量级完全不同。
+        """
+        import httpx
+
+        async with track_llm_call(op):
+            url = self.settings.llm_base_url.rstrip("/") + "/chat/completions"
+            payload = {
+                "model": self.settings.llm_model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": 0.2,
+            }
             try:
                 async with httpx.AsyncClient(timeout=self.settings.llm_timeout) as client:
                     resp = await client.post(
@@ -443,35 +503,9 @@ class RealLLMClient:
                         headers={"Authorization": f"Bearer {self.settings.llm_api_key}"},
                     )
                     resp.raise_for_status()
-                    content = resp.json()["choices"][0]["message"]["content"]
-                    return json.loads(content)
-            except Exception as exc:  # noqa: BLE001
-                last = exc
-        raise LLMError(f"模型调用失败：{last}")
-
-    async def _text(self, system: str, user: str) -> str:
-        import httpx
-
-        url = self.settings.llm_base_url.rstrip("/") + "/chat/completions"
-        payload = {
-            "model": self.settings.llm_model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": 0.2,
-        }
-        try:
-            async with httpx.AsyncClient(timeout=self.settings.llm_timeout) as client:
-                resp = await client.post(
-                    url,
-                    json=payload,
-                    headers={"Authorization": f"Bearer {self.settings.llm_api_key}"},
-                )
-                resp.raise_for_status()
-                return resp.json()["choices"][0]["message"]["content"]
-        except Exception as exc:
-            raise LLMError(f"模型调用失败：{exc}") from exc
+                    return resp.json()["choices"][0]["message"]["content"]
+            except Exception as exc:
+                raise LLMError(f"模型调用失败：{exc}") from exc
 
     async def chat_tools(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
@@ -490,35 +524,38 @@ class RealLLMClient:
         """
         import httpx
 
-        url = self.settings.llm_base_url.rstrip("/") + "/chat/completions"
-        payload = {
-            "model": self.settings.llm_model,
-            "messages": messages,
-            "tools": tools,
-            "tool_choice": "auto",
-            "temperature": 0,
-        }
-        last: Exception | None = None
-        for _ in range(self.settings.llm_max_retry + 1):
-            try:
-                async with httpx.AsyncClient(timeout=self.settings.llm_timeout) as client:
-                    resp = await client.post(
-                        url,
-                        json=payload,
-                        headers={"Authorization": f"Bearer {self.settings.llm_api_key}"},
-                    )
-                    resp.raise_for_status()
-                    message = resp.json()["choices"][0]["message"]
-                    return TurnResult(
-                        content=message.get("content"),
-                        tool_calls=[
-                            _parse_tool_call(raw)
-                            for raw in (message.get("tool_calls") or [])
-                        ],
-                    )
-            except Exception as exc:  # noqa: BLE001
-                last = exc
-        raise LLMError(f"模型调用失败：{last}")
+        async with track_llm_call("chat_tools"):
+            url = self.settings.llm_base_url.rstrip("/") + "/chat/completions"
+            payload = {
+                "model": self.settings.llm_model,
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": "auto",
+                "temperature": 0,
+            }
+            last: Exception | None = None
+            for attempt in range(self.settings.llm_max_retry + 1):
+                try:
+                    async with httpx.AsyncClient(timeout=self.settings.llm_timeout) as client:
+                        resp = await client.post(
+                            url,
+                            json=payload,
+                            headers={"Authorization": f"Bearer {self.settings.llm_api_key}"},
+                        )
+                        resp.raise_for_status()
+                        message = resp.json()["choices"][0]["message"]
+                        return TurnResult(
+                            content=message.get("content"),
+                            tool_calls=[
+                                _parse_tool_call(raw)
+                                for raw in (message.get("tool_calls") or [])
+                            ],
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    last = exc
+                    if attempt < self.settings.llm_max_retry:
+                        record_llm_retry("chat_tools")
+            raise LLMError(f"模型调用失败：{last}")
 
     async def classify_intent(self, message: str) -> IntentResult:
         today = now_local().date().isoformat()
@@ -527,6 +564,7 @@ class RealLLMClient:
             "intent（query_availability/create_reservation/cancel_reservation/"
             "check_admission/smalltalk 之一）、confidence（0-1）、reason。",
             f"今天是 {today}。用户说：{message}",
+            op="classify_intent",
         )
         try:
             return IntentResult(**data)
@@ -542,6 +580,7 @@ class RealLLMClient:
             "equipment_name、category、capacity（整数或 null）、purpose。"
             "不知道的字段给 null，不要编造。",
             f"今天是 {today}。可选设备目录：{catalog}。\n历史：{history}\n用户现在说：{message}",
+            op="extract_requirement",
         )
         cleaned = {k: v for k, v in data.items() if v not in ("", "null", "未知")}
         try:
@@ -556,6 +595,7 @@ class RealLLMClient:
         return await self._text(
             "你是实验室预约助手。用一句中文向用户追问缺失信息，语气自然、口语化，不要罗列字段名。",
             f"已抽取到的信息：{requirement.summary() or '无'}。缺失字段：{fields}。",
+            op="ask_missing",
         )
 
     async def compose(self, ctx: dict[str, Any]) -> str:
@@ -593,6 +633,7 @@ class RealLLMClient:
             "如果 hard_blockers 非空，说明这是资质或设备状态问题，"
             "不要建议用户更换时段。",
             json.dumps(payload, ensure_ascii=False),
+            op="compose",
         )
 
 
