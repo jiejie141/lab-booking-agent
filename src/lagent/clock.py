@@ -85,3 +85,29 @@ def overlaps(a_start: dt.time, a_end: dt.time, b_start: dt.time, b_end: dt.time)
 
 def minutes_between(start: dt.time, end: dt.time) -> int:
     return (end.hour * 60 + end.minute) - (start.hour * 60 + start.minute)
+
+
+def window_covering(now: dt.datetime, minutes: int = 60) -> tuple[dt.time, dt.time]:
+    """返回一段**包含 now、且不跨日**的时间窗 ``(start, end)``。
+
+    给凭证签发/演示/冒烟取一个"此刻有效"的窗口用。
+
+    为什么值得单独一个函数，而不是随手写 ``now ± 1h``：只要 now 落在 23:00 之后，
+    ``now + 1h`` 就会跨过午夜，``valid_to`` 变成 ``00:xx`` —— 而凭证的日期是**今天**，
+    于是服务端比较 ``now_local().time() > valid_to``（23:52 > 00:52）会成立，
+    凭证被判**已过期**。这个坑在 23:52 真把冒烟清单里的两条打红过，
+    而且同一段逻辑在 CLI 演示里也踩过一次 —— 所以它该是个被测过的共享函数，
+    而不是各写一遍。
+
+    两条保证（``tests/test_clock.py`` 钉住）：
+      * ``start <= now.time() <= end``；
+      * ``start`` 与 ``end`` 都落在 now 所在的那一天内。
+    """
+    anchor = now.replace(minute=(now.minute // 30) * 30, second=0, microsecond=0)
+    day_start = dt.datetime.combine(anchor.date(), dt.time(0, 0))
+    day_end = dt.datetime.combine(anchor.date(), dt.time(23, 59, 59))
+    span = dt.timedelta(minutes=minutes)
+    return (
+        max(anchor - span, day_start).time(),
+        min(anchor + span, day_end).time(),
+    )

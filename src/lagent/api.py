@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime as dt
+import hmac
 import json
 from collections.abc import AsyncIterator
 
@@ -51,10 +52,19 @@ from .agent.tools import TOOL_SPECS
 from .clock import now_local
 from .config import Settings, get_settings
 from .db import SchemaDriftError, dispose_engine, session_scope
+from .domain.access import (
+    EntryDecision,
+    issue_permit,
+    verify_entry,
+    verify_exit,
+)
 from .domain.booking import cancel_reservation, list_reservations
 from .knowledge.retriever import build_retriever, fallback_reason
 from .models import (
     ACTIVE_STATUSES,
+    DENY_IDENTITY_MISMATCH,
+    PERMIT_CHECKED_IN,
+    EntryPermit,
     Equipment,
     Laboratory,
     Reservation,
@@ -62,10 +72,15 @@ from .models import (
 )
 from .ratelimit import SlidingWindowLimiter
 from .schemas import (
+    AccessIssueRequest,
+    AccessIssueResponse,
+    AccessVerifyRequest,
+    AccessVerifyResponse,
     AuditLogOut,
     CancelRequest,
     ChatRequest,
     ChatResponse,
+    InsideEntry,
     LoginRequest,
     TokenResponse,
     UserOut,
@@ -613,6 +628,190 @@ async def today(_: Principal = Depends(current_user)) -> dict:
         "weekday": ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][now.weekday()],
         "tomorrow": (now.date() + dt.timedelta(days=1)).isoformat(),
     }
+
+
+# ==========================================================================
+# 人员准入（门禁）
+# ==========================================================================
+# 门禁机不是"某个用户"，发不了用户令牌，所以走一把预共享的设备密钥。
+# 两种身份都接受：管理员令牌（便于人工核验/排障）或设备密钥。
+# 都没有 → 401。这个接口能决定"开不开门"，绝不能匿名可用。
+_GATE_KEY_HEADER = "X-Gate-Key"
+
+
+async def gate_caller(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> Principal | None:
+    """识别调用方是门禁设备还是管理员。返回 None 表示"设备身份"。"""
+    expected = get_settings().gate_api_key
+    presented = request.headers.get(_GATE_KEY_HEADER, "")
+    if expected and presented and hmac.compare_digest(presented, expected):
+        return None
+    if credentials is not None and credentials.credentials:
+        with contextlib.suppress(TokenError):
+            principal = principal_from_token(credentials.credentials)
+            if principal.is_admin:
+                return principal
+    raise HTTPException(
+        status_code=401,
+        detail="门禁接口需要设备密钥或管理员令牌",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def _decision_to_response(
+    decision: EntryDecision, lab_label: str = "", user_name: str = ""
+) -> AccessVerifyResponse:
+    return AccessVerifyResponse(
+        granted=decision.ok,
+        reason_code=decision.reason_code,
+        message=decision.message,
+        permit_id=decision.permit_id,
+        user_id=decision.user_id,
+        user_name=user_name,
+        lab_id=decision.lab_id,
+        lab_label=lab_label,
+    )
+
+
+@router.post("/api/access/verify")
+async def access_verify(
+    req: AccessVerifyRequest,
+    _caller: Principal | None = Depends(gate_caller),
+) -> AccessVerifyResponse:
+    """核验一次进门/出门。门禁机在几百毫秒内要拿到是/否。
+
+    ``precheck=true`` 用于门禁屏预显示：只判定、不核销、不占座 ——
+    否则"屏幕上看一眼能不能进"就把凭证消耗掉了。
+    """
+    async with session_scope() as session:
+        lab = await session.get(Laboratory, req.lab_id)
+        label = _lab_label(lab) if lab is not None else ""
+        if req.direction == "out":
+            if req.user_id is None:
+                # 用 identity_mismatch 而不是 no_such_user：这是"没识别出你是谁"，
+                # 不是"系统里没这个人"。原因码若混用，事后统计就会把
+                # "有人忘带卡"算成"有人拿假卡"，处置动作完全不同。
+                return AccessVerifyResponse(
+                    granted=False,
+                    reason_code=DENY_IDENTITY_MISMATCH,
+                    message="出场需要识别到身份（请刷卡或进行人脸核验）。",
+                    lab_id=req.lab_id,
+                    lab_label=label,
+                )
+            decision = await verify_exit(
+                session, user_id=req.user_id, gate_id=req.gate_id
+            )
+            return _decision_to_response(decision, label)
+
+        decision = await verify_entry(
+            session,
+            lab_id=req.lab_id,
+            credential=req.credential,
+            identity_user_id=req.user_id,
+            gate_id=req.gate_id,
+            check_in=not req.precheck,
+        )
+        user_name = ""
+        if decision.user_id is not None:
+            user = await session.get(User, decision.user_id)
+            user_name = user.username if user is not None else ""
+        return _decision_to_response(decision, label, user_name)
+
+
+@router.get("/api/access/inside")
+async def access_inside(
+    lab_id: int | None = Query(default=None),
+    _: Principal = Depends(require_admin),
+) -> dict:
+    """当前在馆名单。管理员专用 —— 名单本身就是敏感信息。
+
+    它回答的是安全场景里最要紧的一个问题：**"现在楼里都有谁"**。
+    火灾、事故、清场时没有这张名单，就只能靠喊。
+    """
+    async with session_scope() as session:
+        stmt = (
+            select(EntryPermit, User, Laboratory)
+            .join(User, User.id == EntryPermit.user_id)
+            .join(Laboratory, Laboratory.id == EntryPermit.lab_id)
+            .where(EntryPermit.status == PERMIT_CHECKED_IN)
+            .order_by(EntryPermit.checked_in_at)
+        )
+        if lab_id is not None:
+            stmt = stmt.where(EntryPermit.lab_id == lab_id)
+        rows = (await session.execute(stmt)).all()
+
+    items = [
+        InsideEntry(
+            permit_id=permit.id,
+            user_id=user.id,
+            username=user.username,
+            lab_id=lab.id,
+            lab_label=_lab_label(lab),
+            valid_from=permit.valid_from.strftime("%H:%M"),
+            valid_to=permit.valid_to.strftime("%H:%M"),
+            checked_in_at=(
+                permit.checked_in_at.strftime("%Y-%m-%d %H:%M")
+                if permit.checked_in_at
+                else None
+            ),
+        )
+        for permit, user, lab in rows
+    ]
+    return {"count": len(items), "inside": items}
+
+
+@router.post("/api/access/issue")
+async def access_issue(
+    req: AccessIssueRequest,
+    admin: Principal = Depends(require_admin),
+) -> AccessIssueResponse:
+    """管理员手工签发凭证（访客、临时人员、预约系统之外的补救）。
+
+    有两个刻意的约束：
+
+    1. **只允许管理员**。能绕过预约流程的人越少越好；
+    2. **必须写理由**，并写进审计。这不是形式主义 —— "谁在什么时候给谁开了后门"
+       是这类系统最该被追问的一件事。
+    """
+    async with session_scope() as session:
+        permit, plain = await issue_permit(
+            session,
+            user_id=req.user_id,
+            lab_id=req.lab_id,
+            date_=req.date,
+            valid_from=req.valid_from,
+            valid_to=req.valid_to,
+            source="admin_grant",
+        )
+        # 必须在会话内把值取出来：commit 后属性会过期，
+        # 出了 with 再读会撞上 DetachedInstanceError（而且只在某些驱动上出现）。
+        permit_id = permit.id
+        required = list(permit.required_certs or [])
+
+    await audit.record(
+        action="access.issue",
+        actor_id=admin.user_id,
+        actor_name=admin.username,
+        target_type="lab",
+        target_id=req.lab_id,
+        detail=f"手工签发入室凭证给用户 {req.user_id}；理由：{req.reason}",
+    )
+    return AccessIssueResponse(
+        permit_id=permit_id,
+        user_id=req.user_id,
+        lab_id=req.lab_id,
+        date=req.date,
+        valid_from=req.valid_from,
+        valid_to=req.valid_to,
+        credential=plain,
+        required_certs=required,
+    )
+
+
+def _lab_label(lab: Laboratory) -> str:
+    return f"{lab.building}{lab.floor}楼{lab.room}"
 
 
 # uvicorn 的入口（`lagent.api:app`）。必须在所有 @router 注册之后再建，

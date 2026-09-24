@@ -28,7 +28,7 @@ from sqlalchemy.orm import selectinload
 from .agent.graph import build_agent_from_settings, set_catalog
 from .agent.state import SessionStore
 from .agent.tools import TOOL_SPECS, tool_create_reservation
-from .clock import now_local
+from .clock import now_local, window_covering
 from .config import get_settings
 from .db import (
     SchemaDriftError,
@@ -294,6 +294,191 @@ async def _eval(cases_path: str | None) -> int:
 
 
 # ==========================================================================
+# access-demo —— 人员准入实证
+# ==========================================================================
+async def _access_demo_steps() -> int:
+    from .domain.access import (
+        EntryDecision,
+        inside_count,
+        issue_permit,
+        verify_entry,
+        verify_exit,
+    )
+    from .models import AccessEvent, Laboratory, slot_index_of
+
+    now = now_local()
+    day = now.date()
+    win_start, win_end = window_covering(now)
+    lab_cell, lab_spec = 2, 1  # 生物楼205(细胞培养) / 分析楼301(光谱+色谱)
+
+    async with session_scope() as session:
+        by_name = {
+            u.username: u.id
+            for u in (await session.execute(select(User))).scalars().all()
+        }
+        labs = {
+            lab.id: f"{lab.building}{lab.floor}楼{lab.room}"
+            for lab in (await session.execute(select(Laboratory))).scalars().all()
+        }
+    zhangwei, lina = by_name["张伟"], by_name["李娜"]
+    admin = by_name["管理员"]
+
+    print("=" * 70)
+    print("lab-booking-agent · 人员准入实证")
+    print("=" * 70)
+    print(f"  当前时间      : {now.isoformat(timespec='seconds')}")
+    print(f"  入场时间窗    : {win_start:%H:%M}-{win_end:%H:%M}（今天）")
+    print(f"  目标房间      : {labs[lab_cell]} / {labs[lab_spec]}")
+    print()
+
+    async def grant(user_id: int, lab_id: int) -> str:
+        async with session_scope() as session:
+            _, plain = await issue_permit(
+                session,
+                user_id=user_id,
+                lab_id=lab_id,
+                date_=day,
+                valid_from=win_start,
+                valid_to=win_end,
+                source="admin_grant",
+            )
+            return plain
+
+    async def enter(
+        lab_id: int, *, credential: str | None = None, user_id: int | None = None
+    ) -> EntryDecision:
+        async with session_scope() as session:
+            return await verify_entry(
+                session,
+                lab_id=lab_id,
+                now=now,
+                credential=credential,
+                identity_user_id=user_id,
+                gate_id="gate-demo",
+            )
+
+    failures: list[str] = []
+
+    def report(index: int, title: str, decision: EntryDecision, want_ok: bool) -> None:
+        ok = decision.ok is want_ok
+        mark = "✓" if ok else "✗"
+        verdict = "放行" if decision.ok else f"拒绝 · {decision.reason_code}"
+        print(f"  场景 {index}  {title}")
+        print(f"          → {mark} {verdict}")
+        if decision.message:
+            print(f"            {decision.message}")
+        if not ok:
+            failures.append(f"场景 {index}：期望 {'放行' if want_ok else '拒绝'}，实际 {verdict}")
+
+    # ---- 场景 1：没预约就进不去，而且这件事有记录 ----
+    d1 = await enter(lab_cell, user_id=zhangwei)
+    report(1, "张伟没有预约，直接到门口刷卡", d1, want_ok=False)
+
+    # ---- 场景 2：签发凭证后正常入场，并占住座位 ----
+    cell_cred = await grant(lina, lab_cell)
+    d2 = await enter(lab_cell, credential=cell_cred, user_id=lina)
+    report(2, "给李娜签发凭证后刷卡入场", d2, want_ok=True)
+    if d2.ok:
+        async with session_scope() as session:
+            seats = await inside_count(
+                session, lab_cell, day, slot_index_of(now.time())
+            )
+        print(f"            {labs[lab_cell]} 当前格在馆 {seats} 人")
+
+    # ---- 场景 3：已入场者重复刷卡（防重复占位）----
+    # 注意这里**不是** permit_used：人还在馆内，先命中的是"不可同时在馆"那道闸门。
+    # permit_used 要等出场之后才谈得上（见场景 7）。
+    d3 = await enter(lab_cell, credential=cell_cred, user_id=lina)
+    report(3, "李娜已经在馆内，再刷一次同一张凭证", d3, want_ok=False)
+
+    # ---- 场景 4：人卡一致（防代刷）----
+    # 必须**另发一张**：上面那张已经 checked_in，拿它测会先被"已在馆"拦掉，
+    # 测到的就不是"人卡一致"这道闸门了 —— 用错前提会把验证测歪。
+    fresh = await grant(lina, lab_cell)
+    d4 = await enter(lab_cell, credential=fresh, user_id=zhangwei)
+    report(4, "张伟拿着李娜的凭证来刷", d4, want_ok=False)
+
+    # ---- 场景 5：预约资格（资质按今天算）----
+    # 凭证能发出来，但张伟缺「色谱」资质，会在资质那道闸门被拦。
+    # 这正是"能不能约"与"能不能进"必须分开判的原因。
+    spec_cred_zw = await grant(zhangwei, lab_spec)
+    d5 = await enter(lab_spec, credential=spec_cred_zw, user_id=zhangwei)
+    report(5, "张伟持凭证进光谱色谱间（缺「色谱」资质）", d5, want_ok=False)
+
+    # ---- 场景 6：出场销账，座位立刻释放 ----
+    async with session_scope() as session:
+        d6 = await verify_exit(session, user_id=lina, now=now, gate_id="gate-demo")
+    report(6, "李娜刷卡出场", d6, want_ok=True)
+
+    # ---- 场景 7：★ 单次核销 —— 已用过的凭证再刷就无效 ----
+    # 这才是"截图转发"的真实形态：凭证本身还在李娜手机里，图片发给别人也没用。
+    d7 = await enter(lab_cell, credential=cell_cred, user_id=lina)
+    report(7, "用李娜**出场前那张**凭证再刷一次（模拟截图转发）", d7, want_ok=False)
+
+    # ---- 场景 8： ★ 容量不变式 —— N 人并发抢容量 1 的房间 ----
+    async with session_scope() as session:
+        lab = await session.get(Laboratory, lab_spec)
+        assert lab is not None
+        original_capacity = lab.capacity
+        lab.capacity = 1
+    print(f"  场景 8  把 {labs[lab_spec]} 容量临时调成 1，"
+          f"李娜与管理员**同时**刷卡（原容量 {original_capacity}）")
+
+    creds = [(lina, await grant(lina, lab_spec)), (admin, await grant(admin, lab_spec))]
+
+    async def attempt(user_id: int, credential: str) -> EntryDecision:
+        async with session_scope() as session:
+            return await verify_entry(
+                session,
+                lab_id=lab_spec,
+                now=now,
+                credential=credential,
+                identity_user_id=user_id,
+                gate_id="gate-demo-race",
+            )
+
+    outcomes = await asyncio.gather(
+        *(attempt(uid, cred) for uid, cred in creds), return_exceptions=True
+    )
+    boom = [o for o in outcomes if isinstance(o, BaseException)]
+    granted = [o for o in outcomes if isinstance(o, EntryDecision) and o.ok]
+    denied = [o for o in outcomes if isinstance(o, EntryDecision) and not o.ok]
+    if boom:
+        failures.append(f"场景 8：并发核验抛异常 {boom[:1]}")
+        print(f"          → ✗ 并发核验抛异常：{boom[:1]}")
+    else:
+        codes = ", ".join(o.reason_code for o in denied) or "无"
+        mark = "✓" if len(granted) == 1 else "✗"
+        print(f"          → {mark} 放行 {len(granted)} 人 / 拒绝 {len(denied)} 人（原因码：{codes}）")
+        if len(granted) != 1:
+            failures.append(f"场景 8：容量 1 却有 {len(granted)} 人进去")
+
+    # ---- 收尾：未预约者被拦下这件事，必须有据可查 ----
+    async with session_scope() as session:
+        rows = (await session.execute(select(AccessEvent))).scalars().all()
+    n_grant = sum(1 for r in rows if r.result == "granted")
+    n_deny = sum(1 for r in rows if r.result == "denied")
+    print()
+    print(f"  access_events 流水：{len(rows)} 条（放行 {n_grant} / 拒绝 {n_deny}）")
+    print("  ↑ 「限制未预约者进入」若没有这张表，就只是口头声称。")
+
+    print("=" * 70)
+    if failures:
+        print("✗ 准入实证未通过：")
+        for item in failures:
+            print(f"    · {item}")
+        return 1
+    print("✓ 8 个场景全部符合预期")
+    return 0
+
+
+async def _access_demo() -> int:
+    """跑在一次性沙箱库里，连跑两遍结论一样。"""
+    async with _scratch_database("lagent-access-demo-"):
+        return await _access_demo_steps()
+
+
+# ==========================================================================
 # 入口
 # ==========================================================================
 def build_parser() -> argparse.ArgumentParser:
@@ -322,6 +507,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     eval_parser.add_argument("--cases", default=None)
 
+    sub.add_parser(
+        "access-demo",
+        help="人员准入实证：未预约拦截 / 单次核销 / 人卡一致 / 容量不变式（沙箱库）",
+    )
+
     sub.add_parser("serve", help="启动 FastAPI 服务（等同 python main.py）")
     return parser
 
@@ -349,6 +539,8 @@ async def _run(args: argparse.Namespace) -> int:
         return await _loadtest(args.concurrency, args.rounds)
     if args.command == "eval":
         return await _eval(args.cases)
+    if args.command == "access-demo":
+        return await _access_demo()
     build_parser().print_help()
     return 0
 

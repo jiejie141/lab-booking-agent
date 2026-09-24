@@ -69,6 +69,60 @@ ROLE_USER = "user"
 ROLE_ADMIN = "admin"
 ROLE_SYSADMIN = "sysadmin"
 
+# ---------------------------------------------------------------------------
+# 人员准入（门禁）：让「进实验室」这件事从"没人管"变成可判定、可追溯
+#
+# 与设备预约的关系：设备预约回答「这台仪器这个时段归谁」，
+# 准入回答「这个人此刻能不能进这个房间」。两者是不同的资源 ——
+# 10 个人可以各自约到 10 台不同设备，但房间同时塞不下 10 个人。
+# 所以房间需要**自己的一条不变式**（见 LabOccupancy），不能蹭设备的。
+#
+# 主路径是「一张设备预约派生一张入室凭证」：用户只需要做一件事，
+# 准入能力是他已有的预约换来的，而不是多填一张表。
+# ---------------------------------------------------------------------------
+
+# 凭证状态机：已签发 → 已入场 → 已使用（出门后不可再用）
+#                     ↘ 已过期（到 valid_to 仍未入场）
+#                     ↘ 已撤销（管理员 / 事故停权）
+PERMIT_ISSUED = "issued"
+PERMIT_CHECKED_IN = "checked_in"
+PERMIT_USED = "used"
+PERMIT_EXPIRED = "expired"
+PERMIT_REVOKED = "revoked"
+
+# 凭证来源：设备预约派生 / 独立申请（只进房间不占设备）/ 管理员代发（访客、陪同）
+PERMIT_SOURCE_RESERVATION = "reservation"
+PERMIT_SOURCE_STANDALONE = "standalone"
+PERMIT_SOURCE_ADMIN = "admin_grant"
+
+DIRECTION_IN = "in"
+DIRECTION_OUT = "out"
+
+# 进入**任何**实验室都需要的资质。它与设备类别资质是两件事：
+# 设备资质回答"你会不会操作这台仪器"，这一项回答"你知不知道这间屋子的规矩"。
+LAB_BASIC_CERT = "实验室安全"
+
+ACCESS_GRANTED = "granted"
+ACCESS_DENIED = "denied"
+
+# 拒绝原因码。**每一次拒绝都必须落到一个码上** ——
+# 门禁屏要显示"为什么不开门"，事后也要能统计"哪种拒绝最多"。
+# 只回一句"验证失败"的门禁，值班人员只能站在门口猜。
+DENY_NO_PERMIT = "no_permit"
+DENY_PERMIT_USED = "permit_used"
+DENY_PERMIT_REVOKED = "permit_revoked"
+DENY_PERMIT_EXPIRED = "permit_expired"
+DENY_NOT_YET = "not_yet_valid"
+DENY_WRONG_LAB = "wrong_lab"
+DENY_IDENTITY_MISMATCH = "identity_mismatch"
+DENY_CERT_MISSING = "cert_missing"
+DENY_CERT_EXPIRED = "cert_expired"
+DENY_CERT_REVOKED = "cert_revoked"
+DENY_LAB_FULL = "lab_full"
+DENY_ALREADY_INSIDE = "already_inside"
+DENY_NO_SUCH_USER = "no_such_user"
+DENY_CONFLICT = "concurrent_conflict"
+
 
 class Base(DeclarativeBase):
     pass
@@ -293,3 +347,172 @@ class AuditLog(Base):
     # 来源 IP。反向代理后面需要在网关上把真实来源写进 X-Forwarded-For 才有意义，
     # 这里明确只记后端看到的地址，不假装它是客户端真实 IP。
     client_host: Mapped[str] = mapped_column(String(64), default="")
+
+
+# ===========================================================================
+# 人员准入：资质（带有效期） / 入室凭证 / 房间在场占位 / 通行事件
+# ===========================================================================
+class CertGrant(Base):
+    """一张**带有效期**的资质授权。
+
+    为什么不能继续用 ``User.certs`` 那个裸字符串列表：
+
+    1. 它回答不了「这张培训证**还有效**吗」。高校实验室准入里培训有效期是硬门槛 ——
+       三年前考过的离心机操作证不等于今天还能用，而这正是事故的常见来源；
+    2. 它没法吊销。违纪、出事故之后要停权，裸列表只能整条删掉，
+       连「曾经授过、后因何事撤销」都留不下来；
+    3. 它没法追溯。没有授予日期与依据，出了事无法回答「他是凭什么进来的」。
+
+    ``expires_at`` 与 ``revoked_at`` 是两条独立的失效路径，判定时必须都看：
+    过期是「到点了」，撤销是「被停了」，给用户的提示语完全不同（该复训 / 该找管理员）。
+    """
+
+    __tablename__ = "cert_grants"
+    __table_args__ = (
+        # 同一人、同一类别、同一天只应有一条授权记录；复训换证是新的 granted_at。
+        Index("uq_cert_user_category_grant", "user_id", "category", "granted_at", unique=True),
+        # 进场核验的走查索引：按人 + 类别捞有效授权。
+        Index("ix_cert_user_category", "user_id", "category"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    category: Mapped[str] = mapped_column(String(32), index=True)
+    granted_at: Mapped[dt.date] = mapped_column(Date)
+    expires_at: Mapped[dt.date] = mapped_column(Date)
+    # 培训考核单 / 证书编号，出事后可回溯到纸面依据
+    evidence: Mapped[str] = mapped_column(String(128), default="")
+    # 非空 = 该授权已被撤销（值即撤销时间）。保留记录而不是删除，为了可追溯。
+    revoked_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+
+
+class EntryPermit(Base):
+    """入室凭证：允许某人在某个时间窗内进入某个实验室。
+
+    **单次核销是这张表的核心语义。** 凭证不是「身份标识」，而是「一次性通行权」：
+    如果允许重复使用，一张二维码截图转发给十个人就能让十个人进门 ——
+    这是门禁系统最经典也最容易被忽略的漏洞。
+    所以状态机是 ``issued → checked_in → used``，``checked_in_at`` 一旦写上就不再回头。
+
+    凭证串本身**只存哈希**（``credential_hash``）。理由和口令一样：
+    库被拖走时明文凭证等于给所有人发了通行证。核验时比对哈希，不需要原文。
+    """
+
+    __tablename__ = "entry_permits"
+    __table_args__ = (
+        # 凭证串全局唯一：同一个凭证不可能同时属于两张凭证
+        Index("uq_permit_credential", "credential_hash", unique=True),
+        # ★ 同一个人同一时刻只能「在馆中」一条。
+        # 用部分唯一索引表达「只在 checked_in 这个状态下成立」——
+        # 没有它，一个人可以凭两条凭证同时出现在两个房间，
+        # 在馆人数统计就会把他算两遍，容量约束随之失真。
+        Index(
+            "uq_permit_one_inside",
+            "user_id",
+            unique=True,
+            sqlite_where=text("status = 'checked_in'"),
+            postgresql_where=text("status = 'checked_in'"),
+        ),
+        Index("ix_permit_user_date", "user_id", "date"),
+        Index("ix_permit_lab_date_status", "lab_id", "date", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    lab_id: Mapped[int] = mapped_column(ForeignKey("laboratories.id"), index=True)
+    date: Mapped[dt.date] = mapped_column(Date)
+    # 有效时间窗。核验时允许提前一点入场（宽限），但绝不允许超时入场。
+    valid_from: Mapped[dt.time] = mapped_column(Time)
+    valid_to: Mapped[dt.time] = mapped_column(Time)
+    status: Mapped[str] = mapped_column(String(16), default=PERMIT_ISSUED, index=True)
+    source: Mapped[str] = mapped_column(String(24), default=PERMIT_SOURCE_RESERVATION)
+    # 派生自哪条设备预约（独立申请 / 管理员代发时为空）
+    reservation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("reservations.id"), nullable=True, index=True
+    )
+    credential_hash: Mapped[str] = mapped_column(String(64))
+    # 入场所需的资质类别，**签发时冻结**。
+    # 为什么冻结而不是进门时再算：要求是"当时被批准的条件"，
+    # 之后设备改了 requires_training、或房间换了规则，不该追溯性地改变
+    # 一张已发出凭证的合法条件。而**有效性**（是否过期/被撤销）必须在
+    # 进门那一刻重新算 —— 所以冻结的是"要哪些类别"，不是"资质本身有没有效"。
+    required_certs: Mapped[list] = mapped_column(JSON, default=list)
+    issued_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now_local)
+    checked_in_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    checked_out_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    # 从哪台门禁进出的。多门实验室里，事后能回答「他从哪个门进来的」。
+    gate_in: Mapped[str] = mapped_column(String(32), default="")
+    gate_out: Mapped[str] = mapped_column(String(32), default="")
+
+
+class LabOccupancy(Base):
+    """房间在场占位：把「容量」这条不变式下沉到数据库。★
+
+    **为什么不能只用一条「当前人数」计数列**：那需要「读出来 → 加一 → 写回去」，
+    两个并发请求会读到同一个旧值、各自加一，最终人数少算 ——
+    这正是本项目在设备预约上踩过的同一个坑（``check-then-act`` 在 SQLite 上
+    退化为无锁）。计数列在并发下**必然**失真，房间会被塞爆。
+
+    正确做法是把「同时最多 N 人」翻译成「N 个座位」：
+    房间的每个时间格有 capacity 个座位，每人入场时占一个座位，
+    唯一索引打在 ``(lab_id, date, slot_index, seat)`` 上。
+    这样「超容量」就变成了「同一个座位被占两次」—— 由数据库判定；
+    应用层只负责试着占座、撞了就换一个座位，换不到就是满了。
+
+    与 ``ReservationSlot`` 是同一套手法，只是多了一维 ``seat``：
+    设备是「一个坑一个人」，房间是「N 个坑各一个人」。
+    """
+
+    __tablename__ = "lab_occupancy"
+    __table_args__ = (
+        # ★ 核心不变式：同一实验室、同一天、同一格、同一座位，全局只能被占一次。
+        Index("uq_lab_slot_seat", "lab_id", "date", "slot_index", "seat", unique=True),
+        Index("ix_lab_occ_permit", "permit_id"),
+        Index("ix_lab_occ_lab_date", "lab_id", "date"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    lab_id: Mapped[int] = mapped_column(ForeignKey("laboratories.id"), index=True)
+    date: Mapped[dt.date] = mapped_column(Date)
+    slot_index: Mapped[int] = mapped_column(Integer)
+    # 座位号，取值 0 .. capacity-1。它不代表物理座位，只是把容量离散化的槽口。
+    seat: Mapped[int] = mapped_column(Integer)
+    permit_id: Mapped[int] = mapped_column(
+        ForeignKey("entry_permits.id", ondelete="CASCADE"), index=True
+    )
+
+
+class AccessEvent(Base):
+    """通行事件流水：**只追加**，进门、出门、被拒都记。
+
+    与 ``AuditLog`` 分开的理由是频率与用途不同：审计记的是「谁改了什么业务数据」
+    （低频、面向合规），这里记的是「谁什么时候站在哪个门口、开没开门」
+    （高频、面向安全）。混在一张表里，翻审计时会被门禁流水淹掉。
+
+    被拒事件尤其重要：它是「未预约者试图进入」的**唯一证据**。
+    没有这张表，「限制未预约者进入」就只是一个说法，拿不出任何数据。
+    """
+
+    __tablename__ = "access_events"
+    __table_args__ = (
+        Index("ix_access_occurred", "occurred_at"),
+        Index("ix_access_user_time", "user_id", "occurred_at"),
+        Index("ix_access_lab_time", "lab_id", "occurred_at"),
+        Index("ix_access_result", "result", "occurred_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    occurred_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now_local, index=True)
+    # 允许为空：凭证无效时可能连「是谁」都还没识别出来（例如读卡失败）
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    lab_id: Mapped[int] = mapped_column(ForeignKey("laboratories.id"), index=True)
+    gate_id: Mapped[str] = mapped_column(String(32), default="")
+    direction: Mapped[str] = mapped_column(String(8))
+    result: Mapped[str] = mapped_column(String(16))
+    # 拒绝原因码，见本模块顶部的 DENY_* 常量
+    reason_code: Mapped[str] = mapped_column(String(32), default="")
+    permit_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 不记明文凭证，只记它的短指纹；用于排查「是不是同一张截图被反复刷」
+    credential_fingerprint: Mapped[str] = mapped_column(String(16), default="")
+    detail: Mapped[str] = mapped_column(Text, default="")

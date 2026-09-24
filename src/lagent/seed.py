@@ -21,6 +21,8 @@ from .clock import now_local
 from .db import ensure_schema, session_scope
 from .domain.booking import attach_slots
 from .models import (
+    LAB_BASIC_CERT,
+    CertGrant,
     Equipment,
     Laboratory,
     Reservation,
@@ -139,6 +141,30 @@ async def seed(force: bool = False) -> dict:
             user = User(**data, password_hash=demo_password_hash(password) if password else "")
             session.add(user)
             users.append(user)
+        await session.flush()
+
+        # 资质授权（带有效期）。
+        #
+        # 两件事在这里一次办掉：
+        # 1. **发基础安全资质。** 进任何实验室都需要「实验室安全」，
+        #    而 ``User.certs`` 里没有这一项。不发的话升级当天三个演示账号
+        #    全都进不了任何房间 —— 功能是好的，但没人能用，看不出效果。
+        # 2. **把历史 certs 镜像成授权记录。** 让新老两条读取路径都有数据，
+        #    便于对照；历史字段的兼容逻辑另由 tests/test_access.py 单独覆盖。
+        #
+        # ⚠️ 有效期给到很远的未来是**刻意的**：演示数据一旦会过期，
+        # 用例就会在某个日期之后开始莫名其妙地失败（"李娜进不去实验室了"
+        # 而代码没改过）。会过期的场景由测试自己造短效授权来覆盖。
+        for user in users:
+            categories = [LAB_BASIC_CERT, *user.certs]
+            for category in dict.fromkeys(categories):  # 保序去重
+                session.add(CertGrant(
+                    user_id=user.id,
+                    category=category,
+                    granted_at=dt.date(2025, 1, 1),
+                    expires_at=dt.date(2099, 12, 31),
+                    evidence=f"seed:{user.username}:{category}",
+                ))
         await session.flush()
 
         # 造两个「已有预约」，让协商有东西可谈

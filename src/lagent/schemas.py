@@ -348,6 +348,83 @@ class ChatResponse(BaseModel):
     degraded: bool = False
 
 
+class AccessVerifyRequest(BaseModel):
+    """门禁机发起的一次核验请求。
+
+    ``credential``（二维码 / 卡片内的凭证串）与 ``user_id``（刷卡或人脸识别出的
+    身份）**至少要有一个**：前者是"你带了什么"，后者是"你是谁"。
+    两个都给时会被交叉校验 —— 这正是防"拿别人截图进门"的关键一步。
+
+    严格模式（``extra="forbid"``）：门禁集成最容易出的错是字段名写错却被静默忽略，
+    结果门禁以为在传身份、后端根本没收到，于是所有人都被当成无凭证拒掉。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    lab_id: int
+    credential: str | None = Field(default=None, max_length=512)
+    user_id: int | None = None
+    gate_id: str = Field(default="", max_length=32)
+    direction: str = Field(default="in", pattern="^(in|out)$")
+    # 预检：只判定不落库，用于门禁屏上"你随时可以进"的提示
+    precheck: bool = False
+
+
+class AccessVerifyResponse(BaseModel):
+    """核验结论。**带原因码**，门禁屏据此显示"为什么不开门"。"""
+
+    granted: bool
+    reason_code: str = ""
+    message: str = ""
+    permit_id: int | None = None
+    user_id: int | None = None
+    user_name: str = ""
+    lab_id: int | None = None
+    lab_label: str = ""
+
+
+class InsideEntry(BaseModel):
+    """在馆名单里的一条。"""
+
+    permit_id: int
+    user_id: int
+    username: str
+    lab_id: int
+    lab_label: str
+    valid_from: str
+    valid_to: str
+    checked_in_at: str | None = None
+
+
+class AccessIssueRequest(BaseModel):
+    """手工签发一张凭证（访客、临时人员、忘记预约的补救）。
+
+    有副作用的动作，只允许管理员调用，且**必须写明理由** ——
+    "谁能绕过预约流程"这件事本身要留痕。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: int
+    lab_id: int
+    date: dt.date
+    valid_from: dt.time
+    valid_to: dt.time
+    reason: str = Field(default="", max_length=200)
+
+
+class AccessIssueResponse(BaseModel):
+    permit_id: int
+    user_id: int
+    lab_id: int
+    date: dt.date
+    valid_from: dt.time
+    valid_to: dt.time
+    # 明文凭证**只在签发时返回这一次**，系统只留哈希
+    credential: str
+    required_certs: list[str] = Field(default_factory=list)
+
+
 class CancelRequest(BaseModel):
     """取消预约。
 
