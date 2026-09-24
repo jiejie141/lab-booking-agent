@@ -68,7 +68,27 @@ from .domain.access import (
     verify_entry,
     verify_exit,
 )
-from .domain.booking import cancel_reservation, create_reservation, list_reservations
+from .domain.booking import (
+    cancel_reservation,
+    create_reservation,
+    decide_reservation,
+    list_reservations,
+    pending_reservations,
+)
+from .domain.catalog import (
+    CatalogError,
+    changes_of,
+    count_active_reservations,
+    create_equipment,
+    create_lab,
+    create_user,
+    deactivate_user,
+    load_equipment,
+    load_lab,
+    update_equipment,
+    update_lab,
+    update_user,
+)
 from .knowledge.retriever import build_retriever, fallback_reason
 from .metrics import (
     http_in_progress_dec,
@@ -84,6 +104,7 @@ from .metrics import (
 from .models import (
     ACTIVE_STATUSES,
     DENY_IDENTITY_MISMATCH,
+    EQUIPMENT_NORMAL,
     PERMIT_CHECKED_IN,
     EntryPermit,
     Equipment,
@@ -111,11 +132,18 @@ from .schemas import (
     CancelRequest,
     ChatRequest,
     ChatResponse,
+    EquipmentCreate,
+    EquipmentUpdate,
     InsideEntry,
+    LabCreate,
+    LabUpdate,
     LoginRequest,
     ReservationCreate,
+    ReviewRequest,
     TokenResponse,
+    UserCreate,
     UserOut,
+    UserUpdate,
 )
 from .security import (
     InsecureSecretError,
@@ -882,6 +910,43 @@ async def tools_spec(_: Principal = Depends(current_user)) -> dict:
     return {"tools": TOOL_SPECS}
 
 
+def _equipment_payload(item: Equipment) -> dict:
+    """单台设备的对外结构。
+
+    抽出来是为了让「列表里的一台设备」和「后台新建/修改返回的那台设备」
+    **结构一致**。两处各写一遍的下场很具体：创建接口少返回一个字段，
+    前端就只能在建完之后再拉一次列表才能渲染 —— 而且这个 bug 只在
+    新建这条路径上出现，很难被注意到。
+    """
+    return {
+        "id": item.id,
+        "lab_id": item.lab_id,
+        "name": item.name,
+        "model": item.model,
+        "code": item.code,
+        "category": item.category,
+        "status": item.status,
+        "max_hours": item.max_hours,
+        "requires_training": item.requires_training,
+        "requires_approval": item.requires_approval,
+    }
+
+
+def _lab_payload(lab: Laboratory) -> dict:
+    """实验室（含其设备）的对外结构。"""
+    return {
+        "id": lab.id,
+        "label": lab.label,
+        "building": lab.building,
+        "floor": lab.floor,
+        "room": lab.room,
+        "capacity": lab.capacity,
+        "open_hours": lab.open_hours,
+        "note": lab.note,
+        "equipment": [_equipment_payload(item) for item in lab.equipment],
+    }
+
+
 @router.get("/api/labs")
 async def labs(_: Principal = Depends(current_user)) -> list[dict]:
     """实验室与设备目录。需登录（目录本身不敏感，但按"默认拒绝"统一处理）。"""
@@ -892,32 +957,7 @@ async def labs(_: Principal = Depends(current_user)) -> list[dict]:
             .order_by(Laboratory.id)
         )
         rows = (await session.execute(stmt)).scalars().all()
-    return [
-        {
-            "id": lab.id,
-            "label": lab.label,
-            "building": lab.building,
-            "floor": lab.floor,
-            "room": lab.room,
-            "capacity": lab.capacity,
-            "open_hours": lab.open_hours,
-            "note": lab.note,
-            "equipment": [
-                {
-                    "id": item.id,
-                    "name": item.name,
-                    "model": item.model,
-                    "code": item.code,
-                    "category": item.category,
-                    "status": item.status,
-                    "max_hours": item.max_hours,
-                    "requires_training": item.requires_training,
-                }
-                for item in lab.equipment
-            ],
-        }
-        for lab in rows
-    ]
+    return [_lab_payload(lab) for lab in rows]
 
 
 @router.get("/api/users", response_model=list[UserOut])
@@ -937,6 +977,225 @@ async def users(
         client_host=_client_host(request),
     )
     return [UserOut.model_validate(u) for u in rows]
+
+
+# --------------------------------------------------------------------------
+# 后台维护（P0-4）
+#
+# 目标是把"改代码 + 重新 seed"这条路堵掉：新增一台设备不该要求重建库，
+# 而重建库会把真实的预约一起清掉。
+#
+# 两条贯穿全部接口的约定：
+#  1. **一律 require_admin**。这些接口能改变"谁能约什么"，是最该收紧的一类；
+#  2. **一律进审计**（``admin.write``）。维护动作是"系统为什么变成这样"的
+#     答案，事后查不到就等于没有发生过。
+#
+# 不提供删除，理由写在 domain/catalog.py 的模块 docstring 里。
+# --------------------------------------------------------------------------
+async def _record_maintenance(
+    request: Request,
+    admin: Principal,
+    target_type: str,
+    target_id: int,
+    detail: str,
+    *,
+    outcome: str = audit.OUTCOME_OK,
+) -> None:
+    await audit.record(
+        action=audit.ACTION_ADMIN_WRITE,
+        outcome=outcome,
+        actor_id=admin.user_id,
+        actor_name=admin.username,
+        target_type=target_type,
+        target_id=target_id,
+        detail=detail,
+        client_host=_client_host(request),
+    )
+
+
+def _catalog_error(exc: CatalogError) -> HTTPException:
+    """唯一约束冲突 → 409。
+
+    不是 400：请求体本身是合法的，是**它与库里已有的数据**冲突。
+    这个区别决定了调用方该改请求重试（409）还是改自己的代码（400）。
+    """
+    return HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post("/api/labs", status_code=201)
+async def labs_create(
+    body: LabCreate, request: Request, admin: Principal = Depends(require_admin)
+) -> dict:
+    """新建实验室。"""
+    try:
+        async with session_scope() as session:
+            lab = await create_lab(session, body)
+            payload = _lab_payload(lab)
+    except CatalogError as exc:
+        raise _catalog_error(exc) from exc
+    await _record_maintenance(
+        request, admin, "lab", payload["id"], f"新建实验室 {payload['label']}"
+    )
+    return payload
+
+
+@router.patch("/api/labs/{lab_id}")
+async def labs_update(
+    lab_id: int,
+    body: LabUpdate,
+    request: Request,
+    admin: Principal = Depends(require_admin),
+) -> dict:
+    """改实验室（PATCH 语义：没传的字段不动，传 null 也表示不改）。"""
+    async with session_scope() as session:
+        lab = await load_lab(session, lab_id)
+        if lab is None:
+            raise HTTPException(status_code=404, detail=f"实验室 {lab_id} 不存在")
+        try:
+            await update_lab(session, lab, body)
+        except CatalogError as exc:
+            raise _catalog_error(exc) from exc
+        # 改开放时间/容量会直接影响此后每一条预约的校验结果，
+        # 所以把"改了哪几项"记下来 —— 事后要能回答"为什么那天约得上"。
+        changed = ", ".join(sorted(changes_of(body))) or "无实际改动"
+        payload = _lab_payload(lab)
+    await _record_maintenance(request, admin, "lab", lab_id, f"修改字段：{changed}")
+    return payload
+
+
+@router.post("/api/equipment", status_code=201)
+async def equipment_create(
+    body: EquipmentCreate, request: Request, admin: Principal = Depends(require_admin)
+) -> dict:
+    """新增设备。``code``（资产编号）全库唯一，重复 → 409。"""
+    try:
+        async with session_scope() as session:
+            item = await create_equipment(session, body)
+            payload = _equipment_payload(item)
+    except CatalogError as exc:
+        raise _catalog_error(exc) from exc
+    await _record_maintenance(
+        request, admin, "equipment", payload["id"], f"新增设备 {payload['name']}"
+    )
+    return payload
+
+
+@router.patch("/api/equipment/{equipment_id}")
+async def equipment_update(
+    equipment_id: int,
+    body: EquipmentUpdate,
+    request: Request,
+    admin: Principal = Depends(require_admin),
+) -> dict:
+    """改设备。``status`` 置为非 normal 时，返回里会带上仍占着时段的预约数。
+
+    ★ 这个数字是**必须**给的：设备下线了，已有的预约不会自己消失。
+    不给的话，现场就是"学生按预约到了实验室，发现设备在维修，
+    而系统里他还约着" —— 且没有任何一处提示过管理员。
+    """
+    async with session_scope() as session:
+        item = await load_equipment(session, equipment_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail=f"设备 {equipment_id} 不存在")
+        try:
+            await update_equipment(session, item, body)
+        except CatalogError as exc:
+            raise _catalog_error(exc) from exc
+        payload = _equipment_payload(item)
+        active = await count_active_reservations(session, equipment_id)
+
+    payload["active_reservations"] = active
+    if payload["status"] != EQUIPMENT_NORMAL and active:
+        payload["warning"] = (
+            f"设备已置为「{payload['status']}」，但仍有 {active} 条有效预约"
+            "占着时段 —— 它们不会自动取消，需另行处理"
+        )
+    changed = ", ".join(sorted(changes_of(body))) or "无实际改动"
+    await _record_maintenance(
+        request, admin, "equipment", equipment_id, f"修改字段：{changed}"
+    )
+    return payload
+
+
+@router.post("/api/users", status_code=201, response_model=UserOut)
+async def users_create(
+    body: UserCreate, request: Request, admin: Principal = Depends(require_admin)
+) -> UserOut:
+    """新建账号。初始口令必填 —— 否则"建好了但谁也登不上"。
+
+    ``certs`` 里给的类别会同时写进授权记录（``cert_grants``），
+    否则会出现"能约设备却进不了门"（详见 ``domain/catalog.sync_certs``）。
+    """
+    try:
+        async with session_scope() as session:
+            user = await create_user(session, body)
+            out = UserOut.model_validate(user)
+    except CatalogError as exc:
+        raise _catalog_error(exc) from exc
+    await _record_maintenance(
+        request, admin, "user", out.id,
+        f"新建账号 {out.username}（角色 {out.role}，资质 {out.certs}）",
+    )
+    return out
+
+
+@router.patch("/api/users/{user_id}", response_model=UserOut)
+async def users_update(
+    user_id: int,
+    body: UserUpdate,
+    request: Request,
+    admin: Principal = Depends(require_admin),
+) -> UserOut:
+    """改账号。传 ``password`` 即重设口令（重设口令同时等于"恢复登录"）。
+
+    改自己的角色是**故意禁止**的：否则管理员能把自己降成普通用户，
+    而系统里可能只剩他一个管理员 —— 那就没人能改回来了。
+    """
+    if user_id == admin.user_id and body.role is not None and body.role != admin.role:
+        raise HTTPException(status_code=400, detail="不能修改自己的角色")
+
+    async with session_scope() as session:
+        user = await session.get(User, user_id)
+        if user is None:
+            raise HTTPException(status_code=404, detail=f"用户 {user_id} 不存在")
+        try:
+            await update_user(session, user, body)
+        except CatalogError as exc:
+            raise _catalog_error(exc) from exc
+        out = UserOut.model_validate(user)
+
+    changed = ", ".join(sorted(changes_of(body))) or "无实际改动"
+    # ⚠️ 口令本身**绝不**进审计（哪怕只是"改了"这件事也要说得笼统）
+    await _record_maintenance(request, admin, "user", user_id, f"修改字段：{changed}")
+    return out
+
+
+@router.post("/api/users/{user_id}/deactivate")
+async def users_deactivate(
+    user_id: int, request: Request, admin: Principal = Depends(require_admin)
+) -> dict:
+    """停用账号：清空口令哈希（空哈希 → 不可登录，fail-closed）。
+
+    唯一的保护是「不能停用自己」。
+
+    看起来还应该挡一道「不能停用最后一个管理员」，但那道锁**够不到**：
+    停用不删行、也不改角色，被停用的管理员在"管理员人数"里仍然算一个，
+    所以人数永远不会降到 0；而真正会把系统锁死的路径只有一条 ——
+    把自己停用掉，那已经被上面这一句挡住了。
+    （留一道永远进不去的分支比不留更糟：它测试不到，却让人以为已经防住了。）
+    """
+    if user_id == admin.user_id:
+        raise HTTPException(status_code=400, detail="不能停用自己的账号")
+
+    async with session_scope() as session:
+        user = await session.get(User, user_id)
+        if user is None:
+            raise HTTPException(status_code=404, detail=f"用户 {user_id} 不存在")
+        await deactivate_user(session, user)
+        name = user.username
+
+    await _record_maintenance(request, admin, "user", user_id, f"停用账号 {name}")
+    return {"id": user_id, "username": name, "active": False}
 
 
 @router.get("/api/audit", response_model=list[AuditLogOut])
@@ -1021,6 +1280,76 @@ async def create(body: ReservationCreate, request: Request, user: Principal = De
         # 默认分支给 500：走到这里的标签要么是新增的 ``BookingReason`` 忘了
         # 在上面登记，要么是领域层漏了分类 —— 两种都是**我们的**问题。
         # 假装成 409（冲突）会让用户去重试一个永远重试不成的操作。
+        raise HTTPException(
+            status_code=_BOOKING_STATUS.get(outcome.outcome_label, 500),
+            detail=outcome.message,
+        )
+    return outcome.model_dump(mode="json")
+
+
+# --------------------------------------------------------------------------
+# 审批（P1-5）
+#
+# 刻意**不做**工作流引擎：设备上一个开关 + 管理员两个按钮。
+# 需要审批的设备下单后落到 ``pending``（它在 ACTIVE_STATUSES 里，所以
+# 申请即占坑），管理员通过 → confirmed，驳回 → cancelled 并释放占用格。
+# --------------------------------------------------------------------------
+@router.get("/api/reservations/pending")
+async def reservations_pending(admin: Principal = Depends(require_admin)) -> list[dict]:
+    """待审批列表。**管理员专用**。"""
+    async with session_scope() as session:
+        rows = await pending_reservations(session)
+    return [row.model_dump(mode="json") for row in rows]
+
+
+@router.post("/api/reservations/{reservation_id}/approve")
+async def approve(
+    reservation_id: int,
+    request: Request,
+    admin: Principal = Depends(require_admin),
+) -> dict:
+    """通过一条待审批申请。"""
+    return await _review(reservation_id, approve=True, reason="",
+                         request=request, admin=admin)
+
+
+@router.post("/api/reservations/{reservation_id}/reject")
+async def reject(
+    reservation_id: int,
+    request: Request,
+    body: ReviewRequest | None = None,
+    admin: Principal = Depends(require_admin),
+) -> dict:
+    """驳回一条待审批申请，并**释放它占着的时段**。"""
+    return await _review(
+        reservation_id, approve=False, reason=(body.reason if body else ""),
+        request=request, admin=admin,
+    )
+
+
+async def _review(
+    reservation_id: int,
+    *,
+    approve: bool,
+    reason: str,
+    request: Request,
+    admin: Principal,
+) -> dict:
+    outcome = await decide_reservation(
+        reservation_id=reservation_id, approve=approve, reason=reason
+    )
+    verb = "通过" if approve else "驳回"
+    await audit.record(
+        action=audit.ACTION_REVIEW,
+        outcome=audit.OUTCOME_OK if outcome.ok else audit.OUTCOME_DENIED,
+        actor_id=admin.user_id,
+        actor_name=admin.username,
+        target_type="reservation",
+        target_id=reservation_id,
+        detail=f"{verb}：{outcome.message}" + (f" 理由：{reason}" if reason else ""),
+        client_host=_client_host(request),
+    )
+    if not outcome.ok:
         raise HTTPException(
             status_code=_BOOKING_STATUS.get(outcome.outcome_label, 500),
             detail=outcome.message,

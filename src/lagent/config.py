@@ -12,6 +12,7 @@ from __future__ import annotations
 import functools
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 AppMode = Literal["mock", "live", "degraded"]
@@ -152,6 +153,13 @@ class Settings(BaseSettings):
     #    保护的是日志表无限增长；保护不了「误删表 / 误 UPDATE / 库文件损坏」。
     #    后者才是要有备份的原因，两种动作别混为一谈。
     backup_dir: str = "./var/backup"
+
+    # ---- 后台维护（P0-4）---------------------------------------------------
+    # 后台授予资质时，授权记录的默认有效期（天）。
+    # 不给默认值就等于"永久有效"，而这套系统从头到尾的立场是
+    # **资质必须看有效期**（三年前考的证不等于今天还能用），
+    # 所以这里宁可让它到期后需要复训，也不要出现一批永不失效的授权。
+    cert_valid_days: int = Field(default=365, ge=1, le=3650)
 
     # ---- 指标（P1-4）-------------------------------------------------------
     # 总开关。关掉之后 /metrics 返回 404（而不是返回一份空表）——

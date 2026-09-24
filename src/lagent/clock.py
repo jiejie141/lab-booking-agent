@@ -74,6 +74,40 @@ def weekday_key(date_: dt.date) -> str:
     return "weekend" if date_.weekday() >= 5 else "weekday"
 
 
+OPEN_HOURS_KEYS: tuple[str, ...] = ("weekday", "weekend")
+
+
+def open_hours_problem(value: object) -> str | None:
+    """校验开放时间的结构，返回一句可直接打给人看的原因；``None`` 表示没问题。
+
+    **校验放在写入侧**（后台改开放时间的接口），读取侧才安全：
+    ``booking._validate`` 现在是「取不到就报『当天不开放』」的写法，
+    它能扛住脏数据（不会 500），但**解释不出来** ——
+    用户看到的是"这间实验室不开放"，而真实原因是有人把开放时间写成了
+    ``{"weekday": ["08:00"]}``。这种"能跑但答非所问"的状态最难被修。
+
+    与 :func:`lagent.security.secret_problem` 同一写法：返回**原因**而不是
+    ``bool``，调用方可以直接把它放进日志 / 422 的 detail，不必再自己拼一句。
+    """
+    if not isinstance(value, dict):
+        return f"开放时间必须是对象，如 {{{OPEN_HOURS_KEYS[0]}: ['08:00','22:00']}}"
+    unknown = sorted(str(key) for key in value if str(key) not in OPEN_HOURS_KEYS)
+    if unknown:
+        return (
+            f"开放时间只认 {'/'.join(OPEN_HOURS_KEYS)}，收到了未知键：{'、'.join(unknown)}"
+        )
+    for key, window in value.items():
+        if not isinstance(window, (list, tuple)) or len(window) != 2:
+            return f"{key} 必须是 [开始, 结束] 两个时刻，如 ['08:00','22:00']"
+        try:
+            start, end = parse_time(str(window[0])), parse_time(str(window[1]))
+        except (ValueError, IndexError):
+            return f"{key} 的时刻无法解析：{window!r}（应为 HH:MM）"
+        if start >= end:
+            return f"{key} 的结束时间必须晚于开始时间（收到 {window!r}）"
+    return None
+
+
 def combine(date_: dt.date, value: dt.time) -> dt.datetime:
     return dt.datetime.combine(date_, value)
 

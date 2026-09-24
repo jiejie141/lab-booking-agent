@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from typing import Literal
 
 from sqlalchemy import (
     JSON,
@@ -60,14 +61,33 @@ STATUS_EXPIRED = "expired"
 # 「有效」= 占据资源的状态。只有这两种状态参与冲突判定。
 ACTIVE_STATUSES: tuple[str, ...] = (STATUS_PENDING, STATUS_CONFIRMED)
 
-# 设备状态
-EQUIPMENT_NORMAL = "normal"
-EQUIPMENT_MAINTENANCE = "maintenance"
-EQUIPMENT_SCRAPPED = "scrapped"
+# 取值域写成类型而不是散落的字符串字面量（P0-4）：
+# 后台接口要**接受**客户端给的状态与角色，如果不把取值域钉住，
+# 「状态拼错成 'Normal'」会被静默写进库，设备从此既不是 normal 也不是
+# maintenance —— 于是它会被"设备不可预约"这条规则**永久**拦下，
+# 而界面上看起来一切正常。这类"写错了但没人报错"是运维最难查的一类故障。
+#
+# 写法上的弯弯绕绕是 mypy 逼出来的：它不接受 ``Literal[某 str 常量]``，
+# 所以字面量只能直接写在这两行里；而常量要继续能给 pydantic 当默认值用，
+# 就反过来把常量**标注成**上面这两个类型 —— 于是"常量与取值域不一致"
+# 会变成类型错误，而不是等到运行时才发现。
+EquipmentStatus = Literal["normal", "maintenance", "scrapped"]
+UserRole = Literal["user", "admin", "sysadmin"]
 
-ROLE_USER = "user"
-ROLE_ADMIN = "admin"
-ROLE_SYSADMIN = "sysadmin"
+EQUIPMENT_NORMAL: EquipmentStatus = "normal"
+EQUIPMENT_MAINTENANCE: EquipmentStatus = "maintenance"
+EQUIPMENT_SCRAPPED: EquipmentStatus = "scrapped"
+
+ROLE_USER: UserRole = "user"
+ROLE_ADMIN: UserRole = "admin"
+ROLE_SYSADMIN: UserRole = "sysadmin"
+
+EQUIPMENT_STATUSES: tuple[str, ...] = (
+    EQUIPMENT_NORMAL,
+    EQUIPMENT_MAINTENANCE,
+    EQUIPMENT_SCRAPPED,
+)
+USER_ROLES: tuple[str, ...] = (ROLE_USER, ROLE_ADMIN, ROLE_SYSADMIN)
 
 # ---------------------------------------------------------------------------
 # 人员准入（门禁）：让「进实验室」这件事从"没人管"变成可判定、可追溯
@@ -179,6 +199,10 @@ class Equipment(Base):
     # 单次最长可约时长（小时）
     max_hours: Mapped[int] = mapped_column(Integer, default=4)
     requires_training: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 这台设备的预约是否需要管理员审批（P1-5）。
+    # 默认 False：审批是**按设备开通**的能力 —— 否则这一版上线后所有设备
+    # 一夜之间都变成"要等管理员点一下"，而院系并没有为此配人。
+    requires_approval: Mapped[bool] = mapped_column(Boolean, default=False)
 
     lab: Mapped[Laboratory] = relationship(back_populates="equipment")
     reservations: Mapped[list[Reservation]] = relationship(back_populates="equipment")
@@ -311,7 +335,13 @@ ACTION_LOGIN = "auth.login"
 ACTION_LOGIN_FAILED = "auth.login_failed"
 ACTION_BOOK = "reservation.create"
 ACTION_CANCEL = "reservation.cancel"
+# P1-5：管理员通过/驳回一条申请
+ACTION_REVIEW = "reservation.review"
 ACTION_ADMIN_READ = "admin.read"
+# P0-4：后台维护的**写**操作。与 admin.read 分开是必要的 ——
+# "谁看了花名册"和"谁把某人的管理员权限改了"是完全不同的两件事，
+# 混在一个动作里就只能在出事后把所有读过的人都排查一遍。
+ACTION_ADMIN_WRITE = "admin.write"
 # 后台清扫的动作名。它们**必须**与用户动作分开命名 ——
 # 「谁改了什么业务数据」这条审计里，值班人员最想一眼分清
 # 「是用户自己出的门」还是「是系统到点替他收的尾」。

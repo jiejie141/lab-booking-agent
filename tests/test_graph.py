@@ -67,7 +67,12 @@ class TestMultiTurnMerge:
         first = await ask(agent, "我想约荧光光谱仪", session="merge")
         assert first.stage == "awaiting_slots"
 
-        second = await ask(agent, "明天晚上八点，一小时", session="merge")
+        # ⚠️ 这里原来是「明天晚上八点」，那是个**会随星期变化**的用例：
+        # 分析楼 301 周末只开到 18:00，于是"明天"一旦是周六/周日，
+        # 20:00 就越过开放时间，用例从"验多轮合并"变成"验协商降级"而失败 ——
+        # 而代码一行没改。改成上午十点：工作日（08:00-22:00）与周末
+        # （09:00-18:00）都开放，且不与种子里那条 14:00-16:00 的演示预约撞车。
+        second = await ask(agent, "明天上午十点，一小时", session="merge")
         assert second.stage != "awaiting_slots", f"仍未凑齐槽位：{second.missing}"
         assert second.booking is not None and second.booking.ok
         assert second.booking.reservation.equipment_name == "荧光光谱仪"
@@ -90,7 +95,8 @@ class TestMultiTurnMerge:
         store: SessionStore = agent.store
         await ask(agent, "我想约荧光光谱仪", session="flag")
         assert store.awaiting("flag") is True
-        await ask(agent, "明天晚上八点，一小时", session="flag")
+        # 同上：用周末也开放的时间，避免"周几跑"影响结论
+        await ask(agent, "明天上午十点，一小时", session="flag")
         assert store.awaiting("flag") is False
 
 

@@ -13,7 +13,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .clock import minutes_between, parse_date, parse_time
+from .clock import minutes_between, open_hours_problem, parse_date, parse_time
+from .models import (
+    EQUIPMENT_NORMAL,
+    ROLE_USER,
+    EquipmentStatus,
+    UserRole,
+)
 
 # --------------------------------------------------------------------------
 # 意图
@@ -502,3 +508,153 @@ class ReservationCreate(BaseModel):
     end: dt.time
     purpose: str = Field(default="", max_length=200)
     as_user_id: int | None = None
+
+
+# --------------------------------------------------------------------------
+# 后台维护（P0-4）
+# --------------------------------------------------------------------------
+# 关于「为什么没有 Delete」：
+#
+# 预约 / 门禁事件 / 审计都以 equipment_id、user_id 为外键引用这些实体。
+# 真把它们删掉，历史记录就会指向不存在的对象 —— 而"出事之后查不出是谁在用
+# 哪台设备"恰好是这套系统最不能接受的状态。所以对外**不提供删除**，
+# 改用两个语义明确的替代：
+#   * 设备 → status = "scrapped"（报废：不可预约，历史与占用格原样保留）；
+#   * 用户 → 停用（口令哈希清空，``verify_password`` 对空串一律失败，
+#     于是"不可登录"这件事是 fail-closed 且已被测试钉住的）。
+#
+# 更新一律是 **PATCH 语义**：字段省略（或显式给 null）表示"不改"。
+# 要清空就传该类型的空值（""、0、[]）—— 比再引入一层"是否提供"的标志位好读。
+
+
+class LabCreate(BaseModel):
+    """新建实验室。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    building: str = Field(min_length=1, max_length=32)
+    floor: int = Field(ge=0, le=99)
+    room: str = Field(min_length=1, max_length=32)
+    # 容量 0 是合法的（"暂不开放"），负数不是
+    capacity: int = Field(default=1, ge=0, le=999)
+    open_hours: dict[str, list[str]] = Field(default_factory=dict)
+    note: str = Field(default="", max_length=200)
+
+    @field_validator("open_hours")
+    @classmethod
+    def _open_hours_must_be_usable(cls, value: dict) -> dict:
+        problem = open_hours_problem(value)
+        if problem is not None:
+            raise ValueError(problem)
+        return value
+
+
+class LabUpdate(BaseModel):
+    """改实验室。**所有字段都可省略**，省略即不改。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    building: str | None = Field(default=None, min_length=1, max_length=32)
+    floor: int | None = Field(default=None, ge=0, le=99)
+    room: str | None = Field(default=None, min_length=1, max_length=32)
+    capacity: int | None = Field(default=None, ge=0, le=999)
+    open_hours: dict[str, list[str]] | None = None
+    note: str | None = Field(default=None, max_length=200)
+
+    @field_validator("open_hours")
+    @classmethod
+    def _open_hours_must_be_usable(cls, value: dict | None) -> dict | None:
+        if value is None:
+            return None
+        problem = open_hours_problem(value)
+        if problem is not None:
+            raise ValueError(problem)
+        return value
+
+
+class EquipmentCreate(BaseModel):
+    """新增设备。``code`` 是资产编号，全库唯一。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lab_id: int
+    name: str = Field(min_length=1, max_length=64)
+    model: str = Field(default="", max_length=64)
+    code: str = Field(min_length=1, max_length=32)
+    category: str = Field(min_length=1, max_length=32)
+    status: EquipmentStatus = EQUIPMENT_NORMAL
+    max_hours: int = Field(default=4, ge=1, le=24)
+    requires_training: bool = False
+    # P1-5：这台设备的预约要不要管理员审批
+    requires_approval: bool = False
+
+
+class EquipmentUpdate(BaseModel):
+    """改设备。改 ``status`` 是最常用的动作（维护 / 报废 / 恢复）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lab_id: int | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    model: str | None = Field(default=None, max_length=64)
+    code: str | None = Field(default=None, min_length=1, max_length=32)
+    category: str | None = Field(default=None, min_length=1, max_length=32)
+    status: EquipmentStatus | None = None
+    max_hours: int | None = Field(default=None, ge=1, le=24)
+    requires_training: bool | None = None
+    requires_approval: bool | None = None
+
+
+class UserCreate(BaseModel):
+    """新建账号。初始口令必填 —— 不填就是"账号存在但没人能登"，
+    而创建者会以为已经建好了。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(min_length=1, max_length=64)
+    email: str = Field(min_length=3, max_length=128)
+    role: UserRole = ROLE_USER
+    certs: list[str] = Field(default_factory=list)
+    password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def _email_must_look_like_one(cls, value: str) -> str:
+        # 不引 email-validator 这个依赖：这里只需要挡住"把用户名填进了邮箱"
+        # 这类手误，真正的可达性由发信（P1-6）去验证。
+        if "@" not in value or value.startswith("@") or value.endswith("@"):
+            raise ValueError("邮箱格式不正确")
+        return value
+
+
+class ReviewRequest(BaseModel):
+    """审批意见。**驳回时写清楚原因** —— 用户要能知道下一步该做什么。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(default="", max_length=200)
+
+
+class UserUpdate(BaseModel):
+    """改账号。``password`` 非空即为**重置口令**（管理员重置是常态操作）。
+
+    ``certs`` 一并传即表示"以这份为准"：新增的类别会被授予授权记录，
+    移除的类别会被**撤销而不是删除**（谁在什么时候被取消了什么资格，
+    必须查得到）。详见 :func:`lagent.domain.catalog.sync_certs`。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: str | None = Field(default=None, min_length=3, max_length=128)
+    role: UserRole | None = None
+    certs: list[str] | None = None
+    password: str | None = Field(default=None, min_length=8, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def _email_must_look_like_one(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if "@" not in value or value.startswith("@") or value.endswith("@"):
+            raise ValueError("邮箱格式不正确")
+        return value

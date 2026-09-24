@@ -34,10 +34,12 @@ from .config import get_settings
 from .db import session_scope
 from .models import (
     ACTION_ADMIN_READ,
+    ACTION_ADMIN_WRITE,
     ACTION_BOOK,
     ACTION_CANCEL,
     ACTION_LOGIN,
     ACTION_LOGIN_FAILED,
+    ACTION_REVIEW,
     OUTCOME_DENIED,
     OUTCOME_FAILED,
     OUTCOME_OK,
@@ -49,10 +51,12 @@ _log = get_logger("lagent.audit")
 
 __all__ = [
     "ACTION_ADMIN_READ",
+    "ACTION_ADMIN_WRITE",
     "ACTION_BOOK",
     "ACTION_CANCEL",
     "ACTION_LOGIN",
     "ACTION_LOGIN_FAILED",
+    "ACTION_REVIEW",
     "OUTCOME_DENIED",
     "OUTCOME_FAILED",
     "OUTCOME_OK",
