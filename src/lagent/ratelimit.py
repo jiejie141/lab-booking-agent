@@ -9,6 +9,7 @@
 
 一个诚实的限制：这是单进程的，重启即清零。
 所以它能防「脚本高频刷接口」，防不住分布式刷。
+本文件里的 :class:`LoginThrottle` 是同一个限制的另一种形态，见它的注释。
 """
 
 from __future__ import annotations
@@ -85,3 +86,99 @@ class SlidingWindowLimiter:
         """当前跟踪的 key 数（用于验证不会无界增长）。"""
         with self._lock:
             return len(self._hits)
+
+
+class LoginThrottle:
+    """登录失败计数 + 锁定（P1-7）。
+
+    与 :class:`SlidingWindowLimiter` 的区别：那边限的是**频率**（不管成败），
+    这里数的是**失败次数** —— 目的不同，防的是口令爆破。
+
+    key 取 ``"来源地址#用户名"`` 而不是只取用户名，这是权衡的结果：
+
+      * 只按用户名锁 → 任何人都能把别人的账号锁死。这个"攻击"比爆破口令
+        更简单、更有效，而且受害者是正当用户；
+      * 按"地址 + 账号"锁 → 同一个 IP 换一个账号还能继续试，但那个方向由
+        IP 维度的频率限流（:class:`SlidingWindowLimiter`）兜着。
+
+    ⚠️ **进程内状态**：重启即清零，多副本下配额 × 副本数 —— 与上面那个类
+    是同一个限制。真要挡分布式爆破必须把计数外置（Redis），那属于 P2。
+    这里先把"单机上拿脚本试口令"这条路堵上，并且**如实**说明它挡不住什么。
+    """
+
+    def __init__(
+        self,
+        max_attempts: int,
+        window_seconds: float = 300.0,
+        lock_seconds: float = 600.0,
+        max_keys: int = 4096,
+    ) -> None:
+        self.max_attempts = max_attempts
+        self.window = window_seconds
+        self.lock_seconds = lock_seconds
+        self.max_keys = max_keys
+        self._lock = threading.Lock()
+        self._failures: dict[str, deque[float]] = {}
+        self._locked_until: dict[str, float] = {}
+        self._clock = time.monotonic
+
+    @property
+    def enabled(self) -> bool:
+        return self.max_attempts > 0
+
+    def check(self, key: str) -> tuple[bool, int]:
+        """还能不能再试一次。返回 ``(是否允许, 建议等待秒数)``。"""
+        if not self.enabled:
+            return True, 0
+
+        now = self._clock()
+        with self._lock:
+            until = self._locked_until.get(key, 0.0)
+            if until > now:
+                return False, max(1, int(until - now) + 1)
+            if until:
+                # 锁已到期：清掉，并把这一轮失败记录一并作废 ——
+                # 否则用户刚等到解锁，又因为窗口里还留着旧记录被立刻再锁一次。
+                self._locked_until.pop(key, None)
+                self._failures.pop(key, None)
+
+            bucket = self._failures.setdefault(key, deque())
+            cutoff = now - self.window
+            while bucket and bucket[0] <= cutoff:
+                bucket.popleft()
+            if len(bucket) >= self.max_attempts:
+                self._locked_until[key] = now + self.lock_seconds
+                return False, int(self.lock_seconds)
+            return True, 0
+
+    def record_failure(self, key: str) -> None:
+        """记一次失败。"""
+        if not self.enabled:
+            return
+        now = self._clock()
+        with self._lock:
+            if len(self._failures) > self.max_keys:
+                # 与 SlidingWindowLimiter._sweep 同一件事：不清理就是内存泄漏
+                for stale in [
+                    k for k, b in self._failures.items()
+                    if (not b or b[-1] <= now - self.window)
+                    and self._locked_until.get(k, 0.0) <= now
+                ]:
+                    self._failures.pop(stale, None)
+            self._failures.setdefault(key, deque()).append(now)
+
+    def reset(self, key: str | None = None) -> None:
+        """清空（登录成功后调用，或运维手动解锁）。"""
+        with self._lock:
+            if key is None:
+                self._failures.clear()
+                self._locked_until.clear()
+            else:
+                self._failures.pop(key, None)
+                self._locked_until.pop(key, None)
+
+    def locked_keys(self) -> int:
+        """当前处于锁定状态的 key 数（运维看"有多少人被锁着"）。"""
+        now = self._clock()
+        with self._lock:
+            return sum(1 for until in self._locked_until.values() if until > now)

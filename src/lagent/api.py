@@ -122,7 +122,7 @@ from .obs import (
     new_request_id,
     sanitize_request_id,
 )
-from .ratelimit import SlidingWindowLimiter
+from .ratelimit import LoginThrottle, SlidingWindowLimiter
 from .schemas import (
     AccessIssueRequest,
     AccessIssueResponse,
@@ -276,6 +276,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 测试之间不会互相把配额用光（模块级单例曾让第二个用例莫名 429）。
     settings = get_settings()
     app.state.chat_limiter = SlidingWindowLimiter(settings.rate_limit_per_minute, 60.0)
+    # 登录失败锁定（P1-7）。同样挂在 app.state 上：模块级单例会让
+    # 「上一个用例把账号锁了」泄漏到下一个用例里。
+    app.state.login_throttle = LoginThrottle(
+        settings.login_max_attempts,
+        settings.login_window_seconds,
+        settings.login_lock_seconds,
+    )
     # 把「这批指标是哪个版本、什么模式」写进指标本身：排障时第一个要回答的
     # 问题是「指标变化的那个时刻，代码/配置变了没有」，而这个标签就是答案。
     set_build_info(
@@ -611,7 +618,31 @@ async def login(body: LoginRequest, request: Request) -> TokenResponse:
       直接在事件循环里跑会把整个进程卡住（单 worker 下就是全站卡住）。
     * **失败的登录也进审计。** 「某个账号被连续试了 200 次」这个模式
       只有把失败记下来才看得见。
+    * **连续失败到阈值就锁**（P1-7）。被锁期间连正确口令也进不去 ——
+      否则限流只是让爆破变慢，而不是让它停下来。
     """
+    throttle: LoginThrottle | None = getattr(request.app.state, "login_throttle", None)
+    # key 带上来源地址：只按用户名锁的话，任何人都能把别人的账号锁死，
+    # 那个"攻击"比猜口令更简单也更有效（详见 LoginThrottle 的注释）。
+    key = f"{_client_host(request)}#{body.username}"
+    if throttle is not None and throttle.enabled:
+        allowed, retry_after = throttle.check(key)
+        if not allowed:
+            # 只记指标、不写审计：被锁的请求可能每秒几十个，
+            # 都写进审计就等于给了攻击者一个"帮你撑爆审计表"的开关。
+            # 触发锁定的那几次失败本身已经在审计里了，证据链是完整的。
+            record_rate_limited("login")
+            _log.warning(
+                "登录被限流（连续失败过多）",
+                extra={"username": body.username, "retry_after": retry_after,
+                       "event": "login_throttled"},
+            )
+            raise HTTPException(
+                status_code=429,
+                detail=f"连续登录失败次数过多，请 {retry_after} 秒后再试",
+                headers={"Retry-After": str(retry_after)},
+            )
+
     async with session_scope() as session:
         row = (
             await session.execute(select(User).where(User.username == body.username))
@@ -629,7 +660,14 @@ async def login(body: LoginRequest, request: Request) -> TokenResponse:
             detail="用户名或密码不正确",
             client_host=_client_host(request),
         )
+        if throttle is not None:
+            throttle.record_failure(key)
         raise HTTPException(status_code=401, detail="用户名或密码不正确")
+
+    # 成功了就把这一串失败记录清掉：否则"中间试对一次"之后计数还留着，
+    # 用户会在完全没做错什么的情况下被锁。
+    if throttle is not None:
+        throttle.reset(key)
 
     settings = get_settings()
     token = create_access_token(user_id=row.id, username=row.username, role=row.role)

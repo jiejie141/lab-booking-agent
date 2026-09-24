@@ -155,6 +155,13 @@ class Settings(BaseSettings):
     backup_dir: str = "./var/backup"
 
     # ---- 后台维护（P0-4）---------------------------------------------------
+    # ---- 登录限流（P1-7）---------------------------------------------------
+    # 连续失败多少次后锁定、失败计数的窗口、锁多久。
+    # 设为 0 即关闭（本地演示/压测时很有用）。
+    login_max_attempts: int = Field(default=5, ge=0, le=100)
+    login_window_seconds: int = Field(default=300, ge=1)
+    login_lock_seconds: int = Field(default=600, ge=1)
+
     # 后台授予资质时，授权记录的默认有效期（天）。
     # 不给默认值就等于"永久有效"，而这套系统从头到尾的立场是
     # **资质必须看有效期**（三年前考的证不等于今天还能用），
