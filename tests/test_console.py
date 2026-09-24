@@ -118,3 +118,64 @@ class TestConsoleAuthWiring:
         assert 'id="tab-users"' in html
         assert "isAdmin" in html
         assert "/api/users" in html
+
+
+class TestConsoleIsServed:
+    """上面的断言都是静态的（读文件）。这里确认**服务端真的吐出这一页**。
+
+    静态断言拦得住"JS 引用了不存在的 id"，拦不住"改了文件但没被部署 /
+    路由指向了另一份页面"。
+    """
+
+    async def test_index_contains_the_direct_booking_pane(self, http):
+        resp = await http.get("/")
+        assert resp.status_code == 200
+        assert 'id="pane-book"' in resp.text
+        assert 'data-tab="book"' in resp.text
+
+
+class TestDirectBookingForm:
+    """「直接预约」表单：不走模型的那条路（P0-3 真正兑现的部分）。
+
+    P0-3 只在后端加 ``POST /api/reservations`` 是不够的 —— 控制台的预约入口
+    如果仍然只有对话，那"模型不在时也能约"对真实用户等于没兑现。
+    这里钉住的是：确实有这条路径、它确实不走模型、失败时确实把**服务端的
+    原因**原样显示出来。
+    """
+
+    @pytest.fixture(scope="class")
+    def html(self) -> str:
+        return WEB_INDEX.read_text(encoding="utf-8")
+
+    def test_the_form_exists_as_its_own_pane(self, html):
+        assert 'id="pane-book"' in html
+        assert 'data-tab="book"' in html
+        # 面板切换的名单里必须带上它，否则点标签页什么都不出现
+        assert '"book","labs","res","kb","users"' in html
+
+    def test_it_posts_to_the_deterministic_endpoint(self, html):
+        """走 POST /api/reservations，而不是 /api/agent/chat。"""
+        marker = 'api("/api/reservations",{method:"POST"'
+        assert marker in html, "表单必须打确定性下单接口"
+        at = html.index(marker)
+        body = html[at:at + 240]
+        assert "equipment_id" in body and "start" in body and "end" in body
+        assert "user_id" not in body, "身份必须由令牌带，不能出现在表单请求体里"
+
+    def test_the_chat_entry_still_exists(self, html):
+        """加表单不是为了删掉对话入口 —— 对话是可选的便捷方式，两者并存。"""
+        assert "/api/agent/chat" in html
+
+    def test_failure_shows_the_server_reason_verbatim(self, html):
+        """失败信息用 e.message 而不是自己翻成一句"预约失败"。
+
+        那些原因码是给用户的（时段冲突 / 资质不够 / 违约被限 / 超单次上限），
+        翻成一句笼统的话，用户就只剩"换个时间再试试"这一条路。
+        """
+        assert "esc(e.message)" in html
+        assert "e.status===403" in html.replace(" ", ""), "403 是资格问题，不该和 409 一样提示换时段"
+
+    def test_options_come_from_the_catalog_not_hardcoded(self, html):
+        """设备下拉由 /api/labs 填，不写死 —— 加一台新设备不该改前端。"""
+        assert "state.equipment" in html
+        assert "fillBookingOptions" in html

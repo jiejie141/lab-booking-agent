@@ -245,6 +245,7 @@ td .mono{font-family:var(--mono)}
     <section class="card">
       <div class="card-h">
         <div class="tabs" id="tabs">
+          <button class="tab" data-tab="book">直接预约</button>
           <button class="tab on" data-tab="labs">实验室与设备</button>
           <button class="tab" data-tab="res">预约记录</button>
           <button class="tab" data-tab="kb">规范检索</button>
@@ -252,6 +253,31 @@ td .mono{font-family:var(--mono)}
         </div>
       </div>
       <div class="card-b">
+        <!-- 直接预约：**不经过模型**的下单表单。
+             对话入口很好用，但它是唯一入口时，"模型不在"= "预约功能停摆"。
+             这个表单走的 POST /api/reservations 与对话底层是同一套不变式，
+             只是省掉了"把中文解析成参数"这一步。 -->
+        <div id="pane-book" hidden>
+          <div class="hint" style="margin-bottom:10px">
+            选设备 → 选日期与时段 → 提交。<b>这条路径不经过模型</b>，
+            Agent 不可用（额度用完 / 断网 / 端点挂了）时照样能约。
+          </div>
+          <label class="f">设备</label>
+          <select id="bk-equip"></select>
+          <div class="row" style="margin-top:8px">
+            <div style="flex:1"><label class="f">日期</label><input id="bk-date" type="date"></div>
+            <div style="flex:1"><label class="f">开始</label><select id="bk-start"></select></div>
+            <div style="flex:1"><label class="f">结束</label><select id="bk-end"></select></div>
+          </div>
+          <label class="f" style="margin-top:8px">用途（可选）</label>
+          <input id="bk-purpose" placeholder="例如：课程实验 · 样品测定">
+          <div class="row" style="margin-top:10px">
+            <button class="btn" id="bk-go">提交预约</button>
+            <button class="btn ghost" id="bk-tmr">明天上午</button>
+          </div>
+          <div id="bk-result" style="margin-top:10px"></div>
+        </div>
+
         <div id="pane-labs">
           <div id="labs-box"><div class="skel sk-card"></div><div class="skel sk-card"></div></div>
         </div>
@@ -418,6 +444,7 @@ function renderIdentity(){
 async function enterApp(){
   renderIdentity();
   await Promise.all([loadLabs(), loadUserDirectory()]);
+  fillBookingOptions();   // 设备下拉依赖 loadLabs 填好的 state.equipment
   if(!isAdmin()) $("#tab-users").hidden=true;
   await loadReservations();
   await loadHealth();
@@ -474,6 +501,80 @@ async function loadUserDirectory(){
       + '</tbody></table>';
   }catch(e){box.innerHTML='<div class="empty">加载失败：'+esc(e.message)+"</div>";}
 }
+
+/* ---------- 直接预约（不经过模型） ----------
+   这一块存在的理由写在 P0-3 的评估里：模型挂掉时，如果预约的唯一入口
+   是"跟模型说一句话"，那整个预约功能就一起挂了。 */
+const BK_TIMES=(function(){
+  const out=[];
+  for(let m=8*60;m<=22*60;m+=30){
+    const h=String(Math.floor(m/60)).padStart(2,"0"), mm=String(m%60).padStart(2,"0");
+    out.push(h+":"+mm);
+  }
+  return out;
+})();
+
+function fillBookingOptions(){
+  const sel=$("#bk-equip");
+  if(sel.options.length) return;   // 已填过就别重建，否则会丢掉用户当前选择
+  const items=Array.from(state.equipment.values());
+  if(!items.length){ sel.innerHTML='<option value="">（设备目录尚未加载）</option>'; return; }
+  sel.innerHTML=items.map(e=>{
+    const off = e.status && e.status!=="normal";
+    const tag = off ? "（"+esc(e.status)+"）" : (e.requires_approval?"（需审批）":"");
+    return `<option value="${e.id}"${off?" disabled":""}>${esc(e.name)} · ${esc(e.code)}${tag}</option>`;
+  }).join("");
+  const start=$("#bk-start"), end=$("#bk-end");
+  start.innerHTML=BK_TIMES.map(t=>`<option value="${t}"${t==="10:00"?" selected":""}>${t}</option>`).join("");
+  end.innerHTML=BK_TIMES.map(t=>`<option value="${t}"${t==="12:00"?" selected":""}>${t}</option>`).join("");
+  if(!$("#bk-date").value) $("#bk-date").value = isoDate(1);
+}
+
+function isoDate(offsetDays){
+  const d=new Date(); d.setDate(d.getDate()+(offsetDays||0));
+  return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");
+}
+
+async function submitBooking(){
+  const box=$("#bk-result"), btn=$("#bk-go");
+  const equipmentId=Number($("#bk-equip").value);
+  const date=$("#bk-date").value, start=$("#bk-start").value, end=$("#bk-end").value;
+  if(!equipmentId){ box.innerHTML='<div class="empty">先选一台设备</div>'; return; }
+  if(!date){ box.innerHTML='<div class="empty">先选日期</div>'; return; }
+  if(start>=end){ box.innerHTML='<div class="empty">结束时间要晚于开始时间</div>'; return; }
+
+  btn.disabled=true; btn.textContent="提交中…";
+  box.innerHTML='<div class="skel sk-row"></div>';
+  try{
+    // 返回的是 BookingOutcome：真正的预约在 .reservation 里，
+    // 顶层只有 ok / message / reason（reason 是机器可读的分类，给人看的在 message）。
+    const r=await api("/api/reservations",{method:"POST",body:JSON.stringify({
+      equipment_id:equipmentId, date:date, start:start, end:end,
+      purpose:$("#bk-purpose").value.trim()})});
+    const res=r.reservation;
+    const needReview = !!res && res.status==="pending";
+    box.innerHTML=`<div class="empty">${needReview?"已提交，等待管理员审批":"预约成功"}
+      — ${res?("#"+res.id+" · "+esc(res.slot)):esc(r.message)}</div>`;
+    toast(needReview?"已提交申请":"预约成功","ok");
+    loadReservations(); loadHealth();
+  }catch(e){
+    // ★ 失败信息要**原样**显示服务端给的原因，不要自己翻译成"预约失败"。
+    // 那些原因码是给用户的（时段冲突 / 资质不够 / 违约被限 / 超出单次上限），
+    // 翻译成一句笼统的话，用户就只剩下"换个时间再试试"这一条路可走。
+    const hint = e.status===409 ? "换个时段再试"
+      : e.status===403 ? "这不是时段问题，是资格问题（资质 / 违约限制）"
+      : e.status===422 ? "填的内容有问题" : "";
+    box.innerHTML=`<div class="empty">预约失败：${esc(e.message)}${hint?"<br>"+esc(hint):""}</div>`;
+    toast("预约失败："+e.message,"err");
+  }finally{ btn.disabled=false; btn.textContent="提交预约"; }
+}
+
+$("#bk-go").addEventListener("click",submitBooking);
+$("#bk-tmr").addEventListener("click",()=>{
+  $("#bk-date").value=isoDate(1);
+  $("#bk-start").value="10:00"; $("#bk-end").value="12:00";
+  toast("已填好明天 10:00–12:00");
+});
 
 /* ---------- 实验室与设备 ---------- */
 async function loadLabs(){
@@ -721,9 +822,10 @@ $("#btn-logout").addEventListener("click",()=>{
 $$("#tabs .tab").forEach(tab=>tab.addEventListener("click",()=>{
   $$("#tabs .tab").forEach(t=>t.classList.toggle("on",t===tab));
   const name=tab.getAttribute("data-tab");
-  ["labs","res","kb","users"].forEach(k=>{$("#pane-"+k).hidden = k!==name;});
+  ["book","labs","res","kb","users"].forEach(k=>{$("#pane-"+k).hidden = k!==name;});
   if(name==="res") loadReservations();
   if(name==="labs") loadLabs();
+  if(name==="book") fillBookingOptions();
   if(name==="users") loadUserDirectory();
 }));
 
