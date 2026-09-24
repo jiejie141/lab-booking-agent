@@ -31,6 +31,8 @@ SUBCOMMANDS = {
     "eval",
     "access-demo",
     "sweep",
+    "backup",
+    "restore",
     "serve",
 }
 

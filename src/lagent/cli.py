@@ -556,6 +556,50 @@ async def _migrate(revision: str, *, down: bool = False) -> int:
 # ==========================================================================
 # sweep —— 后台清扫的「手动跑一轮」入口
 # ==========================================================================
+async def _backup(directory: str | None = None, name: str | None = None) -> int:
+    """备份当前数据库。
+
+    刻意不做「静默成功」：回执里必须给出**文件路径与大小**，
+    因为"备份命令跑过"和"真的有一个能恢复的文件"是两件事 ——
+    前者没有任何证据价值。
+    """
+    from .backup import backup
+
+    target = pathlib.Path(directory) if directory else None
+    result = backup(directory=target, name=name)
+    print(result.describe())
+    return 0
+
+
+async def _restore(source: str, *, yes: bool = False) -> int:
+    """从一个备份文件恢复。**会覆盖当前库里的全部数据。**
+
+    默认要交互确认，因为这条命令的失败形态是"不可逆"级别的：
+    把上周的备份恢复到今天的库上，等于把这一周的数据抹掉。
+    """
+    from .backup import restore
+
+    path = pathlib.Path(source)
+    print(f"即将从 {path} 恢复 —— 当前库里的全部数据会被覆盖。")
+    if not yes:
+        answer = input("确认请输入 yes：").strip().lower()
+        if answer != "yes":
+            print("已取消（未做任何改动）")
+            return 1
+
+    from .db import dispose_engine
+
+    message = await restore(path, dispose_engine=dispose_engine)
+    print(message)
+    # 恢复完立刻校验结构与代码是否一致：备份可能来自一个旧版本，
+    # 此时"恢复了"不等于"能用"，而这一点必须当场说出来而不是等服务起不来。
+    from .seed import seed
+
+    info = await seed()
+    print(f"恢复后校验通过：{info}")
+    return 0
+
+
 async def _sweep() -> int:
     """跑一轮清扫并打印每项处理了多少。
 
@@ -649,6 +693,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="后台清扫单轮：过期预约 / 凭证超时与关门收尾 / 审计归档（会改数据）",
     )
 
+    backup_parser = sub.add_parser("backup", help="备份数据库（SQLite / PostgreSQL）")
+    backup_parser.add_argument("--dir", default=None, help="落盘目录（默认 LAB_BACKUP_DIR）")
+    backup_parser.add_argument("--name", default=None, help="文件名（默认按时间戳命名）")
+
+    restore_parser = sub.add_parser("restore", help="从备份文件恢复（**会覆盖当前库**）")
+    restore_parser.add_argument("file", help="备份文件路径")
+    restore_parser.add_argument(
+        "--yes", action="store_true", help="跳过交互确认（脚本里用）"
+    )
+
     sub.add_parser("serve", help="启动 FastAPI 服务（等同 python main.py）")
     return parser
 
@@ -680,6 +734,10 @@ async def _run(args: argparse.Namespace) -> int:
         return await _eval(args.cases)
     if args.command == "access-demo":
         return await _access_demo()
+    if args.command == "backup":
+        return await _backup(args.dir, args.name)
+    if args.command == "restore":
+        return await _restore(args.file, yes=args.yes)
     if args.command == "sweep":
         # 先走一遍 seed()：它会 ensure_schema（迁移到 head + 校验结构），
         # 于是「库过期」这种情况在这里就报出可照做的提示，而不是等清扫 SQL 崩。
