@@ -366,7 +366,154 @@ class TestIdentity:
 
 
 # ===========================================================================
-# 五、请求体与状态码映射
+# 五、审批（P1-5）
+# ===========================================================================
+class TestApproval:
+    async def turn_on_approval(self, http, admin, equipment_id: int = UV) -> None:
+        """把某台设备切成"需要审批"。"""
+        resp = await http.patch(
+            f"/api/equipment/{equipment_id}",
+            json={"requires_approval": True},
+            headers=admin,
+        )
+        assert resp.status_code == 200, resp.text
+
+    async def test_a_device_that_needs_approval_lands_in_pending(self, http, as_user):
+        """★ 需要审批的设备：下单成功，但状态是 pending 而不是 confirmed。"""
+        await self.turn_on_approval(http, await as_user("管理员"))
+        headers = await as_user("李娜")
+        resp = await http.post("/api/reservations", json=payload(UV), headers=headers)
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["reservation"]["status"] == "pending"
+        assert "审批" in body["message"], "得告诉用户这不是约上了，是等着批"
+
+    async def test_a_pending_application_still_holds_the_slot(self, http, as_user):
+        """★ 申请即占坑。
+
+        不占坑的话，"提交申请"到"审批通过"之间别人能再约同一时段，
+        等批下来才发现冲突 —— 用户白等一场。
+        """
+        await self.turn_on_approval(http, await as_user("管理员"))
+        lina = await as_user("李娜")
+        assert (await http.post("/api/reservations", json=payload(UV), headers=lina)).status_code == 201
+
+        zhangwei = await as_user("张伟")
+        second = await http.post(
+            "/api/reservations", json=payload(UV, purpose="张伟也想要"), headers=zhangwei
+        )
+        assert second.status_code == 409, second.text
+
+    async def test_admin_approves_then_it_becomes_confirmed(self, http, as_user):
+        await self.turn_on_approval(http, await as_user("管理员"))
+        lina = await as_user("李娜")
+        created = await http.post("/api/reservations", json=payload(UV), headers=lina)
+        reservation_id = created.json()["reservation"]["id"]
+
+        admin = await as_user("管理员")
+        approved = await http.post(
+            f"/api/reservations/{reservation_id}/approve", headers=admin
+        )
+        assert approved.status_code == 200, approved.text
+        assert approved.json()["reservation"]["status"] == "confirmed"
+
+    async def test_rejection_frees_the_slot(self, http, as_user):
+        """★ 驳回必须把时段还回去 —— 否则这个坑永远订不回来。"""
+        await self.turn_on_approval(http, await as_user("管理员"))
+        lina = await as_user("李娜")
+        created = await http.post("/api/reservations", json=payload(UV), headers=lina)
+        reservation_id = created.json()["reservation"]["id"]
+
+        admin = await as_user("管理员")
+        rejected = await http.post(
+            f"/api/reservations/{reservation_id}/reject",
+            json={"reason": "该时段已安排教学"},
+            headers=admin,
+        )
+        assert rejected.status_code == 200, rejected.text
+        assert rejected.json()["reservation"]["status"] == "cancelled"
+
+        # 时段释放了 → 别人现在约得上
+        again = await http.post("/api/reservations", json=payload(UV), headers=lina)
+        assert again.status_code == 201, again.text
+
+    async def test_pending_list_only_contains_pending(self, http, as_user):
+        """★ "待审批"接口不能返回全部预约。
+
+        图省事复用全量查询再过滤的下场是：管理员在页面上分不清哪些要处理，
+        而这个 bug 在只有几条数据的时候**看不出来**。
+        """
+        admin = await as_user("管理员")
+        lina = await as_user("李娜")
+        # 先来一条**不需要**审批的（confirmed）
+        assert (await http.post("/api/reservations", json=payload(UV), headers=lina)).status_code == 201
+        assert (await http.get("/api/reservations/pending", headers=admin)).json() == []
+
+        await self.turn_on_approval(http, admin, equipment_id=SAME_LAB_OTHER_DEVICE)
+        created = await http.post(
+            "/api/reservations", json=payload(SAME_LAB_OTHER_DEVICE), headers=lina
+        )
+        assert created.status_code == 201, created.text
+
+        pending = (await http.get("/api/reservations/pending", headers=admin)).json()
+        assert len(pending) == 1
+        assert pending[0]["id"] == created.json()["reservation"]["id"]
+
+    async def test_a_plain_user_cannot_approve(self, http, as_user):
+        await self.turn_on_approval(http, await as_user("管理员"))
+        lina = await as_user("李娜")
+        created = await http.post("/api/reservations", json=payload(UV), headers=lina)
+        reservation_id = created.json()["reservation"]["id"]
+
+        resp = await http.post(
+            f"/api/reservations/{reservation_id}/approve", headers=lina
+        )
+        assert resp.status_code == 403
+
+    async def test_approving_twice_is_a_state_error_not_a_success(self, http, as_user):
+        """已经处理过的申请再点一次 → 409（状态不对），而不是假装成功。
+
+        "管理员在两个标签页各点了一次"是真实场景；第二次必须告诉他
+        已经处理过了，否则他会以为自己这次的操作才生效。
+        """
+        await self.turn_on_approval(http, await as_user("管理员"))
+        lina = await as_user("李娜")
+        reservation_id = (
+            await http.post("/api/reservations", json=payload(UV), headers=lina)
+        ).json()["reservation"]["id"]
+
+        admin = await as_user("管理员")
+        assert (
+            await http.post(f"/api/reservations/{reservation_id}/approve", headers=admin)
+        ).status_code == 200
+        again = await http.post(
+            f"/api/reservations/{reservation_id}/approve", headers=admin
+        )
+        assert again.status_code == 409, again.text
+
+    async def test_approving_a_missing_reservation_is_404(self, http, as_user):
+        admin = await as_user("管理员")
+        resp = await http.post("/api/reservations/99999/approve", headers=admin)
+        assert resp.status_code == 404
+
+    async def test_turning_approval_off_restores_instant_booking(self, http, as_user):
+        """审批是**按设备开通**的能力，关掉就该立刻恢复直接预约。"""
+        admin = await as_user("管理员")
+        await self.turn_on_approval(http, admin)
+        assert (
+            await http.patch(
+                f"/api/equipment/{UV}", json={"requires_approval": False}, headers=admin
+            )
+        ).status_code == 200
+
+        lina = await as_user("李娜")
+        resp = await http.post("/api/reservations", json=payload(UV), headers=lina)
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["reservation"]["status"] == "confirmed"
+
+
+# ===========================================================================
+# 六、请求体与状态码映射
 # ===========================================================================
 class TestContract:
     async def test_unknown_field_is_rejected(self, http, as_user):

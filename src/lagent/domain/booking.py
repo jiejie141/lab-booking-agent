@@ -37,7 +37,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import functools
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import ParamSpec, cast
 
 from sqlalchemy import CursorResult, delete, select, text, update
@@ -52,11 +52,15 @@ from ..metrics import (
     record_booking_outcome,
     record_booking_retry,
     record_cancel_outcome,
+    record_review_outcome,
 )
 from ..models import (
     ACTIVE_STATUSES,
     DEFAULT_SLOT_GRANULARITY_MINUTES,
     EQUIPMENT_NORMAL,
+    STATUS_CANCELLED,
+    STATUS_CONFIRMED,
+    STATUS_PENDING,
     Equipment,
     Reservation,
     ReservationSlot,
@@ -363,13 +367,18 @@ async def create_reservation(
                         reason="conflict",
                     )
 
+                # 需要审批的设备落到 pending（P1-5）。
+                # pending 在 ACTIVE_STATUSES 里，所以**申请即占坑**：
+                # 不占坑的话，"提交申请"到"审批通过"之间别人能再约同一时段，
+                # 等批下来才发现冲突 —— 用户白等一场，而且更气。
+                needs_review = equipment.requires_approval
                 res = Reservation(
                     user_id=user_id,
                     equipment_id=equipment_id,
                     date=date_,
                     start_time=start,
                     end_time=end,
-                    status="confirmed",
+                    status=STATUS_PENDING if needs_review else STATUS_CONFIRMED,
                     purpose=purpose,
                     version=1,
                 )
@@ -382,7 +391,12 @@ async def create_reservation(
                 out = _to_out(res, equipment.name, equipment.lab.label)
                 return BookingOutcome(
                     ok=True,
-                    message=f"预约成功：{out.slot} {equipment.name}（{equipment.lab.label}）",
+                    message=(
+                        f"已提交申请，等待管理员审批：{out.slot} "
+                        f"{equipment.name}（{equipment.lab.label}）"
+                        if needs_review
+                        else f"预约成功：{out.slot} {equipment.name}（{equipment.lab.label}）"
+                    ),
                     reservation=out,
                     retries=attempt,
                     reason="ok",
@@ -501,8 +515,111 @@ async def cancel_reservation(
 
 
 # --------------------------------------------------------------------------
-# 查询
+# 审批（P1-5）
 # --------------------------------------------------------------------------
+@_counted(record_review_outcome)
+async def decide_reservation(
+    *,
+    reservation_id: int,
+    approve: bool,
+    reason: str = "",
+) -> BookingOutcome:
+    """管理员通过 / 驳回一条 ``pending`` 申请。
+
+    与 :func:`cancel_reservation` 同一套写法（条件 UPDATE + 乐观锁）：
+    两个管理员同时点"通过"和"驳回"时，由数据库裁决谁生效，
+    而不是"各读各的、各写各的"。
+
+    驳回与"用户自己取消"是**同一条路径**（``cancelled`` + 释放占用格），
+    所以"驳回了但格子还占着"这种不一致不可能出现 —— 释放只有一处实现。
+    """
+    for attempt in range(get_settings().booking_max_retry):
+        async with session_scope() as session:
+            res = await session.get(Reservation, reservation_id)
+            if res is None:
+                return BookingOutcome(
+                    ok=False,
+                    message=f"预约 {reservation_id} 不存在",
+                    retries=attempt,
+                    reason="not_found",
+                )
+            if res.status != STATUS_PENDING:
+                # 已经处理过了。这不算冲突（不是两个请求抢同一资源），
+                # 而是"状态不对" —— 最常见的成因是管理员在另一个标签页点过了。
+                return BookingOutcome(
+                    ok=False,
+                    message=f"该申请当前状态为 {res.status}，无需再处理",
+                    retries=attempt,
+                    reason="state",
+                )
+
+            target_status = STATUS_CONFIRMED if approve else STATUS_CANCELLED
+            stmt = (
+                update(Reservation)
+                .where(
+                    Reservation.id == reservation_id,
+                    Reservation.version == res.version,
+                    Reservation.status == STATUS_PENDING,
+                )
+                .values(
+                    status=target_status,
+                    cancel_reason=reason if not approve else "",
+                    version=res.version + 1,
+                    updated_at=now_local(),
+                )
+            )
+            result = cast(CursorResult, await session.execute(stmt))
+            if result.rowcount == 0:
+                continue  # 版本被别人改过，重读再试
+
+            if not approve:
+                # ★ 驳回必须释放占用格，否则这个时段永远订不回来
+                await release_slots(session, reservation_id)
+
+            equipment = await _load_equipment(session, res.equipment_id)
+            await session.refresh(res)
+            out = _to_out(
+                res,
+                equipment.name if equipment else "",
+                equipment.lab.label if equipment and equipment.lab else "",
+            )
+            return BookingOutcome(
+                ok=True,
+                message=(
+                    f"已通过：{out.slot}"
+                    if approve
+                    else f"已驳回：{out.slot}" + (f"（{reason}）" if reason else "")
+                ),
+                reservation=out,
+                retries=attempt,
+                reason="ok",
+            )
+
+    return BookingOutcome(
+        ok=False,
+        message="审批失败：有并发修改，请重试",
+        retries=get_settings().booking_max_retry,
+        reason="contention",
+    )
+
+
+async def pending_reservations(session: AsyncSession) -> list[ReservationOut]:
+    """待审批列表（管理员后台用）。
+
+    ⚠️ 不能图省事复用 :func:`list_reservations` 再在内存里过滤：它返回的是
+    **全量**，而"待审批"接口一旦返回全部预约，管理员在页面上就分不清
+    哪些要处理 —— 这正是"省一个函数"的代价。
+    """
+    rows = (
+        await session.execute(
+            select(Reservation)
+            .where(Reservation.status == STATUS_PENDING)
+            .order_by(Reservation.date, Reservation.start_time)
+        )
+    ).scalars().all()
+    return await _to_outs(session, rows)
+
+
 async def list_reservations(
     session: AsyncSession, *, user_id: int | None = None, date_: dt.date | None = None
 ) -> list[ReservationOut]:
@@ -512,6 +629,13 @@ async def list_reservations(
     if date_ is not None:
         stmt = stmt.where(Reservation.date == date_)
     rows = (await session.execute(stmt)).scalars().all()
+    return await _to_outs(session, rows)
+
+
+async def _to_outs(
+    session: AsyncSession, rows: Sequence[Reservation]
+) -> list[ReservationOut]:
+    """把预约行批量转成对外结构（补上设备名与实验室名）。"""
     if not rows:
         return []
 

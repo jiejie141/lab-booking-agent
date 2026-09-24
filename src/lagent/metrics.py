@@ -670,6 +670,19 @@ def record_cancel_outcome(outcome: str) -> None:
     CANCEL_ATTEMPTS.inc(outcome=outcome)
 
 
+# ---- 审批（P1-5）----------------------------------------------------------
+# 单独一个计数器，而不是复用 BOOKING_ATTEMPTS：那边衡量的是"用户想约，
+# 约没约上"，这里是"管理员处理申请"。合并之后"驳回变多"和"冲突变多"
+# 会挤在同一个数字里，而两者的处置完全不同（加设备 vs 加审批人）。
+REVIEW_ATTEMPTS = REGISTRY.counter(
+    "lagent_review_attempts_total", "审批处理数（按结果分组）", ("outcome",)
+)
+
+
+def record_review_outcome(outcome: str) -> None:
+    REVIEW_ATTEMPTS.inc(outcome=outcome)
+
+
 # ---- 模型调用 ------------------------------------------------------------
 # 只统计**真实**模型客户端的调用。MockLLMClient 是本地确定性规则，
 # 把它记进来会让「模型耗时」里混进一片 0.1ms 的假调用，那张图就再也没法看了。
