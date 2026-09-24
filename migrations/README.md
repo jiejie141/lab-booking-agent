@@ -68,6 +68,37 @@ configparser 的插值规则相互作用。这里索性不配日志段，改在 
 | `ondelete="CASCADE"` | 删预约留下孤儿占位格 | 上面两条测试 |
 | 列类型变更 | `compare_type=True` 已开，但 SQLite 上 alter 要 batch 模式 | `tests/test_migrations.py` 的「无差异」断言 |
 
+## revision 一览
+
+| revision | 做了什么 | 验证方式 |
+| --- | --- | --- |
+| `0001` | 建全部 10 张表（含 3 条部分唯一索引的 `WHERE` 子句） | 从**空库** autogenerate 后人工复核；`tests/test_migrations.py` 断言 DDL 文本与「产物 vs 模型 diff 为空」 |
+| `0002` | 给 `audit_logs` / `access_events` 加 `request_id` 列（空串而非 NULL）与索引 | 见下节 —— **这是仓库里第一条给「已经有数据的表」加列的迁移** |
+
+## `0002` 是怎么验的（以及为什么 `0001` 的验证不算数）
+
+`0001` 是从空库一次性建起来的，而**空表上加列永远不会失败** ——
+它证明不了任何事。真正会出事的是三件事凑在一起：表里已经有行、
+新列是 `NOT NULL`（老行必须拿到确定的默认值）、而且同时还要建索引。
+
+所以 `0002` 单独做了一层验证：
+
+1. **退到 `0001`**（那时还没有 `request_id` 列），用裸 SQL 灌进几行"历史数据"
+   —— 刻意不走 ORM：ORM 已经认识 `request_id` 了，用它插入等于让今天的代码
+   去写昨天的结构；
+2. 升到 head，断言 ① 数据一行不少 ② **老行的 `request_id` 是空串而不是 NULL**
+   ③ 两条索引都建了出来 ④ 结构与模型 diff 为空；
+3. **再退一次、再升一次**，确认这个往返不会吃掉数据 ——
+   "能回滚"只有在这条通过时才算数。
+
+这三条在 `tests/test_migrations.py::TestSecondRevisionOnPopulatedTables` 里。
+另外在真实开发库上也手工走过一遍（`migrate` → `migrate --revision 0001 --down`
+→ `migrate`），结论一致。
+
+> 为什么 `request_id` 用**空串**而不是 NULL：空串是「这个库写入时没有请求上下文」
+> （清扫任务、CLI、播种）的确定表示。用 NULL 的话
+> `WHERE request_id = ''` 查不到这些行，于是它们会在按 id 检索时凭空消失。
+
 ## 已知限制
 
 * **迁移管不住「改了 models.py 却没生成迁移」。** 迁移只保证

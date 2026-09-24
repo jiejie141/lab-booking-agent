@@ -471,3 +471,173 @@ class TestMigrateCommand:
         await db_module.downgrade("base")
         await db_module.migrate("head")
         assert _metadata_diff(url) == []
+
+
+# ==========================================================================
+# 7. 第二条 revision：给**已经有数据**的表加列
+# ==========================================================================
+def _columns(url: str, table: str) -> set[str]:
+    conn = sqlite3.connect(_sqlite_path(url).as_posix())
+    try:
+        return {str(r[1]) for r in conn.execute(f"PRAGMA table_info({table})")}
+    finally:
+        conn.close()
+
+
+def _index_names(url: str, table: str) -> set[str]:
+    conn = sqlite3.connect(_sqlite_path(url).as_posix())
+    try:
+        return {str(r[1]) for r in conn.execute(f"PRAGMA index_list({table})")}
+    finally:
+        conn.close()
+
+
+class TestSecondRevisionOnPopulatedTables:
+    """0002 的真实考验：给**已经有行**的表加列 + 建索引。
+
+    为什么这一组必须单独存在：``0001`` 是从空库 autogenerate 出来的，
+    而**空表上"加一列"永远不会失败** —— 它证明不了任何事。
+    真正会出事的是这三件事凑在一起：
+
+    1. 表里已经有行（ALTER TABLE 要在保留数据的前提下改结构）；
+    2. 新列是 ``NOT NULL``（老行必须拿到一个确定的默认值，不能是 NULL）；
+    3. 同时要建索引（顺序错了会先在缺列的表上建索引而失败）。
+
+    所以这里的做法是：**先退到 0001**（那时还没有 request_id 列），
+    灌进几行"历史数据"，再升到 head，然后逐项核对
+    「数据还在吗 / 老行的新列是什么值 / 索引建出来了吗」。
+
+    最后再退一次、升一次，确认这个来回**不会吃掉数据** ——
+    "能回滚"只有在这种情况下才算数。
+    """
+
+    async def _seed_rows_at_0001(self, url: str) -> None:
+        """在 0001 的结构上插两行历史数据。
+
+        **刻意用裸 sqlite3，不走 ORM，也不走应用的引擎**：
+
+        1. ORM 已经认识了 ``request_id``，用它插入等于让今天的代码去写昨天的结构，
+           那样测的就不是迁移；
+        2. 应用的引擎在 connect 时打开了 ``PRAGMA foreign_keys=ON``，
+           要插一条 ``access_events`` 就得先把 laboratory / entry_permit
+           整条依赖链造出来 —— 而这条用例要验的是"表里有行"，
+           不是外键约束。裸连接的 SQLite 默认**不开**外键，正合适。
+        """
+        conn = sqlite3.connect(_sqlite_path(url).as_posix(), timeout=10)
+        try:
+            conn.execute(
+                "INSERT INTO audit_logs "
+                "(created_at, actor_id, actor_name, action, target_type, "
+                " target_id, outcome, detail, client_host) "
+                "VALUES (?, ?, ?, ?, '', '', 'ok', ?, '')",
+                ("2026-09-01 09:00:00", 1, "张伟", "auth.login", "迁移前写下的历史审计"),
+            )
+            conn.execute(
+                "INSERT INTO access_events "
+                "(occurred_at, user_id, lab_id, gate_id, direction, result, "
+                " reason_code, permit_id, credential_fingerprint, detail) "
+                "VALUES (?, 1, 1, 'gate-01', 'in', 'granted', '', 1, 'fp', '')",
+                ("2026-09-01 09:05:00",),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    async def _counts(self, db_module) -> tuple[int, int]:
+        from lagent.db import session_scope
+
+        async with session_scope() as session:
+            audits = (await session.execute(text("SELECT count(*) FROM audit_logs"))).scalar()
+            events = (await session.execute(text("SELECT count(*) FROM access_events"))).scalar()
+        return int(audits or 0), int(events or 0)
+
+    async def test_adding_request_id_keeps_existing_rows(self, migrated_db):
+        db_module, url = migrated_db
+
+        # --- 退到 0001：确认那时确实没有这两列（否则下面的断言就是空的）---
+        await db_module.downgrade("0001")
+        assert await db_module.current_revision() == "0001"
+        assert "request_id" not in _columns(url, "audit_logs")
+        assert "request_id" not in _columns(url, "access_events")
+
+        # --- 灌历史数据 ---
+        await self._seed_rows_at_0001(url)
+        assert await self._counts(db_module) == (1, 1)
+        assert "ix_audit_request" not in _index_names(url, "audit_logs")
+
+        # --- 升到 head（这一步就是"给有数据的表加列"）---
+        await db_module.migrate("head")
+
+        assert await db_module.current_revision() == db_module.head_revision()
+        # ① 数据一行都不能少
+        assert await self._counts(db_module) == (1, 1)
+        # ② 老行的新列拿到的是**空串**而不是 NULL
+        from lagent.db import session_scope
+
+        async with session_scope() as session:
+            row = (
+                await session.execute(
+                    text("SELECT action, actor_name, detail, request_id FROM audit_logs")
+                )
+            ).one()
+        assert row[0] == "auth.login"  # 老数据原样保留
+        assert row[1] == "张伟"
+        assert row[2] == "迁移前写下的历史审计"
+        assert row[3] == "", f"老行的 request_id 应当是空串，实际是 {row[3]!r}"
+
+        # ③ 索引也建出来了（两列都建）
+        assert "ix_audit_request" in _index_names(url, "audit_logs")
+        assert "ix_access_request" in _index_names(url, "access_events")
+        # ④ 结构与模型完全一致 —— 手写的迁移最容易在这里露馅
+        assert _metadata_diff(url) == []
+
+    async def test_round_trip_through_0002_does_not_eat_data(self, migrated_db):
+        """退回去再升上来，数据仍在。**"能回滚"只有在这条通过时才算数。**"""
+        db_module, url = migrated_db
+
+        await db_module.downgrade("0001")
+        await self._seed_rows_at_0001(url)
+        await db_module.migrate("head")
+
+        # 来回一次
+        await db_module.downgrade("0001")
+        assert "request_id" not in _columns(url, "audit_logs")
+        assert "ix_audit_request" not in _index_names(url, "audit_logs")
+        assert await self._counts(db_module) == (1, 1)
+
+        await db_module.migrate("head")
+        assert await self._counts(db_module) == (1, 1)
+        assert _metadata_diff(url) == []
+
+    async def test_new_rows_can_carry_a_request_id(self, migrated_db):
+        """加完列之后，新写入的行要能真的带上一个 request_id。
+
+        只验证"列存在"是不够的 —— 列存在但写不进去（长度不够、被别的默认值
+        覆盖）时，功能测试里那条"审计行带 request_id"的用例会红在这个文件之外，
+        而这里是最该先红的地方。
+        """
+        _, url = migrated_db
+        assert "request_id" in _columns(url, "audit_logs")
+
+        from lagent.db import session_scope
+        from lagent.models import AuditLog
+        from lagent.obs import bind_request_id
+
+        with bind_request_id("req-from-test"):
+            from lagent import audit
+
+            await audit.record(action="probe.migrated", actor_name="迁移后写入")
+
+        async with session_scope() as session:
+            row = (
+                await session.execute(
+                    text(
+                        "SELECT request_id, action, actor_name FROM audit_logs "
+                        "ORDER BY id DESC LIMIT 1"
+                    )
+                )
+            ).one()
+        assert row[0] == "req-from-test"
+        assert row[1] == "probe.migrated"
+        assert row[2] == "迁移后写入"
+        assert AuditLog.__tablename__ == "audit_logs"  # 顺手钉住表名没被改过

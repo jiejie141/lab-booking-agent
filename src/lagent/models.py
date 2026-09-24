@@ -339,10 +339,17 @@ class AuditLog(Base):
         Index("ix_audit_created", "created_at"),
         Index("ix_audit_actor", "actor_id", "created_at"),
         Index("ix_audit_action", "action", "created_at"),
+        # 「这一个请求到底做了什么」——排障时最常用的一次查询
+        Index("ix_audit_request", "request_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now_local)
+    # 贯穿一条链路的关联 id（P1-3）。来自 obs.current_request_id()：
+    # HTTP 请求由中间件绑定，后台清扫每轮绑定一个，命令行/播种留空。
+    # 用空串而不是 NULL —— 空串是"没有请求上下文"的确定表示，
+    # 而 NULL 会让 `WHERE request_id = ''` 查不到这些行。
+    request_id: Mapped[str] = mapped_column(String(36), default="", server_default="")
     # 允许为空：登录失败时还没有身份（这正是要记下来的一类事件）
     actor_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     actor_name: Mapped[str] = mapped_column(String(64), default="")
@@ -507,10 +514,14 @@ class AccessEvent(Base):
         Index("ix_access_user_time", "user_id", "occurred_at"),
         Index("ix_access_lab_time", "lab_id", "occurred_at"),
         Index("ix_access_result", "result", "occurred_at"),
+        # 与 audit_logs 同一个用途：拿一个 request_id 把门禁流水和审计串起来
+        Index("ix_access_request", "request_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     occurred_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now_local, index=True)
+    # 与 AuditLog.request_id 同义：能回答「这次刷卡是哪个请求触发的」
+    request_id: Mapped[str] = mapped_column(String(36), default="", server_default="")
     # 允许为空：凭证无效时可能连「是谁」都还没识别出来（例如读卡失败）
     user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     lab_id: Mapped[int] = mapped_column(ForeignKey("laboratories.id"), index=True)

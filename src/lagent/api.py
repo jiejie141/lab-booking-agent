@@ -35,7 +35,9 @@ import contextlib
 import datetime as dt
 import hmac
 import json
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, MutableMapping
+from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -70,6 +72,16 @@ from .models import (
     Reservation,
     User,
 )
+from .obs import (
+    REQUEST_ID_HEADER,
+    bind_request_id,
+    bind_user,
+    clear_user_context,
+    configure_from_settings,
+    get_logger,
+    new_request_id,
+    sanitize_request_id,
+)
 from .ratelimit import SlidingWindowLimiter
 from .schemas import (
     AccessIssueRequest,
@@ -99,6 +111,12 @@ from .sweep import build_runner
 
 WEB_DIR = __import__("pathlib").Path(__file__).parent / "web"
 
+_log = get_logger("lagent.api")
+
+# 存活探针的路径。单独提出来是因为访问日志要对它降级（见 RequestContextMiddleware）——
+# 探针可能每几秒一次，按 INFO 记会把业务日志冲掉。
+HEALTH_PATH = "/api/health"
+
 # 口令校验是 CPU 密集的（scrypt ≈140ms）。为了让"用户不存在"与"口令错误"
 # 两种路径耗时接近（否则响应时间本身就是一个账号枚举侧信道），
 # 账号不存在时也走一次等价成本的假校验。哈希在首次需要时算一次并缓存。
@@ -114,6 +132,11 @@ def _dummy_hash() -> str:
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # 第一件事就配日志：后面所有 print 都该改成 logger（P1-3）。
+    # 放在最前面不是因为"顺序好看"，而是因为**启动阶段的失败最需要结构化日志** ——
+    # 服务起不来时，一个能按字段检索的 JSON 行比一句自由文本有用得多。
+    configure_from_settings()
+
     # seed() 内部第一步就是 ensure_schema()：建表 + 校验结构与代码一致。
     # 校验放在这里而不是等业务代码崩，是因为漂移的失败形态又难懂又不一致：
     # 库里缺 users.password_hash 时报的是「no such column」加五十行堆栈，
@@ -122,10 +145,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         info = await seed()
     except SchemaDriftError as exc:
-        # 和下面那条默认密钥告警同理：这条要在任何日志配置生效之前就能被看见，
-        # 所以用 print 而不是日志框架。堆栈里唯一有用的信息就是那个列名，
-        # 所以只留一行异常，把可照做的说明放在它上面。
+        # 这条刻意**同时**用 print 和 logger：
+        # 进程马上要退出，终端上要有人能一眼看见；而日志里要留一条可被告警抓到的
+        # ERROR。只留其中一条都会漏掉一类使用者（人是看终端的，告警是读日志的）。
         print(f"\n[启动失败] {exc}\n")
+        _log.error("启动失败：数据库结构与代码不一致", extra={"reason": str(exc)})
         raise RuntimeError("数据库结构与代码不一致，已中止启动（修法见上方提示）") from None
 
     app.state.seed_info = info
@@ -142,10 +166,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     app.state.chat_limiter = SlidingWindowLimiter(settings.rate_limit_per_minute, 60.0)
     if uses_default_secret():
-        # 只用 print 不用日志框架：这一条要在任何日志配置生效之前就能被看见
-        print(
-            "[security] ⚠ 正在使用仓库内置的默认 JWT 密钥，任何人都能伪造令牌。"
-            "生产部署前请设置 LAB_JWT_SECRET。"
+        # 结构化日志里的一条 WARNING，而不是终端上一行醒目文字：
+        # 这条要能被日志系统上的告警规则抓到（「生产环境出现 uses_default_secret」），
+        # 而"刷在终端里"只有正好看着启动过程的人会看到。
+        _log.warning(
+            "正在使用仓库内置的默认 JWT 密钥，任何人都能伪造令牌。"
+            "生产部署前请设置 LAB_JWT_SECRET。",
+            extra={"event": "uses_default_secret"},
         )
 
     # 后台清扫。挂在 app.state 上而不是模块级单例：每个应用实例一份，
@@ -154,7 +181,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.sweeper = runner
     if settings.sweep_enabled:
         runner.start()
-        print(f"[sweep] 后台清扫已启动，间隔 {runner.interval_seconds}s（关掉：LAB_SWEEP_ENABLED=false）")
+        _log.info(
+            "后台清扫已启动",
+            extra={"interval_seconds": runner.interval_seconds, "event": "sweep_started"},
+        )
 
     try:
         yield
@@ -178,6 +208,98 @@ async def _reject(send: Send, status: int, detail: str) -> None:
         ],
     })
     await send({"type": "http.response.body", "body": body})
+
+
+class RequestContextMiddleware:
+    """给每个请求绑一个 request_id、写一条访问日志、并把 id 回传给调用方（P1-3）。
+
+    **为什么必须是中间件（最外层），而不是在端点里加参数**：
+
+    1. ``BodySizeLimitMiddleware`` 会在**读 body 之前**直接回 413/411，
+       请求根本没进到路由 —— 在端点里绑 id 的话，这些响应没有任何关联 id，
+       而"被边界拦下"恰恰是最需要排查的一类请求。
+    2. 关联 id 要覆盖的不只是一个函数，还有它调用的审计、门禁、模型层。
+       中间件是唯一能保证"整条调用链都在同一个上下文里"的位置。
+
+    **为什么把 id 放进响应头**：出问题时用户/前端能报出这个 id，
+    于是可以从一条日志直接定位到那一次请求的全部记录。
+    没有它就只剩"大概几点钟出的问题"。
+
+    顺序上它由 ``create_app()`` **最后**添加 —— Starlette 的 ``add_middleware``
+    是"后添加的更靠外"，所以这样它才能包住体积校验那层。
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            # lifespan / websocket 不走这里。给它们绑 id 没有意义，
+            # 反而会让"没有请求上下文"这件事变得看不出来。
+            await self.app(scope, receive, send)
+            return
+
+        inbound = {
+            key.decode("latin-1").lower(): value.decode("latin-1")
+            for key, value in scope.get("headers", [])
+        }.get(REQUEST_ID_HEADER.lower())
+        # 客户端给的值**先校验再用**，不合格就自己生成一个（见 obs 模块的说明）
+        request_id = sanitize_request_id(inbound) or new_request_id()
+
+        method = scope.get("method", "GET").upper()
+        # 只记路径，不记 query string：查询串可能带用户输入（甚至参数化的令牌），
+        # 而"哪个接口、多慢、什么结果"这三件事不需要它。
+        path = scope.get("path", "")
+        started = time.perf_counter()
+        outcome: dict[str, Any] = {"status": 500, "failed": False}
+
+        # 形参类型必须是 MutableMapping[str, Any] 而不是 dict：ASGI 的类型约定
+        # 就是 MutableMapping（我们要往 message 里塞 headers，所以要可变），
+        # 写成 dict 会在 mypy 这里报 arg-type —— 是个签名不匹配，不是逻辑错，
+        # 但"签名不匹配"正是这类包装层最容易埋错的地方。
+        async def send_with_id(message: MutableMapping[str, Any]) -> None:
+            if message["type"] == "http.response.start":
+                outcome["status"] = int(message.get("status", 500))
+                headers = list(message.get("headers") or [])
+                headers.append(
+                    (
+                        REQUEST_ID_HEADER.lower().encode("latin-1"),
+                        request_id.encode("latin-1"),
+                    )
+                )
+                message["headers"] = headers
+            await send(message)
+
+        with bind_request_id(request_id):
+            try:
+                await self.app(scope, receive, send_with_id)
+            except Exception:
+                outcome["failed"] = True
+                raise
+            finally:
+                elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+                fields = {
+                    "method": method,
+                    "path": path,
+                    "status": outcome["status"],
+                    "duration_ms": elapsed_ms,
+                    "client": (scope.get("client") or ("", 0))[0],
+                }
+                if outcome["failed"]:
+                    # 异常已经由上层转成 500，这里负责留下"哪个请求炸了"
+                    _log.error("请求处理异常", extra=fields)
+                elif path == HEALTH_PATH:
+                    # 存活探针可能每几秒一次，按 INFO 记会把业务日志冲掉。
+                    # 降成 DEBUG 而不是丢掉：要查探针本身是否正常时仍然拿得到。
+                    _log.debug("探针", extra=fields)
+                else:
+                    _log.info("请求", extra=fields)
+                # ⚠️ 顺序不能反：身份必须在**写完访问日志之后**才清掉，
+                # 否则这条日志就丢了自己的 user_id。清掉的理由见 obs.clear_user_context：
+                # request_id 靠 token 还原，而身份只 set 不还原 ——
+                # 上下文一旦被复用（测试的 ASGI 传输层就是），
+                # 下一条匿名请求的日志就会带着上一条请求的身份。
+                clear_user_context()
 
 
 class BodySizeLimitMiddleware:
@@ -247,6 +369,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 若直接 @app.get，路由会绑死在模块级那一个实例上 ——
     # create_app() 造出来的第二个应用会「一个接口都没有」（曾如此，测试里全是 404）。
     application.include_router(router)
+    # ⚠️ 必须**最后**添加：Starlette 的 add_middleware 是"后添加的更靠外"。
+    # 放最后它才能包住 BodySizeLimitMiddleware ——
+    # 那层会在读 body 之前直接回 413/411，请求根本不进路由，
+    # 而"被边界拦下"恰恰是最需要关联 id 的一类请求。
+    application.add_middleware(RequestContextMiddleware)
     return application
 
 
@@ -272,7 +399,7 @@ async def current_user(
             status_code=401, detail="缺少访问令牌", headers={"WWW-Authenticate": "Bearer"}
         )
     try:
-        return principal_from_token(credentials.credentials)
+        principal = principal_from_token(credentials.credentials)
     except TokenError as exc:
         # 统一文案：不告诉调用方到底是签名错还是过期（少给攻击者一点情报）
         raise HTTPException(
@@ -280,6 +407,11 @@ async def current_user(
             detail="访问令牌无效或已过期",
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
+    # 解出身份就把「这次请求是谁」写进上下文（P1-3）。放在这里而不是各个端点里：
+    # 它是唯一一个所有需要登录的端点都会经过的地方，加一次就到处生效 ——
+    # 包括这条请求后续在审计、门禁、模型层里打的日志，全部自动带上 user_id。
+    bind_user(principal.user_id, principal.username)
+    return principal
 
 
 async def require_admin(user: Principal = Depends(current_user)) -> Principal:
@@ -378,7 +510,7 @@ async def me(user: Principal = Depends(current_user)) -> UserOut:
 # ==========================================================================
 # 健康与元信息
 # ==========================================================================
-@router.get("/api/health")
+@router.get(HEALTH_PATH)
 async def health(request: Request) -> dict:
     settings = get_settings()
     async with session_scope() as session:

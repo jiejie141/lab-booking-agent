@@ -73,6 +73,7 @@ from ..models import (
     LabOccupancy,
     Laboratory,
 )
+from ..obs import current_request_id
 
 # 允许比 valid_from 早多少入场。给迟到/早到留一点余量，
 # 但**绝不**允许超时入场：valid_to 之后凭证即失效，不存在"晚几分钟没事"。
@@ -898,7 +899,14 @@ async def _record(session: AsyncSession, *, event: AccessEvent) -> None:
     刻意不做成"永远不抛异常"（对比 ``audit.record``）：审计丢一条不该影响业务，
     但**通行事件丢一条意味着门开了却没有记录**。这种事必须在事务里一起成败，
     宁可整次核验失败重来，也不要出现"门开了、查不到是谁开的"。
+
+    ``request_id`` 在这里统一补上（P1-3）：``verify_entry`` / ``verify_exit``
+    里有七八处构造 ``AccessEvent`` 的地方，逐处传参必然漏。
+    集中在这一处，门禁流水和审计、和 HTTP 访问日志就共用同一个关联 id，
+    一条 SQL 能把「谁刷的卡」和「哪个请求触发的」对上。
     """
+    if not event.request_id:
+        event.request_id = current_request_id()[:36]
     session.add(event)
 
 

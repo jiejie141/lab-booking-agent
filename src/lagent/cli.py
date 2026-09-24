@@ -529,6 +529,20 @@ async def _migrate(revision: str, *, down: bool = False) -> int:
     else:
         print(f"  结果            : {before or '空库'} → {after}")
 
+    if down:
+        # 回退之后结构**本来就该**和代码不一致 —— 这正是「回退」的定义。
+        # 早先这里不分方向地跑结构校验，于是回退一条正常命令会打印
+        # 「⚠ 迁移已执行，但结构仍与代码不一致」并抛错退出，
+        # 把一次有意的回退报成了故障。
+        drift = await schema_drift()
+        print(f"  结构校验        : 有意回退，与代码不一致（{len(drift)} 处，属预期）")
+        for item in drift[:5]:
+            print(f"      · {item}")
+        if len(drift) > 5:
+            print(f"      · …另 {len(drift) - 5} 处")
+        print("    要回到一致：python main.py migrate")
+        return 0
+
     drift = await schema_drift()
     if drift:
         print("  ⚠ 迁移已执行，但结构仍与代码不一致：")

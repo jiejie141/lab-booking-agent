@@ -40,7 +40,8 @@
 | 功能升级 · Agent Harness + 真 function calling | ✅ 已完成 | `ff747ff` | 抽出 `harness/`（工具注册表 / 上下文预算 / span / ReAct 循环，**不 import 任何业务模块**，用 AST 静态检查钉住边界）；新增 `deterministic` / `react` 双执行模式；写操作带 `side_effect` 护栏 |
 | 功能升级 · 人员准入（门禁） | ✅ 已完成 | `208f074` | 需求是"每个人进实验室都必须提前预约，没预约的进不去"。独立成 `domain/access.py`（房间容量与设备时段是两类不同不变式）；4 张新表 + 3 个接口；`access-demo` **8/8**；`tests/test_access.py` 49 项；冒烟新增 [9] 门禁边界 **11/11**。**顺带修掉两个被自己的演示/冒烟戳出来的真漏洞**（未对齐窗口的尾巴不受容量保护；`now±1h` 跨午夜导致凭证被判过期） |
 | P1-1 · Alembic 数据库迁移 | ✅ 已完成 | `ba58381` | `create_all` 退役：结构变更只走 `migrations/versions/`。`0001` 覆盖全部 10 张表（含 3 条部分唯一索引的 `WHERE` 子句，已人工复核）；`ensure_schema()` 改为「迁移到 head + 校验结构与模型一致」；老库分两种命运（结构一致→`stamp head` 接管、不一致→明确报错要求重建）；新增 `python main.py migrate`；`tests/test_migrations.py` **20 项**，核心断言是「迁移产物 vs 模型 diff 为空」。实测：443 passed / ruff 与 mypy 均干净 / 冒烟 70/70 |
-| P1-2 · 过期清扫后台任务 | ✅ 已完成 | 本次 | `src/lagent/sweep.py`：三个可插拔任务（过期预约收尾 / 凭证超时与关门收尾 / 审计与流水归档）+ 进程内循环（lifespan 起停，间隔可配）。**四条硬约束**：门禁正确性不依赖清扫（`verify_entry` 自己判过期）、状态切换一律「带条件的 UPDATE + rowcount」、归档先落盘后删除（失败一行不删）、每项任务异常隔离。顺带补齐 `expire_stale_permits` 的往日遗留分支。新增 `python main.py sweep`、`scripts/sweep_demo.py`（**18/18**）、`tests/test_sweep.py` **32 项**。实测：477 passed / ruff 与 mypy 均干净 / 冒烟 70/70 |
+| P1-2 · 过期清扫后台任务 | ✅ 已完成 | `f3a9f0c` | `src/lagent/sweep.py`：三个可插拔任务（过期预约收尾 / 凭证超时与关门收尾 / 审计与流水归档）+ 进程内循环（lifespan 起停，间隔可配）。**四条硬约束**：门禁正确性不依赖清扫（`verify_entry` 自己判过期）、状态切换一律「带条件的 UPDATE + rowcount」、归档先落盘后删除（失败一行不删）、每项任务异常隔离。顺带补齐 `expire_stale_permits` 的往日遗留分支。新增 `python main.py sweep`、`scripts/sweep_demo.py`（**18/18**）、`tests/test_sweep.py` **32 项**。实测：477 passed / ruff 与 mypy 均干净 / 冒烟 70/70 |
+| P1-3 · 结构化日志与请求关联 | ✅ 已完成 | 本次 | `src/lagent/obs.py`：一行一个 JSON + **`request_id` 贯穿访问日志 / 审计表 / 门禁流水**。关联 id 用 `ContextVar` 而不是 `thread_local`（async 下一个线程跑成百上千协程，thread_local 会让并发请求串味）；入站 `X-Request-Id` 是**不可信输入**，按字符白名单 + 长度上限**丢弃**而不是清洗（否则 `X-Request-Id: abc\n{"level":"ERROR",…}` 能伪造告警）；中间件挂在**最外层**，所以被 413/411 挡下的请求也有关联 id。迁移 `0002` 给 `audit_logs` / `access_events` 加 `request_id` 列（空串而非 NULL）与索引。新增 `tests/test_obs.py` **75 项**、`tests/test_migrations.py` 新增 **3 项**（专门测「给**有数据的表**加列」，这是 `0001` 从空库生成时证明不了的那件事）。实测：555 passed / ruff 与 mypy 均干净 / 冒烟 70/70，并在**真实 uvicorn 进程**上核对过日志与 id |
 
 ### 与原方案的差异（为什么没照抄）
 
@@ -95,7 +96,7 @@ mypy src                             Success: no issues found in 33 source files
 （`mypy` 的"42 → 33 个文件"不是代码变少：前者是 `mypy` 不带参数（按 pyproject 配置扫全仓，
 含 `scripts/`），后者是显式只扫 `src`。口径不同，别当成删了文件。）
 
-### 当前实测（P1-2 · 后台清扫）
+### 快照（P1-2 · 后台清扫）
 
 ```
 pytest                               477 passed
@@ -124,6 +125,51 @@ mypy                                 Success: no issues found in 60 source files
 * **同一个口径问题在 P1-2 又犯了一次**：这次是 `ruff check src tests` 漏掉了
   `migrations/env.py` 的 `E402` —— CI 跑 `ruff check .` 会拦，本地却看不到。
   **"我检查过了"和"CI 会拦什么"是两个不同的命题**，必须按 CI 的命令跑。
+
+### 当前实测（P1-3 · 结构化日志与请求关联）
+
+```
+pytest                               555 passed（新增 test_obs 75 项 + 迁移 3 项）
+python main.py eval                  14/14（mock 模型）
+python main.py access-demo           8/8 场景
+python main.py migrate               0001 → 0002，结构校验与代码一致
+python main.py migrate --revision 0001 --down
+                                     0002 → 0001，报「有意回退，与代码不一致（2 处，属预期）」
+python main.py sweep                 3/3 项完成
+python main.py loadtest -c 40 -r 3   3 轮 × 40 并发，每轮恰好 1 成功
+python scripts/overlap_race.py       3/3
+python scripts/sweep_demo.py         18/18（真实 SQLite 文件上的清扫端到端）
+python scripts/smoke_http.py         70/70（真实 uvicorn 进程，12 节）
+ruff check .                         All checks passed
+mypy                                 Success: no issues found in 63 source files
+```
+
+**P1-3 这一轮刻意补了一次"在真实数据上验证"**，因为 `0002` 是仓库里第一条
+**给已经有数据的表加列**的迁移 —— 而 `0001` 是从空库 autogenerate 出来的，
+空表上加列**永远不会失败**，它证明不了任何事。所以除了自动化的 pytest，
+还在真实开发库（`lab_booking.db`）上走了一遍：
+
+1. `main.py migrate` → `0001 → 0002`，结构校验通过；
+2. 通过**真实 HTTP 链路**登录两次，产下 2 行带 `request_id` 的审计行 ——
+   库里存的值与响应头 `X-Request-Id` 逐字相同（`f1caf6e786b50704` / `eac830445170278c`）；
+3. `main.py migrate --revision 0001 --down` → 列消失、**2 行数据一行没少**；
+4. `main.py migrate` 升回 head → 数据仍在、老行的 `request_id` 是**空串而不是 NULL**、
+   两条索引都建了出来、结构校验与代码一致。
+
+另外在**真实 uvicorn 进程**（不是测试进程）上核对过日志形态：
+`alembic.runtime.migration` 那几行也是 JSON（因为接管的是根 logger，
+不是只配 `lagent`），登录那条访问日志的 `request_id` 与响应头一致，
+`/api/auth/me` 那条带着 `"user_id": 1, "user": "张伟"`，
+而健康探针**没有**出现在 INFO 日志里（被降到 DEBUG）。
+
+> 顺带一个真实环境里才看得见的坑：本机沙箱开着 `HTTP_PROXY`，
+> httpx 默认会走代理，而代理转发的是**绝对形式**的请求目标
+> （`POST http://127.0.0.1:51999/api/auth/login HTTP/1.1`）——
+> uvicorn 不把 scheme+authority 从 `path` 里剥掉，于是路由匹配失败返回 404，
+> 而访问日志里忠实地记下了那条完整的 URL `path`。
+> 这不是服务的问题（`trust_env=False` 直连就一切正常），
+> 但它恰好说明"日志里记的是这次请求**真实的** path"是有用的 ——
+> 换成自由文本"请求失败"，你根本看不出请求目标长什么样。
 
 ### 仍然没做的（明确列出，不含糊）
 
@@ -154,7 +200,7 @@ mypy                                 Success: no issues found in 60 source files
 | 模型访问 | httpx 直连 OpenAI 兼容 | 0.28.1 | ✅ 主流（有取舍） | 不引 `langchain-openai`，少一层黑盒，可解释性更强 |
 | 检索 | 手写 BM25 + 可选 Chroma + RRF | — | ⚠️ 部分主流 | RRF 融合是主流做法；手写 BM25 是**刻意零依赖**，属设计决策 |
 | 前端 | 单文件原生 HTML/CSS/JS | — | ❌ 非主流 | 刻意的零构建；企业级必须替换（见 §3-P1） |
-| 测试 | pytest + pytest-asyncio | 9.1.1 / 1.4.0 | ✅ 主流 | 477 条用例，含并发、迁移、清扫与回归 |
+| 测试 | pytest + pytest-asyncio | 9.1.1 / 1.4.0 | ✅ 主流 | 555 条用例，含并发、迁移、清扫、日志关联与回归 |
 | 容器 | Dockerfile + compose | — | ✅ 主流 | 但**未实机验证**（沙箱限制） |
 
 ### 1.2 缺位的部分（这才是「不完整」的真正含义）
@@ -265,6 +311,12 @@ python scripts/overlap_race.py
 自研 trace 解决的是「这一次对话走了哪些节点」，解决不了：
 无结构化日志（无法按 request_id 串起来）、无指标（不知道 p95、错误率、QPS）、
 无追踪（跨服务断链）、无告警。出问题只能靠翻 stdout。
+
+> **「无结构化日志」这一格已由 P1-3 补上**（评估基准时确实是空的）：
+> 一行一个 JSON、`request_id` 贯穿访问日志 / 审计表 / 门禁流水、
+> 入站 `X-Request-Id` 按白名单校验、响应头回传、探针降级到 DEBUG。
+> **仍然缺的是指标那一格**（p95 / 错误率 / QPS / 限流拒绝数），
+> 这一格排在 P1-4（`/metrics`），本文件不把它算作已完成。
 
 ### 2.5 【中·数据生命周期】没有迁移能力与治理
 
@@ -478,7 +530,7 @@ P0 不装任何新中间件就能做完——它全是「把已有的说法补�
 
 | 状态 | 可以写的内容 | 追问风险 |
 |---|---|---|
-| ✅ **现在就能写** | 多约束协商算法（阶梯放宽 + 接近度打分 + 多样性截断）、结构化拒绝原因、RRF 融合检索、模型不可用降级、**数据生命周期（过期清扫 / 归档先落盘后删除 / 幂等多副本安全）**、477 条测试（含 20 项数据库迁移、32 项后台清扫）、14 条评测集 | 低。都能指到具体代码 |
+| ✅ **现在就能写** | 多约束协商算法（阶梯放宽 + 接近度打分 + 多样性截断）、结构化拒绝原因、RRF 融合检索、模型不可用降级、**数据生命周期（过期清扫 / 归档先落盘后删除 / 幂等多副本安全）**、**可观测性（JSON 日志 + request_id 贯穿访问日志/审计/门禁，入站 id 按白名单校验）**、555 条测试（含 23 项数据库迁移、32 项后台清扫、75 项日志与请求关联）、14 条评测集 | 低。都能指到具体代码 |
 | ⚠️ **有前提地写** | 「并发安全由 DB 唯一索引兜底」→ 必须限定为**同一开始时间**，或补一句「正在加固为区间级约束」 | **高**。不限定就等着被 `overlap_race.py` 打脸 |
 | ⚠️ | 「评测准确率 100%」→ **必须标注是 mock/model 确定性链路，非真实模型** | 高。不标注就是虚报 |
 | 🔜 **做完 P0 后可写** | 区间级不变式下沉（排除重叠的唯一约束 / 时段占用表）、JWT + RBAC、审计日志、越权防护 | 中。能讲清设计取舍即可 |
@@ -495,11 +547,25 @@ P0 不装任何新中间件就能做完——它全是「把已有的说法补�
 python scripts/overlap_race.py        # §2.1 超卖复现（P0-1 修复前 1/3，修复后 3/3 全绿）
 python main.py loadtest -c 40 -r 3    # 同开始时间对照组（每轮恰好 1 成功）
 python main.py eval                   # 14/14（mock 模型，仅证明链路自洽）
-pytest                                # 322 passed（评估当时的数字；当前 477）
+pytest                                # 322 passed（评估当时的数字；当前 555）
 grep -n "user_id" src/lagent/schemas.py src/lagent/api.py   # §2.2 身份来自请求体
 
 # P1 落地后新增的复现命令
 python main.py migrate                # §2.5 迁移能力（P1-1）
 python main.py sweep                  # §2.5 保留策略（P1-2）
 python scripts/sweep_demo.py          # §2.5 清扫端到端 18/18（P1-2）
+pytest tests/test_obs.py -v           # §2.4 日志与请求关联 75 项（P1-3）
+pytest tests/test_migrations.py -v    # §2.5 含「给有数据的表加列」3 项（P1-3）
+LAB_LOG_FORMAT=text python main.py doctor   # §2.4 人读格式（默认是 JSON）
 ```
+
+顺手记一条：**`pytest` 的用例数只能靠 `--collect-only` 求和**，
+本项目 `pyproject.toml` 里 `addopts = "-q"` 把末尾的 `N passed` 摘要行也吞掉了，
+直接看输出只会看到进度点。数数用
+
+```bash
+pytest --collect-only -q | grep "^tests/" | awk -F': ' '{s+=$2} END{print s}'
+```
+
+（不写这条的话，很容易顺手把上一轮的旧数字抄进文档 —— 而文档里的数字一旦开始
+和实际对不上，整份文档的可信度就没了。）

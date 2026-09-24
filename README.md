@@ -110,7 +110,7 @@ python main.py migrate --revision base --down  # 回滚到空库（只留版本�
 
 ---
 
-## 七个真正花时间的地方
+## 八个真正花时间的地方
 
 ### 1. 并发抢同一时段：把不变式压到数据库层（含一次自我推翻）
 
@@ -530,6 +530,137 @@ $ python main.py doctor            # 顺带打印待清扫积压
 
 ---
 
+### 8. 可观测性：让「一条日志串不起一次请求」这件事不再成立
+
+前面七件都在解决「功能对不对」。这一件解决的是**量上来之后还查不查得动** ——
+它的价值不体现在任何一个功能上，而体现在出问题的那十分钟里。
+
+原来排障的唯一手段是 `print` 出来的自由文本。那套东西在单机演示没问题，
+但它有三个硬伤，而且都是**量一大就暴露**：
+
+1. **一行日志串不起一条链路。** 一次 `/api/agent/chat` 会写审计、可能写门禁流水、
+   可能触发下单。出问题时你想问的是「**这一个请求**到底发生了什么」，
+   而自由文本里只有一堆互不相干的句子，没有任何共同字段能把它们挑出来。
+2. **没有机器可读的字段。** 「最近 5 分钟 5xx 有多少」对着 `print` 只能靠正则，
+   而且每改一次日志文案就要改一次正则。
+3. **没有耗时。** 慢请求不会自己喊出来，你只知道"有时候慢"。
+
+所以做了两件事：**日志变成一行一个 JSON**，**每个请求有一个 `request_id` 贯穿全链路**。
+
+```
+{"ts": "2026-09-24T20:13:55.657", "level": "INFO", "logger": "lagent.api", "msg": "请求",
+ "request_id": "199faa91e6da7e41", "method": "POST", "path": "/api/auth/login",
+ "status": 200, "duration_ms": 14.3, "client": "127.0.0.1"}
+{"ts": "2026-09-24T20:13:55.661", "level": "INFO", "logger": "lagent.api", "msg": "请求",
+ "request_id": "ada55056609b3322", "user_id": 1, "user": "张伟", "method": "GET",
+ "path": "/api/auth/me", "status": 200, "duration_ms": 2.6, "client": "127.0.0.1"}
+```
+
+这是**真实 uvicorn 进程**的输出（不是测试进程），`request_id` 与响应头
+`X-Request-Id` 逐字相同 —— 用户报一个 id，就能把这次请求做过的事全捞出来：
+
+```sql
+-- 「这一个请求写了什么审计」——排障时最常用的一次查询
+select * from audit_logs   where request_id = 'ada55056609b3322';
+-- 「这一次刷卡是哪个请求触发的」——跨表对上人
+select * from access_events where request_id = 'ada55056609b3322';
+```
+
+#### 四个刻意的选择，以及不这么做会怎样
+
+**① `ContextVar`，不是 `threading.local`。**
+`thread_local` 假设「一个线程只服务一个请求」—— 这在 async 服务里是**错的**：
+一个事件循环线程上并发跑着成百上千个协程，thread_local 会让同线程的请求
+互相读到对方的 `request_id`。`ContextVar` 跟着**执行上下文**走，
+`asyncio` 建 Task 时会复制当前上下文，所以 `await` 链上的任何一层、
+`create_task` 起来的子任务都能读到同一个值 —— 这正是「贯穿」的含义。
+
+代价也写清楚：**`ContextVar` 不会自动跨线程**。`asyncio.to_thread()`
+里读不到调用方的 id（本项目用它跑 alembic 迁移，那条路径本来就没有请求上下文）。
+
+**② 身份用完必须清掉（这一条是**先踩到、后补测试**的）。**
+`request_id` 靠 `ContextVar` 的 token 还原，而身份是认证依赖 `set` 进去的 ——
+依赖没法表达「请求结束」这个时点，所以它只 set 不还原。
+只要上下文被复用，上一条请求的身份就会漏给下一条**匿名**请求的日志。
+
+它比「没有 user_id」更坏：没有字段只说明查不到是谁，
+而一个**错的** user_id 会让人得出「某个已登录用户在打健康探针」这种完全错误的结论，
+把排查方向直接带偏。所以中间件在**写完访问日志之后**显式清一次
+（顺序不能反，否则这条日志就丢了自己的 `user_id`）：
+
+```python
+finally:
+    if outcome["failed"]:
+        _log.error("请求处理异常", extra=fields)
+    elif path == HEALTH_PATH:
+        _log.debug("探针", extra=fields)
+    else:
+        _log.info("请求", extra=fields)
+    clear_user_context()      # ← 必须在写完日志之后
+```
+
+**③ 客户端给的 `request_id` 是**不可信输入**，按白名单丢弃而不是清洗。**
+`X-Request-Id` 由调用方提供，用来把我们这条日志和网关的日志对上。
+但它同时是一条**日志注入**通道：
+
+```
+X-Request-Id: abc\n{"level":"ERROR","msg":"磁盘满了"}
+```
+
+原样写进日志，攻击者就能伪造出一条 ERROR —— 把 JSON 日志当数据源做告警的系统
+直接被打穿。这里只放行 `[A-Za-z0-9._-]` 且长度 ≤ 36，不合格就**换一个新的**，
+而不是「把 `\n` 换成 `_` 接着用」：要保证覆盖所有注入手法等于要穷举所有编码怪癖，
+白名单反过来只允许我们认识的东西，绕过面小得多。
+
+**④ 中间件挂在最外层 —— 这一条钉的是「添加顺序」。**
+`BodySizeLimitMiddleware` 会在**读 body 之前**直接回 413/411，请求根本没进路由。
+在端点里绑 id 的话，这些响应一个关联 id 都没有 ——
+而「被边界拦下」恰恰是最需要排查的一类请求。
+
+Starlette 的 `add_middleware` 是「**后添加的更靠外**」，所以
+`RequestContextMiddleware` 必须**最后**添加才能包住体积校验：
+
+```python
+application.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_body_bytes)
+...
+application.add_middleware(RequestContextMiddleware)   # ⚠️ 必须最后：它要包住上面那层
+```
+
+这个顺序错了不会报错，只会**静默失效**。所以 `tests/test_obs.py` 里专门有一条
+「413 也必须有 `X-Request-Id`」，就是钉这个的。
+
+#### 顺手拿到的两件事
+
+* **探针降级到 DEBUG。** 存活检查可能每几秒一次，按 INFO 记会把业务日志冲掉。
+  降级而不是丢掉：要查探针本身是否正常时仍然拿得到。
+  对照一下：清扫任务在空闲轮次**什么都不打印**（见 §7），
+  同样是「别让正常的事情把日志刷满」，两处用了不同手法，因为一处有固定频率、一处没有。
+* **第三方库的日志也进了同一套格式。** 接管的是**根** logger 而不是只配 `lagent` ——
+  否则你会得到「一半 JSON、一半自由文本」的日志流，而解析器遇到第一行非 JSON 就放弃了。
+  uvicorn / httpx / aiosqlite 那些按请求打一行的库被单独降到 WARNING
+  （**不是** CRITICAL：它们的 WARNING 有诊断价值）。
+
+#### 迁移 `0002`：仓库里第一条「给已经有数据的表加列」
+
+`0001` 是从空库 autogenerate 出来的，而**空表上加列永远不会失败** ——
+它证明不了任何事。真正会出事的是三件事凑一起：表里已经有行、
+新列是 `NOT NULL`、同时还要建索引。
+
+所以除了自动化的 `tests/test_migrations.py`（新增 3 项），
+还在**真实开发库**上走了一遍：
+
+```bash
+$ python main.py migrate                        # 0001 → 0002，结构校验与代码一致
+$ python main.py migrate --revision 0001 --down  # 列消失，2 行数据一行没少
+$ python main.py migrate                        # 数据仍在，老行的 request_id 是空串（不是 NULL）
+```
+
+`request_id` 用**空串**而不是 NULL 是个刻意的选择：空串是「没有请求上下文」的
+确定表示，而 NULL 会让 `WHERE request_id = ''` 查不到这些行 ——
+于是清扫任务和 CLI 写的审计会在按 id 检索时凭空消失。
+
+---
+
 ## 边界加固
 
 | 项 | 做法 | 为什么这么做 |
@@ -565,7 +696,7 @@ $ python main.py doctor            # 顺带打印待清扫积压
 ```
                     ┌──────────────────────────────────────────────┐
    HTTP / 控制台 ───▶│ FastAPI (api.py)                             │
-                    │  BodySizeLimit ▸ CORS ▸ 认证 ▸ 限流 ▸ 路由    │
+                    │  RequestCtx ▸ BodySize ▸ CORS ▸ 认证 ▸ 限流  │
                     │  ├─ /api/auth/*  登录 / 身份                 │
                     │  └─ current_user / require_admin / chat_quota│
                     └────────────────┬─────────────────────────────┘
@@ -609,16 +740,22 @@ $ python main.py doctor            # 顺带打印待清扫积压
 | `src/lagent/domain/` | 纯业务：约束判定、找空闲窗口、协商阶梯、并发安全下单、`access.py` 人员准入 |
 | `src/lagent/agent/` | 编排：LangGraph 图、工具定义、Mock/真实模型客户端、会话状态 |
 | `src/lagent/security.py` | 认证原语：scrypt 口令哈希 + HS256 JWT + RBAC 判定（零依赖） |
+| `src/lagent/obs.py` | **可观测性**：JSON 单行日志、`request_id` 的 `ContextVar` 传递、入站 id 白名单校验（见 §8） |
 | `src/lagent/audit.py` | 审计写入（独立事务）与读取 |
 | `src/lagent/ratelimit.py` | 进程内滑动窗口限流 |
 | `src/lagent/sweep.py` | **后台清扫**：过期预约 / 凭证超时与关门收尾 / 审计与流水归档（三个可插拔任务 + 循环，见 §7） |
 | `src/lagent/api.py` | HTTP 层（15 个 API + 1 个页面），`create_app()` 工厂 + APIRouter |
 | `src/lagent/web/index.html` | 控制台：**零依赖单文件**，登录闸门 + 深浅色主题 |
-| `migrations/` + `alembic.ini` | 数据库迁移：**结构变更唯一被允许的入口**（`0001` 覆盖全部 10 张表），说明见 `migrations/README.md` |
+| `migrations/` + `alembic.ini` | 数据库迁移：**结构变更唯一被允许的入口**（`0001` 建全部 10 张表、`0002` 加 `request_id`），说明见 `migrations/README.md` |
 
 关键的边界：**模型不决定事实，也不决定权限**。资质够不够、时段有没有冲突、
 谁能看什么，全部由代码判定；模型只负责把中文需求抽成槽位、把结构化事实写成人话。
 所以模型换代、甚至挂掉，业务结论都不会变 —— 挂掉时降级为「引导式表单」。
+
+中间件的顺序同样是一条边界：`RequestContextMiddleware` **必须最后添加**
+（Starlette 里"后添加的更靠外"），否则被体积校验挡下的 413/411
+一个关联 id 都没有。这个顺序错了不会报错，只会静默失效 ——
+所以有一条用例专门钉它（§8）。
 
 ---
 
@@ -723,6 +860,19 @@ react ──模型故障 / 步数耗尽 / 不按格式回──▶ deterministic
 | 三个用例是**假绿**，改数据/改断言口径后才暴露 | ① 按日期断言"还剩几条"，撞上了种子数据里同一天的预约；② 拿 `last_results` 去比两轮累计量，只在"每轮处理量相同"时成立；③ 归档失败用例没有"可归档内容"，任务在查库那步就空手返回、**根本走不到写文件** | 断言按 **id** 收口；累计量逐轮相加；失败用例必须先把待处理数据造出来。**"用例通过"不是证据，"这条用例能失败"才是** |
 | 归档用例断言"库里只剩未超期的那条"失败，多出来一行 `actor_name=''` | 那行是清扫**自己**写的归档汇总审计 —— 我自己的断言把自己的审计算成了"没清干净的残留" | 断言前先用 `action` 过滤。**副作用会混进你自己的断言里**，尤其是审计这种"谁都会写一行"的表 |
 
+### P1-3（结构化日志）期间新踩的
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| 一条**完全匿名**的健康探针请求，访问日志里却带着 `user_id: 7` | `request_id` 靠 `ContextVar` 的 token 还原，而身份（`bind_user`）是认证依赖 `set` 进去的 —— 依赖没法表达"请求结束"，于是只 set 不还原。**上下文一被复用，身份就串到下一条请求上** | 中间件在**写完访问日志之后**显式 `clear_user_context()`（顺序反了这条日志就丢自己的 `user_id`）。并补一条回归用例专门钉它。**这不是"测试环境特有的"**：uvicorn 每条请求起一个新 task 所以不复用，而测试用的 ASGI 传输层就是复用的 —— **不能把正确性寄托在运行环境不复用上下文上** |
+| 同一组用例在"整文件跑"时红、单跑又绿 | 我自己的 `TestBindUser` 直接 `set` 全局 `ContextVar` 却不清理，那个值漏给了后面的用例。症状看起来像被测代码漏 id | 本文件加一条 autouse fixture，每个用例前后清空。**这兜的是"测试自己写进全局状态"的那一半**（请求链路上的那半由中间件兜住，有独立用例）。跨用例共享的可变状态就是不确定性，哪怕只在特定执行顺序下发作 |
+| 断言访问日志带 `user_id`，报 `KeyError: 'user'` —— 看着像"认证依赖没生效" | `as_user("李娜")` 会**先打一次登录请求**，它同样是"请求"级日志。按 `msg` 取第一条拿到的是登录，而登录端点的依赖链上根本没有 `bind_user` | 按 **path** 找那条日志（`find_request(path="/api/auth/me")`），并把登录挪到捕获之外。**"第一条匹配"这种取法在有多条同类记录时就是在赌顺序** |
+| 想测「服务端挡住了 `\n` 注入」，跑出来却是 httpx 报 `LocalProtocolError` | httpx 在**客户端**就拒绝带换行的头。于是这条用例测到的是"httpx 不让我发"，而不是"我的服务挡住了" | 手工构造 ASGI `scope` 直接驱动应用（`_asgi_request`）。**一个规规矩矩的 HTTP 客户端没法扮演攻击者**，验注入必须绕开客户端校验 |
+| 构造注入头时测试自己先抛 `UnicodeEncodeError: 'latin-1' codec can't encode` | 载荷里有中文，而我按 latin-1 编码头值（ASGI 的常规写法） | 头值按 **UTF-8** 编码成字节。服务端按 latin-1 逐字节还原，非 ASCII 字节正好落在字符白名单之外被丢弃 —— 这才是真实链路上的行为 |
+| ruff 报 `I001 Import block is un-sorted` | 把 `from ..obs import current_request_id` 插到了 `from ..models import (...)` 前面，字典序被破坏 | 按 CI 的命令（`ruff check .`）重跑才看见。**上一轮刚记下"本地命令必须与 CI 逐字相同"，这一轮就靠它抓到了** —— 记下来的教训要真的用 |
+| `mypy` 报 `send_with_id` 的 arg-type 不匹配 | ASGI 对 `send` 的类型约定是 `MutableMapping[str, Any]`（要能塞 headers），我写成了 `dict` | 形参改 `MutableMapping[str, Any]`。签名不匹配不是逻辑错，但**包装层的签名不匹配正是最容易埋错的地方** |
+| 只有在真实 uvicorn 进程里才看得见：`alembic.runtime.migration` 的日志也变成了 JSON | 这其实是**设计生效的证据** —— 接管的是根 logger，所以第三方库的日志一起进了同一套格式。但它同时在提醒：只配 `lagent` 会得到"一半 JSON、一半自由文本"的日志流 | 保留该行为，并把它写进实测记录。**测试进程里看不到的东西，只能靠真实进程来确认** |
+
 ### P1-1（数据库迁移）期间新踩的
 
 | 现象 | 根因 | 修法 |
@@ -738,11 +888,11 @@ react ──模型故障 / 步数耗尽 / 不按格式回──▶ deterministic
 ## 验证
 
 ```bash
-pytest                          # 477 passed
+pytest                          # 555 passed
 python main.py eval             # 14/14（mock 模型）
 python main.py loadtest -c 40 -r 3
 python main.py access-demo      # 8/8（人员准入：未预约拦截 / 单次核销 / 容量）
-python main.py migrate          # 0001 (head)，结构校验与代码一致
+python main.py migrate          # 0001 → 0002，结构校验与代码一致
 python main.py sweep            # 3/3 项完成
 python scripts/overlap_race.py  # 3/3
 python scripts/sweep_demo.py    # 18/18（真实 SQLite 文件上的清扫端到端）
@@ -750,13 +900,14 @@ python scripts/smoke_http.py    # 70/70（真实 uvicorn 进程，含 react 模�
 ```
 
 ```
-pytest:            477 passed
+pytest:            555 passed
 评测报告:           意图准确率 100.0% · 槽位准确率 100.0% · 端到端通过率 100.0%（14/14）
 并发压测:           3 轮 × 40 并发，每轮恰好 1 成功
 区间重叠竞态:        3/3 未超卖
 人员准入:           8/8（含 2 人并发抢容量 1 的房间，恰好 1 人放行）
 后台清扫:           18/18（忘刷出场被解开 / 过期预约释放占用格 / 归档先落盘后删除）
-数据库迁移:         18 项（迁移产物 vs 模型 diff 为空 / 部分索引 WHERE 未丢 / 回滚可往返 / 老库接管）
+日志与请求关联:      75 项（JSON 单行 / id 跨审计与门禁贯穿 / 注入被丢弃 / 413 也带 id / 身份不串味）
+数据库迁移:         23 项（产物 vs 模型 diff 为空 / 部分索引 WHERE 未丢 / 回滚可往返 / 老库接管 / **给有数据的表加列**）
 HTTP 越权清单:       70/70（含 deterministic / react / degraded / 端点不可达四种启动配置）
 ```
 
@@ -764,7 +915,7 @@ HTTP 越权清单:       70/70（含 deterministic / react / degraded / 端点�
 
 ```bash
 ruff check .   # All checks passed!
-mypy           # Success: no issues found in 60 source files
+mypy           # Success: no issues found in 63 source files
 ```
 
 覆盖范围：意图分类、中文时间解析（「下午两点到四点」的时段继承）、六道约束判定、
@@ -773,7 +924,8 @@ mypy           # Success: no issues found in 60 source files
 **请求体上限/CORS/限流/输入白名单**、**审计留痕与事务独立性**、数据库隔离、
 **harness 分层边界（AST 静态检查）/工具注册与副作用护栏/上下文裁剪优先级/span 埋点**、
 **ReAct 循环收敛与降级**、**人员准入（资质有效期/单次核销/人卡一致/容量不变式）**、
-**后台清扫（幂等 / 失败隔离 / 归档不丢数据 / 清扫不是安全依赖 / lifespan 接线）**。
+**后台清扫（幂等 / 失败隔离 / 归档不丢数据 / 清扫不是安全依赖 / lifespan 接线）**、
+**结构化日志与请求关联（id 跨访问日志/审计/门禁贯穿 / 入站 id 白名单 / 边界拒绝也带 id / 身份不串味）**。
 
 > **关于这组数字要说实话**：默认 `LAB_APP_MODE=mock`，跑的是确定性假模型 ——
 > 它验证的是**代码链路自洽**（槽位抽取规则、约束判定、协商、下单、渲染都对），
@@ -831,9 +983,34 @@ docker compose up --build
   与「模型定义」，diff 必须为空（含列类型变更，`compare_type=True`）。
   这个断言的失效模式值得记住：**它一红，其余测试的通过就都不可信了**，
   因为功能测试只会走到它用到的那几列。
-- **迁移没有做「生产回归演练」**：`0001` 是从空库一次性建起的初始 revision，
-  真正的考验是第二条 revision（`ALTER TABLE`）。SQLite 已经配好 batch 模式，
-  但没有真实数据量的演练，这一点尚未验证。
+- **迁移已在真实数据上演练过一次，但只有一次**：`0002`（给 `audit_logs` /
+  `access_events` 加 `request_id` 列 + 索引）是对**已经有行**的表做的 `ALTER TABLE`，
+  并在真实开发库上验证了「加列 → 回退 → 再升级」的往返不丢数据
+  （`tests/test_migrations.py` 里也有对应的 3 项自动化用例）。
+  但这是**一个几百行量级的库**：真正的考验是「大表上 `batch_alter_table`
+  要重建整张表」这件事的**耗时与锁**，也就是停机窗口。SQLite 已经配好 batch 模式，
+  但没有在真实数据量下测过耗时 —— 换 PostgreSQL 时这条要重新评估
+  （PG 的 `ALTER TABLE ADD COLUMN` 是元数据操作，不会像 SQLite 那样重建表）。
+- **日志没有轮转、没有采样、没有投递**：写到 stderr，由容器/进程管理器负责收集。
+  单机能跑不代表能长期跑 —— 高频访问日志会持续增长，
+  生产形态应当配上轮转、按级别分流、以及把归档日志送进集中式日志系统。
+  这也意味着**日志里的 `request_id` 只在单机范围内有意义**：
+  跨服务串联（比如门禁机 → 后端 → 模型服务）需要 OpenTelemetry 那一套，
+  本项目没有做，也没有假装做了。
+- **`ContextVar` 不跨线程**：`asyncio.to_thread()` 里读不到调用方的 `request_id`
+  （本项目用它跑 alembic 迁移，那条路径本来就没有请求上下文）。
+  真要带过去得用 `contextvars.copy_context().run(...)`。
+  同理，**同步端点（`def` 而不是 `async def`）会被 FastAPI 丢进线程池**，
+  那里的 `set` 回不到中间件，访问日志里就会少一个 `user_id`。
+  本项目所有端点都是 `async def`，所以成立 ——
+  这一点由 `tests/test_obs.py` 里那条"访问日志带 user_id"的用例钉着。
+- **只有日志，没有指标**：`request_id` 能回答「这一次请求发生了什么」，
+  但回答不了「最近 5 分钟 p95 是多少 / 错误率涨了没 / 限流拒了多少次」——
+  前者要的是单条链路的细节，后者要的是**跨请求的聚合**，
+  靠日志是算不出来的（或者说只能事后离线算）。`/metrics` 是 P1-4 的事，目前没做。
+- **刻意不记请求体与查询串**：只记 `method` / `path` / `status` / `duration_ms` / `client`。
+  查询串可能带用户输入甚至参数化的令牌，而"哪个接口、多慢、什么结果"这三件事不需要它。
+  代价是「这次请求传了什么参数」查不到，需要时得靠审计表里那条业务记录。
 - **上下文预算是估算，不是精确分词**：按 CJK 1 token / 其余 4 字符 1 token 折算，
   偏保守（宁可多裁）。不引 tiktoken 是为了避免一个带本地二进制资源的重依赖，
   且不同模型编码并不一致。要精确请按目标模型换 tokenizer。
