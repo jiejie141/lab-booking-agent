@@ -632,15 +632,28 @@ class TestRunner:
         await runner.stop()
         assert not runner.running
 
-    async def test_default_tasks_cover_all_three_concerns(self):
-        """默认任务集要覆盖三件事，别在重构里悄悄少掉一项。"""
+    async def test_default_tasks_cover_all_concerns(self):
+        """默认任务集要覆盖每一件事，别在重构里悄悄少掉一项。"""
         from lagent.sweep import DEFAULT_TASKS
 
         names = [task.name for task in DEFAULT_TASKS]
-        assert len(names) == 4
+        assert len(names) == 5
         joined = " ".join(names)
         assert "预约" in joined and "凭证" in joined and "归档" in joined
         assert "通知" in joined
+        assert "违约" in joined
+
+    async def test_no_show_judgement_runs_after_expiry(self):
+        """违约判定必须排在"过期预约收尾"**之后**。
+
+        它读的是 ``status == expired`` 的行，而那些行是前一个任务写出来的。
+        顺序反了的表现不是报错，是"一条也判不出来" ——
+        这种失败最阴：任务全绿、日志干净，功能等于没有。
+        """
+        from lagent.sweep import DEFAULT_TASKS
+
+        names = [task.name for task in DEFAULT_TASKS]
+        assert names.index("违约判定") > names.index("过期预约收尾")
 
 
 # ==========================================================================

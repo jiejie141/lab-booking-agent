@@ -69,6 +69,7 @@ from ..models import (
     slot_indexes_for,
 )
 from ..schemas import BookingOutcome, ReservationOut
+from .violations import state_for
 
 _P = ParamSpec("_P")
 
@@ -326,6 +327,22 @@ async def create_reservation(
                         message=f"用户 {user_id} 不存在",
                         retries=attempt,
                         reason="not_found",
+                    )
+
+                # P1-8：违约限制。**放在这里而不是在 API 层**，是因为
+                # 下单有三个入口（表单接口、Agent 工具、管理员代下单），
+                # 在 API 层各判一次的话，迟早出现"对话能约、表单不能约"
+                # 这种不一致 —— 而用户只会理解成系统在针对他。
+                state = await state_for(session, user_id, now=now)
+                if state.blocked:
+                    return BookingOutcome(
+                        ok=False,
+                        message=state.message,
+                        retries=attempt,
+                        # forbidden 而不是 invalid：他填的时段没问题，
+                        # 是他这个人此刻没有预约资格。前端据此给的是
+                        # "去联系管理员"，而不是"换个时间试试"。
+                        reason="forbidden",
                     )
 
                 equipment = await _load_equipment(session, equipment_id)

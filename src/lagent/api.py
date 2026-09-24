@@ -90,6 +90,11 @@ from .domain.catalog import (
     update_lab,
     update_user,
 )
+
+# 违约（P1-8）。``pardon`` 这个名字单独看不出是"豁免违约"，
+# 但调用处一律写成 ``pardon(session, reservation_id)``，
+# 加前缀反而会让 API 层的每一行变长；模块名 violations 已经定了性。
+from .domain.violations import list_violations, pardon, state_for
 from .knowledge.retriever import build_retriever, fallback_reason
 from .metrics import (
     http_in_progress_dec,
@@ -1525,6 +1530,90 @@ async def _reservation_owner(reservation_id: int) -> int | None:
     async with session_scope() as session:
         row = await session.get(Reservation, reservation_id)
         return row.user_id if row is not None else None
+
+
+# ==========================================================================
+# 违约（P1-8）：看得见、能申诉
+# ==========================================================================
+# 判定是自动的，所以它必须**可查、可推翻**。一个只扣分、不给理由、
+# 也找不到人申诉的系统，在院系里活不过一个学期 —— 第一次误判
+# （门禁坏了、读卡器断电）就会被人要求关掉，而且是永久关掉。
+
+
+@router.get("/api/users/{user_id}/violations")
+async def user_violations(
+    user_id: int, user: Principal = Depends(current_user)
+) -> dict:
+    """违约记录与当前限制状态。
+
+    **本人与管理员可读，别人不可读。** 与预约列表同一条规矩：
+    传别人的 id 不会报错，而是被改写成自己 —— 越权读取在服务端就断了。
+    """
+    scope = user_id if user.is_admin else user.user_id
+    async with session_scope() as session:
+        state = await state_for(session, scope)
+        rows = await list_violations(session, scope)
+    return {
+        "user_id": scope,
+        "count": state.count,
+        "threshold": state.threshold,
+        "window_days": state.window_days,
+        "blocked": state.blocked,
+        "over_threshold": state.over_threshold,
+        # ★ 这一项必须**单独**给出去。blocked=False 有两种可能：
+        #   "没超阈值"和"超了但处罚还没开"。合成一个布尔的话，
+        #   刚上线只看数据的那段时间里，管理员会以为系统什么都没发现。
+        "blocking_enabled": state.blocking_enabled,
+        "message": state.message,
+        "records": [
+            {
+                "reservation_id": r.id,
+                "date": r.date.isoformat(),
+                "slot": r.slot_label,
+                "status": r.status,
+                "no_show_at": r.no_show_at.isoformat() if r.no_show_at else None,
+                "pardoned": r.pardoned_at is not None,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.post("/api/reservations/{reservation_id}/pardon")
+async def pardon_violation(
+    reservation_id: int,
+    request: Request,
+    admin: Principal = Depends(require_admin),
+) -> dict:
+    """豁免一条违约（管理员核实后推翻判定）。
+
+    **不删 ``no_show_at``**：系统确实判过，是人推翻了。抹掉它等于说
+    "系统从没这么认为过"，那么下一次排查"门禁有没有误判"时就永远查不到。
+    """
+    async with session_scope() as session:
+        res = await pardon(session, reservation_id)
+        if res is None:
+            raise HTTPException(
+                status_code=404, detail=f"预约 {reservation_id} 不存在或未被判违约"
+            )
+        owner = res.user_id
+        slot = res.slot_label
+        pardoned_at = res.pardoned_at
+
+    await audit.record(
+        action=audit.ACTION_VIOLATION_PARDON,
+        actor_id=admin.user_id,
+        actor_name=admin.username,
+        target_type="reservation",
+        target_id=reservation_id,
+        detail=f"豁免违约：{slot}（用户 {owner}）",
+        client_host=_client_host(request),
+    )
+    return {
+        "reservation_id": reservation_id,
+        "user_id": owner,
+        "pardoned_at": pardoned_at.isoformat() if pardoned_at else None,
+    }
 
 
 @router.post("/api/reservations/cancel")

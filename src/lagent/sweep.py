@@ -64,11 +64,13 @@ from .config import get_settings
 from .db import session_scope
 from .domain.access import expire_stale_permits, release_seats
 from .domain.availability import open_window
+from .domain.violations import find_no_show_candidates, mark_no_shows
 from .metrics import record_sweep_task
 from .models import (
     ACTION_SWEEP_ARCHIVED,
     ACTION_SWEEP_FORCE_CHECKOUT,
     ACTION_SWEEP_RESERVATION_EXPIRED,
+    ACTION_VIOLATION_NO_SHOW,
     ACTIVE_STATUSES,
     OUTCOME_OK,
     PERMIT_CHECKED_IN,
@@ -373,6 +375,60 @@ async def sweep_archive_events(*, now: dt.datetime | None = None) -> tuple[int, 
 
 
 # ===========================================================================
+# 任务 5：违约判定
+# ===========================================================================
+async def sweep_no_shows(*, now: dt.datetime | None = None) -> tuple[int, str]:
+    """把「约了不来」的预约标成违约（P1-8）。
+
+    **逐条审计，不做汇总。** 本模块其他地方（过期预约）只记一条汇总，
+    理由是"到期是可由数据推导的状态"。这里相反：判定结果会**限制一个具体的人
+    的预约权利**，他来问"凭什么不让我约"时必须能翻出每一条、每一天的依据。
+    噪声换可追溯性，这笔交易在惩罚性功能上是划算的。
+
+    判不了的数量**一定**写进 detail：它衡量的是"门禁有没有在跑"。
+    一个实验室长期大量判不了，等于在说它压根没接门禁。
+    """
+    now = now or now_local()
+    async with session_scope() as session:
+        candidates, undecidable = await find_no_show_candidates(session, now=now)
+        if not candidates:
+            return 0, _no_show_detail(undecidable)
+        ids = [c.reservation_id for c in candidates]
+        await mark_no_shows(session, ids, now=now)
+        # 回查"到底哪几条是**我**盖的章"，而不是拿 rowcount 去切列表。
+        # 并发下别人可能先盖了其中几条，用 rowcount 切片会把审计记到别人头上。
+        stamped = set(
+            (
+                await session.execute(
+                    select(Reservation.id).where(
+                        Reservation.id.in_(ids), Reservation.no_show_at == now
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        marked = [c for c in candidates if c.reservation_id in stamped]
+
+    # 与模块 docstring 同一条纪律：出了事务再写审计，别在事务里开事务。
+    for cand in marked:
+        await audit_record(
+            action=ACTION_VIOLATION_NO_SHOW,
+            actor_id=cand.user_id,
+            target_type="reservations",
+            target_id=cand.reservation_id,
+            detail=f"{cand.date.isoformat()} {cand.label} 预约未到场（门禁无该时段入场记录）",
+        )
+    return len(marked), _no_show_detail(undecidable)
+
+
+def _no_show_detail(undecidable: int) -> str:
+    if not undecidable:
+        return ""
+    return f"{undecidable} 条判不了（实验室当天无门禁流水，不做猜测）"
+
+
+# ===========================================================================
 # 任务组装与运行器
 # ===========================================================================
 DEFAULT_TASKS: tuple[SweepTask, ...] = (
@@ -382,6 +438,9 @@ DEFAULT_TASKS: tuple[SweepTask, ...] = (
     # 通知投递（P1-6）放在清扫里，而不是要求运维自己配 cron：
     # 配了 SMTP 就自动发，没配就如实报告"跳过 N 条"，两种状态都看得见。
     SweepTask("通知投递", sweep_notifications),
+    # 违约判定（P1-8）放最后：它要读的是**已经被任务 1 收尾成 expired 的**预约，
+    # 顺序反了就一条也判不出来。
+    SweepTask("违约判定", sweep_no_shows),
 )
 
 

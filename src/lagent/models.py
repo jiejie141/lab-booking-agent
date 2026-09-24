@@ -226,6 +226,10 @@ class Reservation(Base):
         Index("ix_res_equipment_date", "equipment_id", "date"),
         # 按用户查自己的预约
         Index("ix_res_user_status", "user_id", "status"),
+        # 违约统计（P1-8）：按「用户 + 判定时刻」扫窗口。
+        # 它在**下单的关键路径**上 —— 每次预约前都要查一次窗口内违约数，
+        # 没有它那次查询就是全表扫。
+        Index("ix_res_noshow", "user_id", "no_show_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -237,6 +241,13 @@ class Reservation(Base):
     status: Mapped[str] = mapped_column(String(16), default=STATUS_CONFIRMED)
     purpose: Mapped[str] = mapped_column(Text, default="")
     cancel_reason: Mapped[str] = mapped_column(Text, default="")
+    # P1-8：违约（约了不来）判定。**两个时间戳而不是一个布尔** ——
+    # 「什么时候判的」和「判了没有」在事后追溯时是两件事：
+    # 学生说"那天门禁坏了"，管理员要能看出这条是上周才补判的还是当天判的。
+    no_show_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    # 管理员豁免。**不删 no_show_at**：把判定事实抹掉等于说"系统从没这么认为过"，
+    # 而真相是"系统判了、人推翻了"。留着两个字段才能还原全过程。
+    pardoned_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     # 乐观锁版本号：取消 / 改期时带上读到的版本，避免覆盖别人的并发修改。
     version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now_local)
@@ -261,6 +272,11 @@ class Reservation(Base):
     @property
     def is_active(self) -> bool:
         return self.status in ACTIVE_STATUSES
+
+    @property
+    def is_violation(self) -> bool:
+        """是否计入违约。判定了、且没被豁免，才算数。"""
+        return self.no_show_at is not None and self.pardoned_at is None
 
 
 # --------------------------------------------------------------------------
@@ -349,6 +365,12 @@ ACTION_ADMIN_WRITE = "admin.write"
 ACTION_SWEEP_RESERVATION_EXPIRED = "sweep.reservation_expired"
 ACTION_SWEEP_FORCE_CHECKOUT = "sweep.force_checkout"
 ACTION_SWEEP_ARCHIVED = "sweep.archived"
+# P1-8：违约判定与豁免。两个动作**必须**分开 ——
+# 它们都是「改了同一条预约上的同一个字段」，但一个是系统自动扣分、
+# 一个是人撤销扣分。合用一个动作名的话，"这条违约是不是被冤枉的"
+# 就再也查不出来了，而误判恰恰是最需要事后追溯的场景。
+ACTION_VIOLATION_NO_SHOW = "violation.no_show"
+ACTION_VIOLATION_PARDON = "violation.pardon"
 
 OUTCOME_OK = "ok"
 OUTCOME_DENIED = "denied"
