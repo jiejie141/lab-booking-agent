@@ -33,9 +33,12 @@
 |---|---|---|---|
 | P0-1 区间不变式下沉 | ✅ 已完成 | `7000e0b` | `overlap_race.py` **3/3**（修复前 1/3）；`loadtest -c 40 -r 3` 每轮恰好 1 成功；已写成 pytest 回归断言 |
 | P0-2 认证与授权 | ✅ 已完成 | `9c8207f` | 无 token 写 → 401；A 读不到 B（query 参数绕不过）；普通用户调管理端点 → 403 |
-| P0-3 边界加固与审计 | ✅ 已完成 | `33da4c8` | 最小渗透清单 **39/39**（真实 uvicorn 进程），含 413 / 411 / 422 / 429 / CORS / 审计留痕 |
+| P0-3 边界加固与审计 | ✅ 已完成 | `33da4c8` | 最小渗透清单 **39/39**（真实 uvicorn 进程），含 413 / 411 / 422 / 429 / CORS / 审计留痕。**这是当时的项数**；清单后来持续增项，当前为 **70/70** |
 | P1 交付项（CI） | ✅ 已完成 | 本次 | `.github/workflows/ci.yml`：ruff + mypy + pytest（3.10/3.13 矩阵）、真实进程冒烟、docker build |
 | 收尾修复 · 库结构漂移 | ✅ 已完成 | `bb43d20` | `create_all()` 只建缺失的表、不演进已有表 → 旧库缺 `users.password_hash`，且**只有查 users 的路径才会炸**（表现为"部分可用"）。新增 `ensure_schema()` / `schema_drift()`，启动拒绝带病运行、`doctor` 报检查项而不崩、`seed --force` 由"只删行"改为真重建；8 条回归测试 |
+| 收尾修复 · `tools` 子命令崩溃 | ✅ 已完成 | `a9028fd` | 对外响应结构的字段类型改了而**没有测试钉它的形状**，365 个测试全绿却只有 CLI 崩。补 `test_catalog_shape_is_a_stable_contract` |
+| 功能升级 · Agent Harness + 真 function calling | ✅ 已完成 | `ff747ff` | 抽出 `harness/`（工具注册表 / 上下文预算 / span / ReAct 循环，**不 import 任何业务模块**，用 AST 静态检查钉住边界）；新增 `deterministic` / `react` 双执行模式；写操作带 `side_effect` 护栏 |
+| 功能升级 · 人员准入（门禁） | ✅ 已完成 | `208f074` | 需求是"每个人进实验室都必须提前预约，没预约的进不去"。独立成 `domain/access.py`（房间容量与设备时段是两类不同不变式）；4 张新表 + 3 个接口；`access-demo` **8/8**；`tests/test_access.py` 49 项；冒烟新增 [9] 门禁边界 **11/11**。**顺带修掉两个被自己的演示/冒烟戳出来的真漏洞**（未对齐窗口的尾巴不受容量保护；`now±1h` 跨午夜导致凭证被判过期） |
 
 ### 与原方案的差异（为什么没照抄）
 
@@ -59,6 +62,9 @@
 
 ### 本次更新实测（全部命令的真实输出）
 
+> 下面是 **P0 收尾时**那一轮的输出，按当时的 commit 原样保留（历史快照，不是当前值）。
+> 数字随功能增长，当前值见下一节。
+
 ```
 pytest -q                            322 passed
 python main.py eval                  14/14（mock 模型）
@@ -68,6 +74,22 @@ python scripts/smoke_http.py         39/39（真实 uvicorn 进程）
 ruff check .                         All checks passed
 mypy                                 Success: no issues found in 42 source files
 ```
+
+### 当前实测（`208f074`，含 Harness / react 模式 / 人员准入）
+
+```
+pytest -q                            425 passed
+python main.py eval                  14/14（mock 模型）
+python main.py access-demo           8/8 场景
+python main.py loadtest -c 40 -r 3   3 轮 × 40 并发，每轮恰好 1 成功
+python scripts/overlap_race.py       3/3
+python scripts/smoke_http.py         70/70（真实 uvicorn 进程，12 节）
+ruff check src tests scripts         All checks passed
+mypy src                             Success: no issues found in 33 source files
+```
+
+（`mypy` 的"42 → 33 个文件"不是代码变少：前者是 `mypy` 不带参数（按 pyproject 配置扫全仓，
+含 `scripts/`），后者是显式只扫 `src`。口径不同，别当成删了文件。）
 
 ### 仍然没做的（明确列出，不含糊）
 
