@@ -79,7 +79,9 @@ jobs:
         run: mypy
 
       - name: pytest（单元 + 集成 + 并发）
-        run: pytest -q
+        # 经 ci_run.py 包装：失败时把 FAILED/ERROR 行抬成注解 ——
+        # 原始日志要鉴权才能读，注解不用（见 scripts/ci_run.py 的说明）。
+        run: python scripts/ci_run.py --match '^(FAILED|ERROR)' --tail 20 -- python -m pytest -q
 
   smoke:
     name: 端到端验证（真实进程）
@@ -99,16 +101,16 @@ jobs:
           pip install -r requirements.txt
 
       - name: 评测集（意图 / 槽位 / 端到端通过率）
-        run: python main.py eval
+        run: python scripts/ci_run.py --tail 12 -- python main.py eval
 
       - name: 区间重叠竞态（P0-1 的回归：必须恰好 1 条成功）
-        run: python scripts/overlap_race.py
+        run: python scripts/ci_run.py --tail 12 -- python scripts/overlap_race.py
 
       - name: 后台清扫端到端（P1-2：忘刷出场 / 过期预约 / 归档）
-        run: python scripts/sweep_demo.py
+        run: python scripts/ci_run.py --tail 12 -- python scripts/sweep_demo.py
 
       - name: HTTP 冒烟 + 越权清单（起真实 uvicorn，跑渗透项）
-        run: python scripts/smoke_http.py
+        run: python scripts/ci_run.py --tail 12 -- python scripts/smoke_http.py
 
   docker:
     name: 镜像构建
@@ -180,4 +182,4 @@ jobs:
         run: python main.py migrate
 
       - name: PostgreSQL 专项用例
-        run: pytest tests/test_postgres.py -q
+        run: python scripts/ci_run.py --match '^(FAILED|ERROR)' --tail 20 -- python -m pytest tests/test_postgres.py -q
