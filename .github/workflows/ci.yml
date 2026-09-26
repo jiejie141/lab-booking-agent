@@ -112,15 +112,54 @@ jobs:
       - name: HTTP 冒烟 + 越权清单（起真实 uvicorn，跑渗透项）
         run: python scripts/ci_run.py --tail 12 -- python scripts/smoke_http.py
 
+  # -------------------------------------------------------------------------
+  # 镜像 + compose 实机验收
+  #
+  # 原来这里只 `docker build` —— 那只能证明"Dockerfile 语法对"。
+  # 真正要证明的是"按 README 的步骤起来之后它能不能用"，那必须真的把栈起来一次：
+  # 迁移在真 PG 上跑不跑得到 head、容器健康检查转不转 healthy、
+  # 端口映射对不对、控制台能不能打开。这些单测与 smoke 都覆盖不到
+  # （它们跑在一次性 SQLite 库上）。
+  # -------------------------------------------------------------------------
   docker:
-    name: 镜像构建
+    name: 镜像构建 + compose 实机验收
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
+    env:
+      # 只是个 CI 里用一次的假密钥：compose 要求这个变量存在（fail-closed），
+      # 但它不对外，用完就随 runner 一起消失。
+      LAB_JWT_SECRET: ci-only-secret-please-do-not-reuse
     steps:
       - uses: actions/checkout@v4
 
-      - name: 构建镜像（不推送，只验证 Dockerfile 可用）
-        run: docker build -t lab-booking-agent:ci .
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 起栈（同时验证 Dockerfile 与编排）
+        run: docker compose up -d --build
+
+      - name: 等它就绪（不等就开测的话，第一步会以"连不上"失败，看起来像代码问题）
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8200/api/health >/dev/null 2>&1; then
+              echo "已就绪（第 ${i} 次探测）"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::等待 120 秒仍未就绪，下面是容器日志"
+          docker compose logs --tail 60
+          exit 1
+
+      - name: 端到端验收（真 PG / 真容器 / 真 HTTP）
+        run: python scripts/ci_run.py --tail 25 -- python scripts/accept_deploy.py
+
+      - name: 收尾（无论成败都要清理，否则 runner 上留着容器）
+        if: always()
+        run: |
+          docker compose logs --tail 40 || true
+          docker compose down -v || true
 
   # -------------------------------------------------------------------------
   # PostgreSQL 真实链路
