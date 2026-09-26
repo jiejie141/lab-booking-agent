@@ -4,6 +4,18 @@
 # 用例里的日期一律用 date_offset（相对今天的天数），不用绝对日期 ——
 # 否则评测集会在特定日期后开始失败，而失败原因与代码无关。
 #
+# ⚠️ 光避开绝对日期还不够：`date_offset: 1` 会随运行日期落到周六/周日，
+#    而三个实验室的周末开放时间都比工作日短。所以**凡是用 date_offset 的
+#    用例，时段必须落在「工作日 ∩ 周末」的交集里**，否则周二跑是绿的、
+#    周六跑是红的，看起来像代码坏了，其实是评测集自己挑了个开不了门的钟点。
+#
+#        分析楼301   工作日 08:00-22:00 · 周末 09:00-18:00  → 交集 09:00-18:00
+#        生物楼205   工作日 08:00-20:00 · 周末 10:00-16:00  → 交集 10:00-16:00
+#        材料楼412   09:00-18:00（不分工作日/周末）        → 交集 09:00-18:00
+#
+#    由此得出**全局安全窗口 10:00-16:00**。这条约束有测试兜着
+#    （tests/test_eval_cases.py）：以后新加用例挑了交集外的时段，会当场红。
+#
 # 依赖的种子数据（见 src/lagent/seed.py）：
 #   用户 1 = 张伟，只有「光谱」资质      → 约离心机必须被拒
 #   用户 2 = 李娜，资质齐全
@@ -25,11 +37,14 @@ cases:
     expect_slots: {date_offset: 1, start: "10:00", end: "11:00", equipment_contains: 紫外可见分光光度计}
     expect_outcome: booked
 
+  # 原来是「上午九点…3 小时」（09:00-12:00）。CO2 培养箱在生物楼205，
+  # 周末 10:00 才开门 —— 于是周六日跑这条必然拿不到 booked。
+  # 改成 10:00-13:00，时长仍是 3 小时（要验的「时长换算」没丢）。
   - id: c03
-    message: 明天上午九点想用 CO2 培养箱 3 小时
+    message: 明天上午十点想用 CO2 培养箱 3 小时
     user: 2
     expect_intent: create_reservation
-    expect_slots: {date_offset: 1, start: "09:00", end: "12:00", duration: 3, equipment_contains: CO2}
+    expect_slots: {date_offset: 1, start: "10:00", end: "13:00", duration: 3, equipment_contains: CO2}
     expect_outcome: booked
 
   # ---- 资质拦截（代码层判定，绝不由模型裁决） ---------------------------
@@ -48,13 +63,17 @@ cases:
     expect_outcome: ask
 
   # ---- 多轮：先说不完整的，再补一句（验证跨轮合并） ---------------------
+  # 这条要验的是**跨轮合并**（第一轮只说设备、第二轮补时间，时间要接上），
+  # 不是「晚上」这个词的解析 —— 后者在 tests/test_graph.py 里有专门用例。
+  # 原来是「明天晚上八点」，但没有任何一个实验室在周末开到 20:00，
+  # 于是这条也会随星期几变红。改成 10:00-11:00，合并语义不变。
   - id: c06
     turns:
       - 我想约荧光光谱仪
-      - 明天晚上八点，一小时
+      - 明天上午十点，一小时
     user: 2
     expect_intent: create_reservation
-    expect_slots: {date_offset: 1, start: "20:00", end: "21:00", duration: 1}
+    expect_slots: {date_offset: 1, start: "10:00", end: "11:00", duration: 1}
     expect_outcome: booked
 
   # ---- 规范检索 ---------------------------------------------------------
@@ -109,9 +128,12 @@ cases:
     expect_slots: {date_offset: 1, start: "14:00", end: "16:00", category: 光谱}
     expect_outcome: booked
 
+  # 原来是「下午三点到五点」，而生物楼205 周末 16:00 就关门 —— 17:00 出界。
+  # 改成 13:00-15:00：要验的是「只说类别、不点名设备时给出可选清单」，
+  # 与具体钟点无关。
   - id: c14
-    message: 明天下午三点到五点，细胞培养类设备
+    message: 明天下午一点到三点，细胞培养类设备
     user: 2
     expect_intent: create_reservation
-    expect_slots: {date_offset: 1, start: "15:00", end: "17:00", category: 细胞培养}
+    expect_slots: {date_offset: 1, start: "13:00", end: "15:00", category: 细胞培养}
     expect_outcome: available
