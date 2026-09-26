@@ -250,6 +250,16 @@ td .mono{font-family:var(--mono)}
           <button class="tab" data-tab="res">预约记录</button>
           <button class="tab" data-tab="kb">规范检索</button>
           <button class="tab" data-tab="users" id="tab-users" hidden>用户目录</button>
+          <!-- 管理员专属的四个面板。
+               试运行时发现了什么：这四个能力（审批 / 违约 / 通知 / 审计）
+               后端接口和测试都齐了，但控制台**一个入口都没有** ——
+               管理员只能 curl 或者读库，等于这些功能没交付到他手上。
+               这与当初"预约只能靠跟模型说话"是同一类问题：
+               **后端有接口 ≠ 用户点得到。** -->
+          <button class="tab" data-tab="appr"  id="tab-appr"  hidden>审批待办</button>
+          <button class="tab" data-tab="viol"  id="tab-viol"  hidden>违约</button>
+          <button class="tab" data-tab="notif" id="tab-notif" hidden>通知</button>
+          <button class="tab" data-tab="audit" id="tab-audit" hidden>审计</button>
         </div>
       </div>
       <div class="card-b">
@@ -311,6 +321,44 @@ td .mono{font-family:var(--mono)}
           <div class="hint" style="margin-bottom:10px">用户目录为管理员端点（<span class="mono">GET /api/users</span>）。
             响应中不含邮箱与口令哈希 —— 只回显业务需要的字段。</div>
           <div id="users-box"><div class="skel sk-row"></div><div class="skel sk-row"></div></div>
+        </div>
+
+        <!-- 审批待办：标了「需审批」的设备下单后停在 pending，管理员在这里放行或驳回。
+             驳回会当场释放时段（坑立刻还能被别人约），所以它是一个安全的动作。 -->
+        <div id="pane-appr" hidden>
+          <div class="hint" style="margin-bottom:10px">
+            待确认的申请。驳回会<b>立刻释放时段</b>，别人马上能约；通过则转为已确认。</div>
+          <div id="appr-box"><div class="skel sk-row"></div><div class="skel sk-row"></div></div>
+        </div>
+
+        <!-- 违约：先看某人的违约账，再列出可豁免的判定。
+             判定要求「该实验室当天有门禁流水」，所以这里也把"判不了几次"一并显示 ——
+             那个数字长期偏高，说明该实验室根本没接门禁。 -->
+        <div id="pane-viol" hidden>
+          <div class="filters">
+            <select id="viol-user"></select>
+            <button class="btn ghost sm" id="viol-refresh">刷新</button>
+          </div>
+          <div id="viol-box"></div>
+        </div>
+
+        <!-- 通知：默认没配 SMTP，通知只进库不投递。这个面板存在的意义就是让
+             「到底发出去了没有」有个能当场回答的地方。 -->
+        <div id="pane-notif" hidden>
+          <div class="filters">
+            <select id="notif-user"></select>
+            <button class="btn ghost sm" id="notif-refresh">刷新</button>
+          </div>
+          <div id="notif-box"></div>
+        </div>
+
+        <!-- 审计：只读，没有任何接口能改或删。 -->
+        <div id="pane-audit" hidden>
+          <div class="filters">
+            <input id="audit-action" placeholder="按动作过滤，例如 reservation.create" style="flex:1">
+            <button class="btn ghost sm" id="audit-refresh">刷新</button>
+          </div>
+          <div id="audit-box"><div class="skel sk-row"></div><div class="skel sk-row"></div></div>
         </div>
       </div>
     </section>
@@ -445,7 +493,13 @@ async function enterApp(){
   renderIdentity();
   await Promise.all([loadLabs(), loadUserDirectory()]);
   fillBookingOptions();   // 设备下拉依赖 loadLabs 填好的 state.equipment
-  if(!isAdmin()) $("#tab-users").hidden=true;
+  // 管理员专属标签：非管理员一律保持 hidden。
+  // ⚠️ 这只是"不显示无权限的控件"，**真正的边界在服务端** ——
+  // 手动构造请求照样只会拿到 403（见 tests/test_booking_api.py 的越权清单）。
+  if(isAdmin()){
+    ["tab-users","tab-appr","tab-viol","tab-notif","tab-audit"]
+      .forEach(id=>{ $("#"+id).hidden=false; });
+  }
   await loadReservations();
   await loadHealth();
 }
@@ -500,6 +554,159 @@ async function loadUserDirectory(){
         }).join("")
       + '</tbody></table>';
   }catch(e){box.innerHTML='<div class="empty">加载失败：'+esc(e.message)+"</div>";}
+}
+
+/* ---------- 管理员面板：审批 / 违约 / 通知 / 审计 ----------
+   这四个面板是试运行之后补的，理由写在 docs/TRIAL-RUN.md 的 H1：
+   这四个能力的接口与测试早就齐了，但控制台**一个入口都没有** ——
+   管理员只能 curl 或者读库，等于这些功能没交付到他手上。
+   与当初"预约只能靠跟模型说话"是同一类问题：**后端有接口 ≠ 用户点得到。** */
+const fmtStamp = iso => iso ? String(iso).replace("T"," ").slice(5,16) : "";
+
+function fillUserSelect(sel){
+  if(!state.users.length){ sel.innerHTML='<option value="">（用户未加载）</option>'; return; }
+  const prev=sel.value;
+  sel.innerHTML=state.users.map(u=>`<option value="${u.id}">${esc(u.username)}</option>`).join("");
+  if(prev) sel.value=prev;
+}
+
+async function loadApprovals(){
+  const box=$("#appr-box");
+  box.innerHTML=skel(2,"row");
+  try{
+    // 待办不带"全部预约"——列表里出现的每一条都是要处理的，这是那个接口
+    // 刻意不复用 list_reservations 的原因（见 pending_reservations 的注释）。
+    const rows=await api("/api/reservations/pending");
+    if(!rows.length){ box.innerHTML='<div class="empty">没有待确认的申请</div>'; return; }
+    box.innerHTML='<table><thead><tr><th>ID</th><th>申请人</th><th>设备</th><th>时段</th><th></th></tr></thead><tbody>'
+      + rows.map(r=>`<tr>
+          <td class="mono">#${r.id}</td>
+          <td>${esc(r.user_name||"（未知用户）")}</td>
+          <td>${esc(r.equipment_name)}<div style="color:var(--text-faint);font-size:11px">${esc(r.lab_label)}</div></td>
+          <td class="mono">${esc(r.slot)}</td>
+          <td><button class="btn sm" data-approve="${r.id}">通过</button>
+              <button class="btn ghost sm" data-reject="${r.id}">驳回</button></td>
+        </tr>`).join("")
+      + '</tbody></table>';
+    $$("[data-approve]",box).forEach(b=>b.addEventListener("click",()=>review(b,"approve")));
+    $$("[data-reject]",box).forEach(b=>b.addEventListener("click",()=>review(b,"reject")));
+  }catch(e){ box.innerHTML='<div class="empty">加载失败：'+esc(e.message)+"</div>"; }
+}
+
+async function review(btn,kind){
+  const id=btn.getAttribute(kind==="approve"?"data-approve":"data-reject");
+  let body=null;
+  if(kind==="reject"){
+    // 用一个原生 prompt 而不是自建模态框：这里只有一个输入框，
+    // 为它引一套组件不划算。理由会进驳回消息与审计。
+    const reason=(window.prompt("驳回理由（会记进审计，可留空）","")||"");
+    body=JSON.stringify({reason});
+  }
+  btn.disabled=true; const old=btn.textContent; btn.textContent="…";
+  try{
+    await api(`/api/reservations/${id}/${kind}`,{method:"POST",body});
+    // 驳回会**当场释放时段**，所以刷新范围要包括预约记录与统计
+    toast(kind==="approve"?("已通过 #"+id):("已驳回 #"+id),"ok");
+    loadApprovals(); loadReservations(); loadHealth();
+  }catch(e){ toast("操作失败："+e.message,"err"); btn.disabled=false; btn.textContent=old; }
+}
+
+const VIOL_TONE={};
+async function loadViolations(){
+  const box=$("#viol-box"), sel=$("#viol-user");
+  fillUserSelect(sel);
+  const uid=sel.value;
+  if(!uid){ box.innerHTML='<div class="empty">选一个用户，看他的违约账</div>'; return; }
+  box.innerHTML=skel(2,"row");
+  try{
+    const v=await api(`/api/users/${encodeURIComponent(uid)}/violations`);
+    const state0=v.blocked?"已被限制":(v.over_threshold?"已超阈值":"正常");
+    const tone=v.blocked?"bad":(v.over_threshold?"warn":"");
+    box.innerHTML=`<div class="hint" style="margin-bottom:10px">
+        <span class="tag ${tone}">${esc(state0)}</span> ${esc(v.message||"")}</div>
+      <table><thead><tr><th>项目</th><th>值</th></tr></thead><tbody>
+        <tr><td>窗口内计入次数</td><td class="mono">${v.count}</td></tr>
+        <tr><td>阈值</td><td class="mono">${v.threshold}</td></tr>
+        <tr><td>窗口天数</td><td class="mono">${v.window_days}</td></tr>
+        <tr><td>限制是否启用</td><td>${v.blocking_enabled?"是":"否（默认只记不罚）"}</td></tr>
+      </tbody></table>`;
+
+    // 判定记录：**能看到证据才给按钮**。
+    // 豁免这个动作必须在能看到"系统凭什么判的"的地方做 ——
+    // 否则管理员只是在盲点一个按钮。
+    const rows=await api(`/api/reservations?user_id=${encodeURIComponent(uid)}`);
+    const marked=rows.filter(r=>r.no_show_at);
+    if(!marked.length){
+      box.innerHTML+='<div class="empty" style="margin-top:12px">没有被判定过「未到场」的预约</div>';
+      return;
+    }
+    box.innerHTML+='<div class="hint" style="margin:12px 0 6px">判定记录（豁免会保留判定本身，只标记「已推翻」）</div>'
+      +'<table><thead><tr><th>ID</th><th>时段</th><th>判定时间</th><th></th></tr></thead><tbody>'
+      + marked.map(r=>`<tr>
+          <td class="mono">#${r.id}</td><td class="mono">${esc(r.slot)}</td>
+          <td class="mono">${esc(fmtStamp(r.no_show_at))}</td>
+          <td>${r.pardoned_at
+            ? '<span class="tag ok">已豁免 '+esc(fmtStamp(r.pardoned_at))+"</span>"
+            : `<button class="btn ghost sm" data-pardon="${r.id}">豁免</button>`}</td>
+        </tr>`).join("")
+      +'</tbody></table>';
+    $$("[data-pardon]",box).forEach(b=>b.addEventListener("click",async()=>{
+      const id=b.getAttribute("data-pardon");
+      // 豁免接口**不收理由**，所以这里不去假装收集一个 —— 收一个不会被记录的
+      // 理由，比不收更糟：它会让管理员以为"我写过原因了"。
+      if(!window.confirm("确认推翻 #"+id+" 的未到场判定？判定本身会保留（标记为已豁免）。")) return;
+      b.disabled=true;
+      try{
+        await api(`/api/reservations/${id}/pardon`,{method:"POST"});
+        toast("已豁免 #"+id,"ok"); loadViolations(); loadHealth();
+      }catch(e){ toast("豁免失败："+e.message,"err"); b.disabled=false; }
+    }));
+  }catch(e){ box.innerHTML='<div class="empty">加载失败：'+esc(e.message)+"</div>"; }
+}
+
+const NOTIFY_CN={pending:"待投递",sent:"已投递",skipped:"已跳过",failed:"投递失败"};
+async function loadNotifications(){
+  const box=$("#notif-box"), sel=$("#notif-user");
+  fillUserSelect(sel);
+  const uid=sel.value;
+  if(!uid){ box.innerHTML='<div class="empty">选一个用户看他的通知</div>'; return; }
+  box.innerHTML=skel(2,"row");
+  try{
+    // 管理员看别人的通知必须显式带上 user_id（接口默认只返回本人的）
+    const rows=await api(`/api/notifications?user_id=${encodeURIComponent(uid)}`);
+    if(!rows.length){ box.innerHTML='<div class="empty">这个人没有通知</div>'; return; }
+    const dist={}; rows.forEach(n=>{dist[n.status]=(dist[n.status]||0)+1;});
+    box.innerHTML=`<div class="hint" style="margin-bottom:10px">共 ${rows.length} 条 · `
+      + Object.keys(dist).map(k=>`${esc(NOTIFY_CN[k]||k)} ${dist[k]}`).join(" · ")
+      + `</div><table><thead><tr><th>时间</th><th>类型</th><th>标题</th><th>状态</th></tr></thead><tbody>`
+      + rows.map(n=>`<tr>
+          <td class="mono">${esc(fmtStamp(n.created_at))}</td>
+          <td>${esc(n.kind)}</td>
+          <td>${esc(n.title)}<div style="color:var(--text-faint);font-size:11px">${esc(n.body)}</div></td>
+          <td><span class="tag ${n.status==="failed"?"bad":(n.status==="sent"?"ok":"warn")}">${esc(NOTIFY_CN[n.status]||n.status)}</span></td>
+        </tr>`).join("")
+      + '</tbody></table>';
+  }catch(e){ box.innerHTML='<div class="empty">加载失败：'+esc(e.message)+"</div>"; }
+}
+
+async function loadAudit(){
+  const box=$("#audit-box");
+  box.innerHTML=skel(3,"row");
+  const action=$("#audit-action").value.trim();
+  try{
+    const rows=await api("/api/audit?limit=100"+(action?("&action="+encodeURIComponent(action)):""));
+    if(!rows.length){ box.innerHTML='<div class="empty">没有匹配的审计记录</div>'; return; }
+    box.innerHTML='<table><thead><tr><th>时间</th><th>动作</th><th>操作者</th><th>对象</th><th>结果</th></tr></thead><tbody>'
+      + rows.map(a=>`<tr>
+          <td class="mono">${esc(fmtStamp(a.created_at))}</td>
+          <td class="mono">${esc(a.action)}</td>
+          <td>${esc(a.actor_name||"—")}</td>
+          <td class="mono">${esc(a.target_type)}${a.target_id?("#"+esc(a.target_id)):""}</td>
+          <td><span class="tag ${a.outcome==="ok"?"ok":"bad"}">${esc(a.outcome)}</span>
+            <div style="color:var(--text-faint);font-size:11px">${esc(a.detail)}</div></td>
+        </tr>`).join("")
+      + '</tbody></table>';
+  }catch(e){ box.innerHTML='<div class="empty">加载失败：'+esc(e.message)+"</div>"; }
 }
 
 /* ---------- 直接预约（不经过模型） ----------
@@ -819,15 +1026,25 @@ $("#btn-logout").addEventListener("click",()=>{
   loadHealth();
 });
 
+// 面板名 → 切过去时要拉什么。写成表而不是一串 if：
+// 加一个标签页只改这张表，不会漏掉"新面板忘了加载"这种错。
+const PANES=["book","labs","res","kb","users","appr","viol","notif","audit"];
+const TAB_LOADERS={
+  book:fillBookingOptions, labs:loadLabs, res:loadReservations, kb:null,
+  users:loadUserDirectory, appr:loadApprovals, viol:loadViolations,
+  notif:loadNotifications, audit:loadAudit,
+};
 $$("#tabs .tab").forEach(tab=>tab.addEventListener("click",()=>{
   $$("#tabs .tab").forEach(t=>t.classList.toggle("on",t===tab));
   const name=tab.getAttribute("data-tab");
-  ["book","labs","res","kb","users"].forEach(k=>{$("#pane-"+k).hidden = k!==name;});
-  if(name==="res") loadReservations();
-  if(name==="labs") loadLabs();
-  if(name==="book") fillBookingOptions();
-  if(name==="users") loadUserDirectory();
+  PANES.forEach(k=>{$("#pane-"+k).hidden = k!==name;});
+  const load=TAB_LOADERS[name];
+  if(load) load();
 }));
+$("#viol-refresh") && $("#viol-refresh").addEventListener("click",loadViolations);
+$("#notif-refresh") && $("#notif-refresh").addEventListener("click",loadNotifications);
+$("#audit-refresh") && $("#audit-refresh").addEventListener("click",loadAudit);
+$("#audit-action") && $("#audit-action").addEventListener("keydown",e=>{ if(e.key==="Enter") loadAudit(); });
 
 /* ---------- 启动 ----------
    健康检查是公开端点，先跑，好让登录页顶部也能显示后端连接状态；

@@ -179,3 +179,177 @@ class TestDirectBookingForm:
         """设备下拉由 /api/labs 填，不写死 —— 加一台新设备不该改前端。"""
         assert "state.equipment" in html
         assert "fillBookingOptions" in html
+
+
+class TestAdminPanelsWiring:
+    """管理员面板的接线（静态断言）。
+
+    这一组是试运行报告 H1 的回归守门。H1 说的是：审批 / 违约 / 通知 / 审计
+    四个能力的**接口与测试早就齐了，但控制台一个入口都没有** —— 管理员只能
+    curl。那种状态最坏的地方在于它**看起来是完成的**：所有测试都绿。
+
+    所以这里不只断言"标签页存在"，还断言**面板真的去调了那四个接口** ——
+    一个没有数据的空面板比不上一个按钮，可以让人误以为功能已经在用了。
+    """
+
+    @pytest.fixture(scope="class")
+    def html(self) -> str:
+        return WEB_INDEX.read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize(
+        "tab",
+        ["book", "labs", "res", "kb", "users", "appr", "viol", "notif", "audit"],
+    )
+    def test_every_tab_has_a_matching_pane(self, html, tab):
+        """标签和面板必须一一配对。
+
+        切页那段是按名字去 ``#pane-<name>`` 取元素的：少一个面板，
+        点那个标签会**静默什么都不发生**（``$()`` 返回 null 再取 .hidden 就抛错，
+        而抛错在外层 try 之外，整段监听器一起失效）。这条静态断言把这种
+        "点了没反应"挡在提交之前。
+        """
+        assert f'data-tab="{tab}"' in html, f"缺少标签 {tab}"
+        assert f'id="pane-{tab}"' in html, f"缺少面板 pane-{tab}"
+
+    @pytest.mark.parametrize("tab", ["appr", "viol", "notif", "audit"])
+    def test_admin_tabs_start_hidden(self, html, tab):
+        """管理员面板默认 hidden —— 普通用户不该看见半个闪一下的标签。
+
+        （真正的边界仍在服务端：手动构造请求照样 403。这里是"不显示无权限的控件"。）
+        """
+        assert f'id="tab-{tab}"  hidden' in html or f'id="tab-{tab}" hidden' in html, (
+            f"{tab} 标签缺少 hidden，非管理员会看到它"
+        )
+
+    @pytest.mark.parametrize(
+        ("endpoint", "why"),
+        [
+            ("/api/reservations/pending", "审批待办"),
+            ("/api/reservations/${id}/${kind}", "通过 / 驳回"),
+            ("/violations", "违约账"),
+            ("/pardon", "豁免"),
+            ("/api/notifications?user_id=", "通知（按人查）"),
+            ("/api/audit", "审计流水"),
+        ],
+    )
+    def test_the_h1_endpoints_are_reachable_from_the_console(self, html, endpoint, why):
+        """★ H1 的回归守门：这六个端点必须能从界面上够到。
+
+        少了任何一条，"管理员只能 curl"这个状态就会悄悄回来 ——
+        而它在测试里完全看不出来（接口是好的）。
+        """
+        assert endpoint in html, f"控制台里找不到「{why}」对应的调用：{endpoint}"
+
+    def test_admin_tabs_are_revealed_only_for_admins(self, html):
+        """四个面板由 enterApp() 里那段 isAdmin() 统一放出来。
+
+        写成按名字列一组而不是逐个 `if`，是为了让"漏放一个"这件事
+        在改动时就看得出来 —— 少放一个的后果是标签永远不可见，
+        而它**不会报错**。
+        """
+        assert '["tab-users","tab-appr","tab-viol","tab-notif","tab-audit"]' in html
+
+    def test_tab_loaders_cover_every_dynamic_pane(self, html):
+        """切页要拉数据的面板都得在 TAB_LOADERS 里登记。
+
+        漏登记的后果同样是"点了没反应"：面板显示的是骨架屏，永远不加载。
+        """
+        for name in ("appr", "viol", "notif", "audit", "res", "labs", "book", "users"):
+            assert name in html.split("const TAB_LOADERS=")[1].split("};")[0], (
+                f"TAB_LOADERS 里没有 {name}"
+            )
+
+
+class TestAdminPanelContracts:
+    """控制台渲染所依赖的字段。
+
+    为什么单独钉一遍：渲染是拼字符串，字段名写错**不会报错** ——
+    页面上就是一片 `undefined`，而所有静态断言照样绿。
+    所以这里把"控制台依赖哪些字段"用真实响应与模型字段钉住：
+    哪天有人把 ``user_name`` 改名，红的是这条测试，不是管理员的页面。
+    """
+
+    def test_reservation_fields_the_admin_panels_render(self):
+        from lagent.schemas import ReservationOut
+
+        fields = set(ReservationOut.model_fields)
+        assert {
+            "user_id",       # 审批列表要显示"谁在申请"
+            "user_name",
+            "equipment_name",
+            "lab_label",
+            "slot",
+            "no_show_at",    # 违约面板要能看出"哪条被判了未到场"
+            "pardoned_at",
+        } <= fields
+
+    async def test_violations_shape(self, http, as_user):
+        admin = await as_user("管理员")
+        resp = await http.get("/api/users/1/violations", headers=admin)
+        assert resp.status_code == 200
+        body = resp.json()
+        # 面板把 over_threshold 与 blocking_enabled 分开显示：
+        # 合成一个布尔的话，"超了阈值但处罚还没开"这种状态就没法表达
+        assert {
+            "count", "threshold", "window_days",
+            "blocked", "over_threshold", "blocking_enabled", "message",
+        } <= set(body)
+
+    async def test_notification_shape(self, http, as_user):
+        admin = await as_user("管理员")
+        rows = (await http.get("/api/notifications", params={"user_id": 2}, headers=admin)).json()
+        assert isinstance(rows, list)
+        for row in rows:
+            assert {"kind", "title", "body", "status", "created_at"} <= set(row)
+
+    async def test_audit_shape(self, http, as_user):
+        admin = await as_user("管理员")
+        rows = (await http.get("/api/audit", headers=admin)).json()
+        assert rows, "管理员登录本身就会留下审计记录，这里不该是空的"
+        assert {
+            "created_at", "action", "actor_name", "target_type", "target_id",
+            "outcome", "detail",
+        } <= set(rows[0])
+
+    async def test_pending_rows_carry_the_applicant(self, http, as_user):
+        """待审批列表必须能回答"谁在申请"。
+
+        没有申请人名字的待办队列是没法用的（试运行时对着它才发现缺这个字段），
+        所以哪怕当前没有待办，也要把**列表非空时**的形状钉住。
+        """
+        admin = await as_user("管理员")
+        rows = (await http.get("/api/reservations/pending", headers=admin)).json()
+        assert isinstance(rows, list)
+        for row in rows:
+            assert "user_id" in row and "user_name" in row
+
+
+class TestConsoleJavaScript:
+    """控制台里的 JS 至少要能通过语法解析。
+
+    控制台是「零构建单文件」，没有打包器替我们做这一步 —— 而这里已经有近 700 行 JS，
+    少一个括号，浏览器给你的是一片白屏加一行 console 报错，**而后端测试全绿**。
+    本文件开头记的另一起事故（HTML 删了 `#sel-user`，JS 里还在引用）也是同一类：
+    字符串断言拦不住，跑一次解析器就拦得住。
+
+    没有 node 就跳过：这条是加固，不该因为环境缺工具而红。
+    """
+
+    def test_the_inline_script_parses(self, tmp_path):
+        import re
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("环境里没有 node，跳过 JS 语法检查")
+
+        html = WEB_INDEX.read_text(encoding="utf-8")
+        blocks = re.findall(r"<script>(.*?)</script>", html, re.S)
+        assert blocks, "控制台里一个 <script> 都没有"
+        script = tmp_path / "console.js"
+        script.write_text("\n;\n".join(blocks), encoding="utf-8")
+        done = subprocess.run(
+            [node, "--check", str(script)], capture_output=True, text=True, check=False
+        )
+        assert done.returncode == 0, f"控制台 JS 语法错误：\n{done.stderr}"

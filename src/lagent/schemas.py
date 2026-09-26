@@ -232,6 +232,11 @@ class ReservationOut(BaseModel):
 
     id: int
     equipment_id: int
+    # 申请人。**审批与违约面板都离不开它** —— 一个只有设备和时段的待办队列，
+    # 管理员没法判断该不该批（试运行时对着这种列表才发现缺这个字段）。
+    # ``user_name`` 只在批量列表里填充（顺带 join 取回），单条返回里可能为空。
+    user_id: int
+    user_name: str = ""
     equipment_name: str = ""
     lab_label: str = ""
     date: dt.date
@@ -240,6 +245,11 @@ class ReservationOut(BaseModel):
     status: str
     purpose: str = ""
     slot: str = ""
+    # 违约的两个时间戳。对外暴露的理由很具体：没有它们，管理员在界面上**看不到
+    # 哪一条是被判定未到场的**，也就无从行使豁免 —— 而"豁免"这个动作本来就应该
+    # 在能看到证据的地方做。两个都是可选（正常预约没有）。
+    no_show_at: dt.datetime | None = None
+    pardoned_at: dt.datetime | None = None
 
 
 # 下单/取消的**机器可读**结果分类。刻意只有这七个：

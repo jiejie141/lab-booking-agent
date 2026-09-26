@@ -216,10 +216,17 @@ async def acquire_equipment_lock(session: AsyncSession, equipment_id: int) -> st
     return "none"
 
 
-def _to_out(res: Reservation, equipment_name: str = "", lab_label: str = "") -> ReservationOut:
+def _to_out(
+    res: Reservation,
+    equipment_name: str = "",
+    lab_label: str = "",
+    user_name: str = "",
+) -> ReservationOut:
     return ReservationOut(
         id=res.id,
         equipment_id=res.equipment_id,
+        user_id=res.user_id,
+        user_name=user_name,
         equipment_name=equipment_name,
         lab_label=lab_label,
         date=res.date,
@@ -228,6 +235,9 @@ def _to_out(res: Reservation, equipment_name: str = "", lab_label: str = "") -> 
         status=res.status,
         purpose=res.purpose,
         slot=res.slot_label,
+        # 带上违约时间戳，管理员才能在界面上看出"哪条被判了未到场"并去豁免
+        no_show_at=res.no_show_at,
+        pardoned_at=res.pardoned_at,
     )
 
 
@@ -679,7 +689,7 @@ async def _to_outs(
     if not rows:
         return []
 
-    # 一次把用到的设备与实验室全捞出来，避免逐行 get 造成 N+1
+    # 一次把用到的设备、实验室与用户全捞出来，避免逐行 get 造成 N+1
     equipment_ids = {row.equipment_id for row in rows}
     equip_stmt = (
         select(Equipment)
@@ -688,6 +698,16 @@ async def _to_outs(
     )
     equipment_map = {
         item.id: item for item in (await session.execute(equip_stmt)).scalars().all()
+    }
+    # 申请人名字：管理员的审批 / 违约列表要显示"谁在申请"，缺了它那个列表没法用
+    # （试运行时对着一个只有设备和时段的待办队列才发现这件事）。
+    # 只查列表里真正出现过的用户，不整表扫。
+    user_ids = {row.user_id for row in rows}
+    user_map = {
+        item.id: item
+        for item in (await session.execute(select(User).where(User.id.in_(user_ids))))
+        .scalars()
+        .all()
     }
 
     out: list[ReservationOut] = []
@@ -698,6 +718,7 @@ async def _to_outs(
                 row,
                 equipment.name if equipment else "",
                 equipment.lab.label if equipment and equipment.lab else "",
+                user_map[row.user_id].username if row.user_id in user_map else "",
             )
         )
     return out

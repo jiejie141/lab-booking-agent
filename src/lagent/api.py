@@ -59,6 +59,7 @@ from . import __version__, audit, notify
 from .agent.graph import build_agent_from_settings, set_catalog
 from .agent.state import SessionStore
 from .agent.tools import TOOL_SPECS
+from .backup import backup_dir
 from .clock import now_local
 from .config import Settings, get_settings
 from .db import SchemaDriftError, dispose_engine, revision_status, session_scope
@@ -804,6 +805,98 @@ def _check_sweeper(request: Request) -> HealthCheck:
     )
 
 
+# 待发通知积压多少条就该有人去看一眼。不做成配置项：这个数字没有"按部署而变"的
+# 场景，而多一个配置项就多一处要在 .env.example 与维护文档里解释、并被人调错的东西。
+NOTIFY_BACKLOG_ALERT = 50
+# 备份超过这么多天就算"该做而没做"。同理不做成配置项。
+BACKUP_STALE_DAYS = 7
+
+
+def _humanize_age(seconds: float) -> str:
+    """把秒数说成人话。这一档的读者是人，不是解析器 —— 所以给"3 天前"而不是 259200。"""
+    if seconds < 3600:
+        return f"{int(seconds // 60)} 分钟前"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)} 小时前"
+    return f"{int(seconds // 86400)} 天前"
+
+
+async def _check_notifications() -> HealthCheck:
+    """通知有没有在堆积。★ 这条补的是一个具体的盲区。
+
+    没配 SMTP 时，系统把通知写进库然后**静默**停在 pending，而在此之前没有任何
+    地方会说出这件事 —— 试运行时实测积压 20 条，四档探针全是绿的。学生收不到
+    审批结果的邮件只会来问人，而管理员手上没有能回答"到底发出去了没有"的地方。
+
+    ``ok`` 的分寸沿用本模块一贯的判断（同 app_mode=degraded 那套）：
+    **把"刻意降级"和"坏了"分开**。
+    * 没配 SMTP → ``ok=True``：内网/演示形态本来就不发邮件，这是设计内的；
+    * 配了 SMTP 却仍有积压 → ``ok=False``：投递在失败，这才是真需要有人管的状态。
+
+    刻意**不带任何计数**：这是公开端点，本模块的约定是不回计数与业务量
+    （要数字去 ``/api/health/details``）。所以哪怕 ok=False 也不说积压了多少。
+    """
+    counts = await notify.backlog()
+    pending = counts.get(notify.STATUS_PENDING, 0)
+    problem = notify.smtp_problem()
+    if problem:
+        # 明说是配置状态而不是故障，否则运维会把它当噪音、进而学会忽略整个探针
+        return HealthCheck("notifications", True, False, f"{problem}；通知只进库不出库")
+    if pending > NOTIFY_BACKLOG_ALERT:
+        return HealthCheck("notifications", False, False, "待发通知积压，投递很可能一直在失败")
+    return HealthCheck("notifications", True, False, "投递正常")
+
+
+def _check_backup() -> HealthCheck:
+    """最近一次备份有多久了。
+
+    这是"备份其实从来没成功过"唯一能被发现的地方 —— 试运行时镜像是没有 pg_dump 的，
+    `main.py backup` 在容器里一次都没成功过，而当时四档探针全是绿的。
+    "从没备份过"与"备份早就过期"都不该静默，所以两者都报 ok=False（非致命）。
+    """
+    directory = backup_dir()
+    # 三种情形要分开说，否则报出来的话会把运维引到错误的方向：
+    #   * 目录不存在 —— **新部署最常见的情形**。该做的是"先跑一次备份"，
+    #     不是去查权限。早先这一支和"不可读"混在一起，报的是"目录不可读"。
+    #   * 路径存在但不是目录 —— 这是配置写错了（LAB_BACKUP_DIR 指到了文件上）。
+    #   * 目录在但读不了 —— 这才是权限问题。
+    if not directory.exists():
+        return HealthCheck("backup", False, False, "从未备份过（python main.py backup）")
+    if not directory.is_dir():
+        return HealthCheck("backup", False, False, "备份路径不是目录（检查 LAB_BACKUP_DIR）")
+    try:
+        dumps = [item for item in directory.iterdir() if item.is_file()]
+    except OSError as exc:
+        return HealthCheck("backup", False, False, f"备份目录不可读：{type(exc).__name__}")
+    if not dumps:
+        return HealthCheck("backup", False, False, "从未备份过（python main.py backup）")
+    newest = max(dumps, key=lambda item: item.stat().st_mtime)
+    age = max(time.time() - newest.stat().st_mtime, 0.0)
+    stale = age > BACKUP_STALE_DAYS * 86400
+    detail = f"最近一次 {_humanize_age(age)}"
+    if stale:
+        detail += f"，已超过 {BACKUP_STALE_DAYS} 天"
+    return HealthCheck("backup", not stale, False, detail)
+
+
+def _backup_stats() -> dict[str, Any]:
+    """备份目录的账（带数字的那一份，只出现在需要登录的 details 里）。"""
+    directory = backup_dir()
+    try:
+        dumps = [item for item in directory.iterdir() if item.is_file()]
+    except OSError:
+        return {"files": 0, "latest_name": None, "latest_age_seconds": None, "dir": str(directory)}
+    if not dumps:
+        return {"files": 0, "latest_name": None, "latest_age_seconds": None, "dir": str(directory)}
+    newest = max(dumps, key=lambda item: item.stat().st_mtime)
+    return {
+        "files": len(dumps),
+        "latest_name": newest.name,
+        "latest_age_seconds": int(max(time.time() - newest.stat().st_mtime, 0.0)),
+        "dir": str(directory),
+    }
+
+
 @router.get(HEALTH_PATH)
 async def health() -> dict:
     """存活探针（liveness）：只证明「进程还能响应」。
@@ -830,12 +923,18 @@ async def ready(request: Request, response: Response) -> dict:
     公开是刻意的：编排系统的探针默认不带凭据，要凭据的探针等于没探针。
     所以这里只回「哪些检查通过/失败」，**不回任何计数与业务量** ——
     那些在 ``/api/health/details`` 里，需要登录。
+
+    后两项（notifications / backup）是试运行之后补的：它们都不是"服务能不能用"，
+    而是"有没有人在悄悄坏掉" —— 通知在库里堆积、备份从来没成功过。
+    两者都非致命（不会 503），但**必须被看见**，否则只会在真需要它们的那天暴露。
     """
     checks = [
         await _check_database(),
         _check_agent(request),
         _check_retrieval(),
         _check_sweeper(request),
+        await _check_notifications(),
+        _check_backup(),
     ]
     usable = all(check.ok or not check.critical for check in checks)
     if not usable:
@@ -886,6 +985,10 @@ async def health_details(
         "timezone": settings.timezone,
         "now": now_local().isoformat(timespec="seconds"),
         "counts": counts,
+        # 通知的账与备份的账：公开探针只说"有没有异常"，数字在这里 ——
+        # 要凭据才看得到"库里有多少条没发出去"，这与 counts 是同一条约定。
+        "notifications": await notify.backlog(),
+        "backup": _backup_stats(),
     }
 
 

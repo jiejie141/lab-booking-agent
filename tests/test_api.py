@@ -59,13 +59,29 @@ class TestPublicEndpoints:
         body = resp.json()
         assert body["status"] == "ready"
         checks = {check["name"]: check for check in body["checks"]}
-        assert set(checks) == {"database", "agent", "retrieval", "sweeper"}
+        # notifications / backup 是试运行之后补的两项：它们回答的不是"能不能用"，
+        # 而是"有没有人在悄悄坏掉"（通知堆在库里、备份从没成功过）。
+        assert set(checks) == {
+            "database",
+            "agent",
+            "retrieval",
+            "sweeper",
+            "notifications",
+            "backup",
+        }
         for check in checks.values():
             assert isinstance(check["ok"], bool)
             assert isinstance(check["critical"], bool)
             assert check["detail"], "每一项都要说明白为什么是这个结论"
+        # 新增的这两项都不是致命的：它们坏了不代表服务不能用
+        assert checks["notifications"]["critical"] is False
+        assert checks["backup"]["critical"] is False
         # 就绪探针也**不能**泄露业务量 —— 它是公开的
         assert "counts" not in body
+        # 连"积压了多少条"这种数字也不行：公开端点的约定是不回计数。
+        # 要数字去 /api/health/details（需要登录）。
+        detail = checks["notifications"]["detail"]
+        assert not any(ch.isdigit() for ch in detail), f"公开探针不该出现数字：{detail}"
 
     async def test_ready_is_503_when_the_database_is_dead(self, http, monkeypatch):
         """★ 同一件事在就绪探针上必须**相反**：数据库没了，服务就是不能干活。
@@ -438,3 +454,128 @@ class TestCancelAuthorization:
         )
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
+
+
+class TestTrialRunGates:
+    """试运行之后补的两项探针：通知积压 与 备份新鲜度。
+
+    它们回答的**不是**"服务能不能用"（那是 database / agent 那几项），而是
+    "有没有人在悄悄坏掉"。补它们的理由很具体：试运行实测到通知积压 20 条、
+    镜像里没有 pg_dump 导致备份从来没成功过一次 —— 而当时四档探针全是绿的。
+
+    两条共同的设计约束，测试里都钉住：
+    * **非致命**（critical=False）：坏了不代表服务不能用，不该让编排系统重启进程；
+    * **不带数字**：就绪探针是公开的，本模块的约定是不回任何计数与业务量。
+    """
+
+    async def test_backup_flags_a_deployment_that_never_backed_up(
+        self, isolated_db, monkeypatch, tmp_path
+    ):
+        from lagent import api as api_module
+
+        monkeypatch.setattr(api_module, "backup_dir", lambda: tmp_path / "空目录")
+        check = api_module._check_backup()
+        assert check.ok is False and check.critical is False
+        assert "从未备份过" in check.detail
+
+    async def test_backup_passes_for_a_fresh_dump(self, isolated_db, monkeypatch, tmp_path):
+        from lagent import api as api_module
+
+        directory = tmp_path / "backups"
+        directory.mkdir()
+        (directory / "lab-20260101.sql").write_text("-- dump", encoding="utf-8")
+        monkeypatch.setattr(api_module, "backup_dir", lambda: directory)
+        check = api_module._check_backup()
+        assert check.ok is True
+        assert "分钟前" in check.detail
+
+    async def test_backup_flags_a_stale_dump(self, isolated_db, monkeypatch, tmp_path):
+        """过期与从未备份是两件事，都要报出来。"""
+        import os
+        import time
+
+        from lagent import api as api_module
+
+        directory = tmp_path / "backups"
+        directory.mkdir()
+        dump = directory / "old.sql"
+        dump.write_text("-- dump", encoding="utf-8")
+        stale = time.time() - (api_module.BACKUP_STALE_DAYS + 1) * 86400
+        os.utime(dump, (stale, stale))
+        monkeypatch.setattr(api_module, "backup_dir", lambda: directory)
+        check = api_module._check_backup()
+        assert check.ok is False and check.critical is False
+        assert "超过" in check.detail
+
+    async def test_an_empty_backup_directory_also_counts_as_never_backed_up(
+        self, isolated_db, monkeypatch, tmp_path
+    ):
+        """目录建了但一个 dump 都没有，与"目录都不存在"是同一件事。"""
+        from lagent import api as api_module
+
+        empty = tmp_path / "backups"
+        empty.mkdir()
+        monkeypatch.setattr(api_module, "backup_dir", lambda: empty)
+        check = api_module._check_backup()
+        assert check.ok is False and "从未备份过" in check.detail
+
+    async def test_a_misconfigured_backup_path_says_so(
+        self, isolated_db, monkeypatch, tmp_path
+    ):
+        """路径指到文件上时要说"不是目录"。
+
+        ⚠️ 这一支早先是和"目录不存在"混在一起的：新部署没有备份目录时
+        报的是"备份目录不可读" —— 那会把运维引去查权限，而真正该做的是先跑一次备份。
+        **把两种情形混成一句话，代价是排查方向整个走偏。**
+        """
+        from lagent import api as api_module
+
+        not_a_directory = tmp_path / "这是个文件"
+        not_a_directory.write_text("x", encoding="utf-8")
+        monkeypatch.setattr(api_module, "backup_dir", lambda: not_a_directory)
+        check = api_module._check_backup()
+        assert check.ok is False and check.critical is False
+        assert "不是目录" in check.detail
+
+    async def test_unconfigured_smtp_is_a_config_state_not_a_failure(
+        self, isolated_db, monkeypatch
+    ):
+        """没配 SMTP 时通知"只进库不出库"是设计内的（内网/演示形态）。
+
+        把它算成故障，运维会把它当噪音 —— 那正是这个探针最没用的结局。
+        但 detail 必须把这件事说出来，否则积压就永远是静默的。
+        """
+        from lagent import api as api_module
+
+        monkeypatch.setenv("LAB_SMTP_HOST", "")
+        from lagent.config import reset_settings_cache
+
+        reset_settings_cache()
+        check = await api_module._check_notifications()
+        assert check.ok is True and check.critical is False
+        assert "SMTP" in check.detail
+
+    async def test_configured_but_stuck_delivery_goes_red(self, isolated_db, monkeypatch):
+        """★ 反过来：配了 SMTP 却仍然积压，这才是真需要有人管的状态。"""
+        from lagent import api as api_module
+
+        monkeypatch.setattr(api_module.notify, "smtp_problem", lambda: None)
+        # backlog 是 async 的 —— 桩必须同样是 async，否则拿到的是 dict，
+        # await 一个 dict 会 TypeError（这是被测代码的正确行为，不是它的错）
+        async def fake_backlog():
+            return {"pending": api_module.NOTIFY_BACKLOG_ALERT + 1, "sent": 0, "failed": 0}
+
+        monkeypatch.setattr(api_module.notify, "backlog", fake_backlog)
+        check = await api_module._check_notifications()
+        assert check.ok is False and check.critical is False
+
+    async def test_details_carries_the_numbers_the_public_probe_must_not(
+        self, http, as_user
+    ):
+        """数字只在需要登录的那一档出现（与 counts 同一条约定）。"""
+        admin = await as_user("管理员")
+        body = (await http.get("/api/health/details", headers=admin)).json()
+        assert isinstance(body["notifications"], dict)
+        assert set(body["notifications"]) >= {"pending", "sent", "failed"}
+        assert isinstance(body["backup"], dict)
+        assert "files" in body["backup"] and "latest_age_seconds" in body["backup"]
