@@ -1036,13 +1036,21 @@ mypy           # Success: no issues found in 78 source files
 
 ### CI
 
-`.github/workflows/ci.yml` 分三个 job，拆开是为了**失败时能一眼看出是哪一类问题**：
+`.github/workflows/ci.yml` 分四个 job，拆开是为了**失败时能一眼看出是哪一类问题**：
 
 | job | 跑什么 | 为什么单独拆 |
 |---|---|---|
 | `quality` | ruff（lint）→ mypy → pytest，**py3.10 与 py3.13 双版本矩阵** | 声明支持 3.10 就不能只在 3.13 上验证 |
 | `smoke` | `main.py eval` → `scripts/overlap_race.py` → `scripts/sweep_demo.py` → `scripts/smoke_http.py` | 这几项都要起真实进程 / 真实 uvicorn / 真实 SQLite 文件，失败信号与单测不同类 |
 | `docker` | `docker build`（不推送） | Dockerfile 坏了属于交付问题，不是代码问题 |
+| `postgres` | 在 `postgres:16-alpine` service container 上跑 `main.py migrate` + `tests/test_postgres.py` | **整套单测都跑在 SQLite 上**，而生产形态是 PG。这个 job 存在的唯一目的就是让 PG 那条路径真的被执行一次 |
+
+`postgres` 这一项是补上去的，起因值得记一笔：在它之前，**PG 路径一行都没被执行过** ——
+`conftest` 把库地址硬编码成 `sqlite+aiosqlite://`，于是"迁移能不能在空库上升到头、
+`postgresql_where` 有没有真写进 DDL、`pg_advisory_xact_lock` 的 SQL 在 asyncpg 下能不能过"
+全靠读代码。这个 job 用的是 GitHub runner 自带的 service container，
+**不需要在开发机上装任何东西**（本机 Docker 起不来时也照样能验）。
+它还会检查 `LAB_REQUIRE_PG_TESTS=1`：少了库地址就报错，绝不让那些用例静默跳过。
 
 CI **只强制 lint，不强制 formatter**：本项目的手写风格是「同类参数按语义分组压行」，
 `ruff format` 会把它拆成一参数一行，全仓重排 30 个文件的噪声不该混进功能提交。

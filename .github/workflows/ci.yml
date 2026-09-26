@@ -1,10 +1,11 @@
 # ===========================================================================
 # CI：每次 push / PR 自动验证
 #
-# 分三个 job，故意拆开 —— 失败时能一眼看出是哪一类问题：
-#   quality : 静态检查（ruff）+ 类型检查（mypy）+ 单元测试（pytest）
-#   smoke   : 真实进程上的端到端验证（评测集 / 重叠竞态 / 清扫演示 / HTTP 越权清单）
-#   docker  : 镜像能不能构建出来
+# 分四个 job，故意拆开 —— 失败时能一眼看出是哪一类问题：
+#   quality  : 静态检查（ruff）+ 类型检查（mypy）+ 单元测试（pytest）
+#   smoke    : 真实进程上的端到端验证（评测集 / 重叠竞态 / 清扫演示 / HTTP 越权清单）
+#   docker   : 镜像能不能构建出来
+#   postgres : 在真实 PostgreSQL 上跑迁移 + 并发不变式（见 tests/test_postgres.py）
 #
 # quality 跑两个 Python 版本：pyproject 声明 >=3.10，本地开发用 3.13，
 # 两头都测才不会出现「只有我的机器能跑」。
@@ -103,3 +104,65 @@ jobs:
 
       - name: 构建镜像（不推送，只验证 Dockerfile 可用）
         run: docker build -t lab-booking-agent:ci .
+
+  # -------------------------------------------------------------------------
+  # PostgreSQL 真实链路
+  #
+  # 为什么必须单独一个 job：整套单测都跑在 SQLite 上（conftest 把库地址硬编码成
+  # sqlite+aiosqlite），而**生产形态是 PG** —— compose 里写的是 postgresql+asyncpg，
+  # 并发那段还用了 pg_advisory_xact_lock()。没有这个 job 之前，那条路径
+  # 一行都没被执行过：迁移能否在空库上走通、部分唯一索引的 postgresql_where
+  # 有没有真写进 DDL、advisory lock 的 SQL 在 asyncpg 下能不能过，
+  # 全靠"读代码觉得没问题"。
+  #
+  # 用 GitHub runner 自带的 service container 起 PG，不需要在开发机上装任何东西
+  # （本机的 Docker 起不来时也照样能验，这正是它比"本地跑一遍"更可靠的地方）。
+  # -------------------------------------------------------------------------
+  postgres:
+    name: PostgreSQL 真实链路
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: lab
+          POSTGRES_PASSWORD: lab
+          POSTGRES_DB: lab
+        ports:
+          - 5432:5432
+        # 不等健康就开跑的话，第一步 migrate 会以"连不上库"失败 ——
+        # 那个报错看起来像代码问题，其实是启动顺序问题。
+        options: >-
+          --health-cmd "pg_isready -U lab -d lab"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      LAB_DATABASE_URL: postgresql+asyncpg://lab:lab@127.0.0.1:5432/lab
+      LAB_TEST_PG_URL: postgresql+asyncpg://lab:lab@127.0.0.1:5432/lab
+      LAB_ALLOW_INSECURE_DEFAULTS: "true"
+      # 这个 job 的唯一意义就是跑 PG 用例。少了 URL 时必须**报错**，
+      # 而不是让那些用例静默跳过、job 挂着一片绿。
+      LAB_REQUIRE_PG_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: 安装依赖（含 asyncpg）
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # asyncpg 在 requirements.txt 里是注释掉的可选项（本地跑 SQLite 用不上），
+          # 但生产走的就是它 —— 这个 job 必须真的装上。
+          pip install "asyncpg>=0.29"
+
+      - name: 空库 → head 的迁移（上线时走的就是这一条命令）
+        run: python main.py migrate
+
+      - name: PostgreSQL 专项用例
+        run: pytest tests/test_postgres.py -q
