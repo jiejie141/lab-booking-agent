@@ -26,7 +26,7 @@
 > | P2-9 | 预约列表无分页 | ✅ 已整改 | `5dc4aa0` |
 > | P2-10 | 会话在内存、限流单进程、单 worker | ⚪ **接受**（发布拓扑是单副本；重新评估的触发条件已写明） | — |
 > | P2-11a | **PostgreSQL 路径一行都没执行过** | ✅ **已整改**：CI 新增 `postgres` job，在真实 PG 上跑迁移 + 并发不变式；首次运行即绿 | `371e1e0` |
-> | P2-11b | `docker compose up` 未实机验证 | ⚠️ **仍受阻**（`config` 通过 + 缺密钥 exit 1 已实测；守护进程起不来，见下） | — |
+> | P2-11b | `docker compose up` 未实机验证 | ✅ **已整改**：栈跑通、两容器 healthy、PG 上 `revision=0005`、端到端验收 **25/25**；脚本已收进 `scripts/accept_deploy.py` | 本文件 · 见下 |
 >
 > **编号对不齐的说明**：整改提交信息里写的是 P1-5/6/7/8（按**实施顺序**编号），
 > 与本文件 §结论 2 表格的 5/6/7/8（按**评估顺序**：审批/黑名单/通知/限流）不完全对应。
@@ -169,50 +169,87 @@ react → deterministic → 引导式表单三级，且**能说清边界**：它
 底层是可靠的。也不是"可直接上线"——**审批、黑名单、通知三整块是零代码**，
 加上一个**拿默认值就能伪造管理员令牌**的安全默认值，直接部署会出真实事故。
 
-> **复评更新（最新 commit `371e1e0`）：结论改为「可小范围试点上线，仅剩部署实机验证一项」。**
+> **复评更新（2026-09-26 22:3x）：结论改为「可以上线」。**
 >
 > 上面点名的四件事（审批 / 黑名单 / 通知 / 安全默认值）**全部已整改**，
 > 测试从 639 条涨到 **830 条**。原结论里"直接部署会出真实事故"的理由已不成立。
 >
-> 剩下三条的现状（第 2 条已经解决）：
+> 原结论里列出的三条遗留，现在两条已闭、一条经权衡后接受：
 >
-> 1. **`docker compose up` 从未真正跑通过。** 2026-09-26 再次实测：
->    `docker compose config` **静态解析通过**，且不给 `LAB_JWT_SECRET` 时
->    确以 **exit 1** 拒绝解析（"required variable LAB_JWT_SECRET is missing a value"）——
->    fail-closed 在 compose 层是真的生效的。但 `docker ps` 报
->    `failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine`，
->    守护进程起不来。**两个具体原因（都需要人工处理）见文末「部署实机验证的阻塞点」。**
->    **没跑过的部署流程不算部署流程** —— 这一条原样保留。
+> 1. ~~**`docker compose up` 从未真正跑通过**~~ → **已解决**：栈跑通、两容器 healthy、
+>    真 PG 上 `revision=0005`、端到端验收 **25/25**。
+>    细节与一次**我自己的误判更正**见文末「部署实机验证」。
 > 2. ~~**生产形态是 PostgreSQL，但从没在 PG 上跑过测试**~~ → **已解决（`371e1e0`）**：
 >    CI 新增 `postgres` job，用 GitHub runner 自带的 `postgres:16-alpine`
 >    service container 跑「空库 → `alembic upgrade head`」+ 五条唯一索引的 DDL 与
 >    真实插入 + 20 并发抢同一时段必须恰好 1 个成功（那条 `pg_advisory_xact_lock`
 >    路径终于被执行了）+ 清扫的 rowcount 语义。**首次运行即绿。**
 >    它不依赖本机 Docker，所以本机起不了 Docker 也能持续验证。
-> 3. **单 worker + 会话在进程内存**：高峰期长请求会堵住整个服务。**权衡见下，
->    结论是"接受，但写清触发条件"而不是"悄悄当它不存在"。**
+> 3. **单 worker + 会话在进程内存**：高峰期长请求会堵住整个服务。这条**经权衡后接受**，
+>    理由与三条重新评估的触发条件写在 P2-10；发布形态是单副本，所以
+>    "配额 × 副本数"在默认拓扑下不成立。
 >
-> 建议路径：先在一个实验室、一个学期内试点（SQLite 单实例足够），
-> 同时把第 1 条（compose 实机）在真机上验掉，再谈扩大范围。
+> 上线前建议再做的一件事与部署无关：**把 `LAB_JWT_SECRET` 放进 Docker secret
+> 或等效的密钥管理**，而不是留在 shell 历史/`.env` 里。其余按
+> 「先一个实验室、一个学期试点」推进即可。
 
-#### 部署实机验证的阻塞点（需要人处理，不是代码问题）
+#### 部署实机验证：已完成（2026-09-26 22:2x）
 
-实测于 2026-09-26。两个原因都会让 `docker compose up` 走不完，
-且**都不是"再试一次就好"**：
+**`docker compose up` 跑通了，端到端验收 25/25 项通过。**
 
-1. **`wsl.exe` 在安全中心黑名单里。** Docker Desktop 的 Linux 引擎要拉 WSL，
-   而策略拦截会直接杀掉整条进程树 —— 表现为 `Start-Process Docker Desktop.exe`
-   返回成功、日志里也写下了 `launching com.docker.backend.exe`，
-   但几十秒后 `Get-Process *docker*` 是空的。
-   这是「命令安全 → 程序黑名单」里的配置项，**只能由本人在安全中心里把
-   `wsl.exe` 移出黑名单**（或以管理员身份处理），从命令行绕不过去。
-2. **Docker Desktop 配了手动代理，指向 `http://127.0.0.1:7890`，而该端口当前没有服务在听。**
-   见 `%APPDATA%\Docker\settings-store.json` 的 `OverrideProxyHTTP/HTTPS`。
-   即使引擎起来了，`docker pull postgres:16-alpine` 也会连不上 ——
-   报错会像"网络问题"，其实是本机代理没开。
+```
+$ docker ps
+lab-booking-agent-api-1   Up (healthy)   0.0.0.0:8200->8200/tcp
+lab-booking-agent-db-1    postgres:16-alpine   Up (healthy)   0.0.0.0:5432->5432/tcp
 
-这两条处理完之后，`docker compose up --build` 与随后的
-`curl http://127.0.0.1:8200/api/health/ready` 就可以作为最终验收命令。
+$ curl -s http://127.0.0.1:8200/api/health/ready
+{"status":"ready","checks":[{"name":"database","ok":true,"critical":true,
+ "detail":"可用，revision=0005"}, ... ]}
+
+$ python scripts/accept_deploy.py
+结果：25/25 项通过
+```
+
+关键的不是"起来了"，而是这几条**只有真机才验得到**的：
+库是 `postgresql+asyncpg`（不是 SQLite）、迁移在真 PG 上跑到 `revision=0005`、
+容器健康检查转 healthy、真实下单 201 且重复预约被正确判为 409（而不是 500）、
+控制台页面里确实有「直接预约」面板。
+
+验收脚本已收进 `scripts/accept_deploy.py`，可重复运行。
+
+#### ⚠️ 上一版这里写错了两处，更正如下
+
+第一版评估（同一天早些时候）把两个观察当成了结论，事后证明**都不准确**。
+留着这段是为了说明"当时为什么会那么判断"，以及**观察到了什么不等于知道了原因**：
+
+| 当时的说法 | 实际情况 |
+|---|---|
+| "`wsl.exe` 在安全中心黑名单里 → 只能人工把 `wsl.exe` 移出黑名单，命令行绕不过去" | 黑名单**只拦「从沙箱/工具里启动」这条路径**。我通过 `Start-Process` 拉 Docker Desktop 会被拦（日志里只有 `launching …backend.exe` 就没了下文），但**本人正常启动 Docker Desktop 完全没问题** —— 实测栈跑起来了、两个容器都 healthy、`wslservice.exe` 也在跑。**所以这一条本不需要你做任何配置。** 教训：把"我的工具做不到"说成了"这件事做不到"。 |
+| "Docker 代理指向 `127.0.0.1:7890` 而该端口没有服务在听" | **端口是通的**（Clash Verge 在跑，PID 15644 在听）。我是从 `git ... over proxy 127.0.0.1: Could not connect to server` 推断出"代理没开"的 —— 那句话说的是**代理连不上 github.com**，不是代理不在。同一条报错，"连接被拒"与"连上了但上游失败"是两件事，我没分清。 |
+
+**真正会挡路的其实是第三个原因，当时没意识到：`registry-1.docker.io` 不可达。**
+（实测：经代理与直连都返回 000；`hub.docker.com` 同样不通。）
+所以即使引擎一切正常，`docker pull postgres:16-alpine` 也拉不下来。
+解法是配镜像源，实测可用性：
+
+| 镜像源 | 结论 |
+|---|---|
+| `https://docker.m.daocloud.io` | **可用**（拿到 `postgres:16-alpine` 的 16 个平台清单） |
+| `https://docker.1ms.run` | **可用**（同上） |
+| `https://docker.xuanyuan.me` | 403，不可用 |
+| `https://docker.1panel.live` | 403，不可用 |
+
+在 Docker Desktop → Settings → Docker Engine 里加：
+
+```json
+{
+  "registry-mirrors": ["https://docker.m.daocloud.io", "https://docker.1ms.run"]
+}
+```
+
+然后 Apply & Restart。**注意判据**：镜像源的 `/v2/` 返回 401 是正常的
+（那是 registry 要求取 token 的标准响应），要用"能不能真拿到某个 tag 的
+manifest"来判，光看状态码会把可用源误判掉。
 
 ---
 

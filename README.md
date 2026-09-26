@@ -981,6 +981,7 @@ python main.py backup           # SQLite 走 VACUUM INTO / PostgreSQL 走 pg_dum
 python scripts/overlap_race.py  # 3/3
 python scripts/sweep_demo.py    # 18/18（真实 SQLite 文件上的清扫端到端）
 python scripts/smoke_http.py    # 83/83（真实 uvicorn 进程，含 react 模式与降级链）
+python scripts/accept_deploy.py  # 25/25（真 compose 栈：真 PG + 真容器 + 真下单）
 ```
 
 ```
@@ -994,6 +995,7 @@ pytest:            803 passed
 指标与健康检查:      72 项（文本格式逐行校验 / 路由模板而非真实 path / 基数上限与丢弃计数 / p95 误差实测 / 三档健康检查）
 数据库迁移:         23 项（产物 vs 模型 diff 为空 / 部分索引 WHERE 未丢 / 回滚可往返 / 老库接管 / **给有数据的表加列**）
 HTTP 越权清单:       83/83（含 deterministic / react / degraded / 端点不可达四种启动配置）
+compose 实机验收:     25/25（PostgreSQL 上 revision=0005 / 容器 healthy / 真下单 201 / 重约 409）
 后台维护 CRUD:      38 项（新增/改字段/显式 null 不动 / 停用即失效 / **没有删除路由** / 冲突与越权）
 设备级审批:         11 项（申请即占坑 / 驳回释放时段 / 重复处理 409 / 非管理员拿不到待办）
 通知:               22 项（四类业务事件都留痕 / 没配 SMTP 不假装成功 / 失败留原因不重发 / **通知崩了不影响下单**）
@@ -1050,7 +1052,7 @@ mypy           # Success: no issues found in 78 source files
 |---|---|---|
 | `quality` | ruff（lint）→ mypy → pytest，**py3.10 与 py3.13 双版本矩阵** | 声明支持 3.10 就不能只在 3.13 上验证 |
 | `smoke` | `main.py eval` → `scripts/overlap_race.py` → `scripts/sweep_demo.py` → `scripts/smoke_http.py` | 这几项都要起真实进程 / 真实 uvicorn / 真实 SQLite 文件，失败信号与单测不同类 |
-| `docker` | `docker build`（不推送） | Dockerfile 坏了属于交付问题，不是代码问题 |
+| `docker` | `docker compose up -d --build` → 等就绪 → `scripts/accept_deploy.py`（25 项）→ `down -v` | **只 `docker build` 只能证明「Dockerfile 语法对」**。迁移在真 PG 上跑不跑得到 head、容器健康检查转不转 healthy、端口映射对不对、控制台能不能打开 —— 这些单测与 smoke 全都覆盖不到（它们跑在一次性 SQLite 库上） |
 | `postgres` | 在 `postgres:16-alpine` service container 上跑 `main.py migrate` + `tests/test_postgres.py` | **整套单测都跑在 SQLite 上**，而生产形态是 PG。这个 job 存在的唯一目的就是让 PG 那条路径真的被执行一次 |
 
 `postgres` 这一项是补上去的，起因值得记一笔：在它之前，**PG 路径一行都没被执行过** ——
@@ -1068,10 +1070,34 @@ CI **只强制 lint，不强制 formatter**：本项目的手写风格是「同�
 ## 容器化
 
 ```bash
-docker compose up --build
+docker compose up -d --build
 # api  → http://127.0.0.1:8200
 # db   → PostgreSQL 16（比 SQLite 更接近生产形态）
+
+python scripts/accept_deploy.py     # 端到端验收：25 项，含真下单与权限边界
 ```
+
+`accept_deploy.py` 验的是**别的测试验不到的**：pytest 跑在一次性 SQLite 库上、
+`smoke_http.py` 起的是本机 uvicorn，只有这一条能回答"按上面的步骤起来之后，
+它到底能不能用"。它真的下一单再取消（只读探测证明不了"能约上"）。
+
+### 国内网络：Docker Hub 可能拉不下来
+
+`registry-1.docker.io` 在国内常常不可达（实测：经代理与直连都连不上，
+`hub.docker.com` 同样不通）。这时 `docker pull postgres:16-alpine` 会失败，
+而**报错长得像"网络问题"，不像"镜像源没配"**。在
+Docker Desktop → Settings → Docker Engine 里加：
+
+```json
+{
+  "registry-mirrors": ["https://docker.m.daocloud.io", "https://docker.1ms.run"]
+}
+```
+
+这两个是实测可用的（真的能取到 `postgres:16-alpine` 的清单；
+`docker.xuanyuan.me` / `docker.1panel.live` 实测 403）。
+判据要注意：镜像源 `/v2/` 返回 **401 是正常的**（registry 要求先取 token），
+只用状态码判会误杀可用源 —— 得看"能不能真拿到某个 tag 的 manifest"。
 
 生产部署前必须做的一件事：设置 `LAB_JWT_SECRET`。
 **用仓库内置默认密钥（或留空）时服务会拒绝启动，而不是打一条告警继续跑 ——**
