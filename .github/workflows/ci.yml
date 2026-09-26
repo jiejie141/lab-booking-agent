@@ -51,6 +51,21 @@ jobs:
           # 静态检查工具不进 requirements.txt：它们不是运行依赖
           pip install "ruff>=0.9" "mypy>=1.11"
 
+      # 把「这个 job 到底测的是哪套栈」打出来。
+      #
+      # 起因是一次真实的排查：py3.13 的 mypy 报错、py3.10 却全绿，而两边跑的是
+      # 同一份 mypy 版本、同一份配置。真因是 requirements 只写了 >= 下限，
+      # 而 SQLAlchemy 2.1 抬高了 requires_python —— py3.10 于是被解析到 2.0，
+      # py3.13 拿到 2.1，**两个 job 静默地在测两套不同的栈**。
+      # mypy 的输出本来就依赖「装了哪些带类型标注的包」，所以这类差异
+      # 第一个暴露它的地方永远是类型检查，而且看不出原因。
+      # 一行版本号能让下次不用再查一遍。
+      - name: 记录本 job 的依赖栈
+        run: |
+          python -c "import sys; print('python', sys.version.split()[0])"
+          python -c "import sqlalchemy, pydantic; print('sqlalchemy', sqlalchemy.__version__, '| pydantic', pydantic.__version__)"
+          python -m mypy --version
+
       - name: ruff（lint）
         run: ruff check --output-format=github .
 

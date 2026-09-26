@@ -324,7 +324,14 @@ async def _archive(
     total = 0
     while True:
         async with session_scope() as session:
-            rows = (
+            # 显式标注，不靠推导：``model`` 是 ``Any``（这个函数对两张表通用），
+            # 于是 ``select(model)`` 是一个**未绑定**的泛型，mypy 无从推出元素类型
+            # （它退化成了 ``Sequence[Never]``）。SQLAlchemy 2.0 的桩恰好没报，
+            # 2.1 改了桩之后就报了 —— 与其等下一次依赖升级再来一次，
+            # 不如把「这里就是动态的」写明白。
+            # 标 ``Sequence[Any]`` 而不是 ``list[Any]``：要匹配表达式本身的形状，
+            # 否则报的是下一个错（``Sequence[Never]`` 不能赋给 ``list[Any]``）。
+            rows: Sequence[Any] = (
                 (
                     await session.execute(
                         select(model)
