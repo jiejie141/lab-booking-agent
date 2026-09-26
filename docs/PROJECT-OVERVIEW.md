@@ -251,4 +251,5 @@ main.py → server.serve() → api.create_app()
 
 > 交付就绪度的详细评估、逐项整改清单与 `commit` 索引见
 > [`DELIVERY-READINESS.md`](DELIVERY-READINESS.md)；
-> 技术选型与分期升级方案见 [`ENTERPRISE-UPGRADE.md`](ENTERPRISE-UPGRADE.md)。
+> 技术选型与分期升级方案见 [`ENTERPRISE-UPGRADE.md`](ENTERPRISE-UPGRADE.md)；
+> **真实栈上的试用结果与摩擦点清单**见 [`TRIAL-RUN.md`](TRIAL-RUN.md)。

@@ -16,3 +16,7 @@ __pycache__/
 .gitignore
 .vscode/
 .idea/
+.github/
+
+# 归档与备份只有几百 MB 到几 GB，运行时用不到（挂卷在宿主机）
+var/

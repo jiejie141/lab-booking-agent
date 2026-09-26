@@ -46,6 +46,18 @@ services:
     ports:
       - "8200:8200"
     restart: unless-stopped
+    volumes:
+      # 运行态产物必须落在卷上。默认两个目录都在 ./var/ 下：
+      #   var/backup   —— main.py backup 的产物
+      #   var/archive  —— 清扫归档的审计/门禁流水（先落盘后删除，见 sweep.py）
+      # 不挂卷的话它们写在容器的可写层里，`docker compose up --build`
+      # 一重建就**全没了** —— 而"备份被重建清掉"这件事，
+      # 只有在真需要恢复的那一天才会被发现。
+      #
+      # 取出来的方式：
+      #   docker compose cp api:/app/var/backup ./var/
+      - labvar:/app/var
 
 volumes:
   pgdata:
+  labvar:
