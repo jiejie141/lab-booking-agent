@@ -52,7 +52,20 @@ RUN apt-get update \
 COPY . .
 
 # 非 root 运行
+#
+# ★ 这里必须**先把运行态产物目录建出来并 chown 给 appuser**，不能只靠 compose 挂卷：
+#   Docker 只会在「卷是空的 **且** 镜像里该路径存在」时，才把目录的**内容与属主**
+#   一起复制进新卷。`.dockerignore` 排除了 `var/`，所以镜像里原本没有 /app/var ——
+#   于是 compose 挂上来的命名卷根目录属主是 **root**，而容器以 appuser(10001) 跑，
+#   `main.py backup` 的第一步 mkdir 就炸：
+#     PermissionError: [Errno 13] Permission denied: 'var/backup'
+#
+#   这个坑是"给 api 挂备份卷"这个修复**自己引进来的**，而且是 CI 那道
+#   "备份 + 恢复演练"的守门当场抓住的 —— 本机验不出来，因为本机那次
+#   跑的是 bind mount（Windows 上权限宽松），不是命名卷。
+#   教训：**改挂载方式之后，要用"全新空卷"验一次**，别拿已经跑过的容器验。
 RUN useradd --create-home --uid 10001 appuser \
+    && mkdir -p /app/var/backup /app/var/archive \
     && chown -R appuser:appuser /app
 USER appuser
 

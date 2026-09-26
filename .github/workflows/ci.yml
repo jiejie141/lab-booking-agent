@@ -164,26 +164,9 @@ jobs:
       #      ERROR: unrecognized configuration parameter "transaction_timeout"
       #    只验"备份成功"永远发现不了这件事，所以这一步**真的恢复一次并逐表比对行数**。
       #    这条规则说起来老套（"备份要演练"），但它是刚才真被撞出来的。
+      # 经 ci_run.py 包装：失败时把关键行抬成注解（原始日志要鉴权，注解不用）。
       - name: 备份 + 恢复演练（只验备份不够：dump 可能恢复不回来）
-        run: |
-          set -euo pipefail
-          docker compose exec -T api python main.py backup
-          DUMP=$(docker compose exec -T api sh -c 'ls -t /app/var/backup | head -1' | tr -d '\r')
-          echo "备份文件：$DUMP"
-          docker compose exec -T db psql -U lab -d postgres -c 'DROP DATABASE IF EXISTS lab_restore_ci'
-          docker compose exec -T db psql -U lab -d postgres -c 'CREATE DATABASE lab_restore_ci'
-          docker compose run --rm -T \
-            -e LAB_DATABASE_URL=postgresql+asyncpg://lab:lab@db:5432/lab_restore_ci \
-            api python main.py restore "/app/var/backup/$DUMP" --yes
-          for table in users equipment reservations audit_logs; do
-            src=$(docker compose exec -T db psql -U lab -d lab             -t -A -c "select count(*) from $table" | tr -d '\r')
-            dst=$(docker compose exec -T db psql -U lab -d lab_restore_ci -t -A -c "select count(*) from $table" | tr -d '\r')
-            if [ "$src" != "$dst" ]; then
-              echo "::error::$table 行数不一致：源库 $src / 恢复库 $dst"
-              exit 1
-            fi
-            echo "  $table: $src 行 ✓"
-          done
+        run: python scripts/ci_run.py --tail 30 -- bash scripts/backup_drill.sh
 
       - name: 端到端验收（真 PG / 真容器 / 真 HTTP）
         run: python scripts/ci_run.py --tail 25 -- python scripts/accept_deploy.py
