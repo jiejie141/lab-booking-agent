@@ -957,6 +957,14 @@ react ──模型故障 / 步数耗尽 / 不按格式回──▶ deterministic
 | `alembic upgrade base` 返回成功但**库一点没变** | `base` 不是前向目的地，`upgrade` 对它静默无效 | 拆成方向明确的 `migrate()` / `downgrade()`；CLI 收到 `--revision base` 但没加 `--down` 时**直接返回 2 并说明方向**。**「命令跑成功了但什么都没发生」是最难查的一类故障** |
 | README 写着"mypy 干净"，实际跑出来 **2 个报错**（`unused-ignore` + `ReActAgent` 参数类型） | `ReActAgent` 的 `client` 声明成完整的 `LLMClient`，但它只用到 `chat_tools` 一个方法；测试里只实现 `chat_tools` 的脚本化假模型因此类型不匹配。另一处是一个早已用不上的 `# type: ignore`（`disallow_untyped_defs` 本来就没开） | 按**实际需要**收窄契约：新增 `ModelIdentity`（只读 `name`）作为共同契约的最小要求，`ReActAgent.client` 改成 `ToolCallingLLM`。**"质量门是绿的"这句话本身也要有证据** —— 这次的证据是 `mypy` 的实际输出，不是上一次的印象 |
 
+### 交付就绪度整改期间新踩的
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| CI 上 `26b6d50` **绿的**，两小时后 `5dc4aa0` **红了**，而两次之间只改了一行文档 | 红的是 `main.py eval`：三条用例用 `date_offset: 1`（明天），而**周末的开放时间比工作日短**（生物楼 205 周末 10:00-16:00、分析楼 301 周末 09:00-18:00）。绿的那次 UTC 15:42 = 北京时间 23:42（明天仍是周五）；红的那次 UTC 17:49 = 北京时间次日 01:49（明天变成周六）。**它伪装成代码回归**，而人翻 diff 只会更困惑 | 三条用例的时段移到「工作日 ∩ 周末」的交集（安全窗口 10:00-16:00）；新增 `tests/test_eval_cases.py` 做机械守卫，凡用 `date_offset` 的用例都要过这道窗口检查。**评测集的日历依赖要当正确性问题治，不能靠"下周一再跑一次"** |
+| 同一份代码、同一份 mypy 配置，**py3.13 报错而 py3.10 全绿** | `requirements.txt` 只写了 `>=` 下限。SQLAlchemy 2.1 抬高了 `requires_python`，于是 py3.10 被解析到 2.0、py3.13 拿到 2.1 —— **两个 job 静默地在测两套不同的栈**。而 mypy 的输出本来就依赖「装了哪些带类型标注的包」：`sweep._archive` 里 `select(model)` 的 `model` 是 `Any`，未绑定泛型在 2.0 的桩下没报、在 2.1 的桩下报了 `var-annotated` | 显式标注 `rows: Sequence[Any]`（标 `list[Any]` 会换来下一个错：`Sequence[Never]` 不能赋给 `list[Any]`）；CI 每个 job 打印实际依赖版本。**未钉版本的依赖会让矩阵悄悄测两套栈，而第一个发现它的永远是类型检查** |
+| 推送时 `fatal: ... github.com ... CONNECT tunnel failed, response 502`（连试十余次） | 沙箱注入的 HTTPS 代理对 `github.com` 返回 502，而同一时刻 `api.github.com` / `raw.githubusercontent.com` / `codeload.github.com` 全是 200 —— **是单域名而非整网不通** | 重试直到通过（本次第 12 次成功）。判断"网络抖动还是配置错"要看**同域之外还能不能通**，只测一个域名会得出错误结论 |
+
 ---
 
 ## 验证

@@ -25,7 +25,8 @@
 > | P1-8 | 登录无限流与失败锁定 | ✅ 已整改 | `b609fc7` |
 > | P2-9 | 预约列表无分页 | ✅ 已整改 | `5dc4aa0` |
 > | P2-10 | 会话在内存、限流单进程、单 worker | ⚪ **接受**（发布拓扑是单副本；重新评估的触发条件已写明） | — |
-> | P2-11 | compose 未实机验证、默认 SQLite | ⚠️ **部分**（`config` 通过 + 缺密钥 exit 1 已实测；`up` 仍未跑） | — |
+> | P2-11a | **PostgreSQL 路径一行都没执行过** | ✅ **已整改**：CI 新增 `postgres` job，在真实 PG 上跑迁移 + 并发不变式；首次运行即绿 | `371e1e0` |
+> | P2-11b | `docker compose up` 未实机验证 | ⚠️ **仍受阻**（`config` 通过 + 缺密钥 exit 1 已实测；守护进程起不来，见下） | — |
 >
 > **编号对不齐的说明**：整改提交信息里写的是 P1-5/6/7/8（按**实施顺序**编号），
 > 与本文件 §结论 2 表格的 5/6/7/8（按**评估顺序**：审批/黑名单/通知/限流）不完全对应。
@@ -168,27 +169,50 @@ react → deterministic → 引导式表单三级，且**能说清边界**：它
 底层是可靠的。也不是"可直接上线"——**审批、黑名单、通知三整块是零代码**，
 加上一个**拿默认值就能伪造管理员令牌**的安全默认值，直接部署会出真实事故。
 
-> **复评更新（commit `11ee0e8`）：结论改为「可小范围试点上线，正式上线前仍需两项验证」。**
+> **复评更新（最新 commit `371e1e0`）：结论改为「可小范围试点上线，仅剩部署实机验证一项」。**
 >
 > 上面点名的四件事（审批 / 黑名单 / 通知 / 安全默认值）**全部已整改**，
-> 测试从 639 条涨到 **803 条全绿**。原结论里"直接部署会出真实事故"的理由已不成立。
+> 测试从 639 条涨到 **830 条**。原结论里"直接部署会出真实事故"的理由已不成立。
 >
-> 但**不建议因此就直接铺开**，剩下三条都是"规模大了才炸"型，且**都没有实机验证过**：
+> 剩下三条的现状（第 2 条已经解决）：
 >
-> 1. **`docker compose up` 从未真正跑通过。** 2026-09-24 再次实测：
+> 1. **`docker compose up` 从未真正跑通过。** 2026-09-26 再次实测：
 >    `docker compose config` **静态解析通过**，且不给 `LAB_JWT_SECRET` 时
 >    确以 **exit 1** 拒绝解析（"required variable LAB_JWT_SECRET is missing a value"）——
 >    fail-closed 在 compose 层是真的生效的。但 `docker ps` 报
 >    `failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine`，
->    守护进程起不来（本机 `wsl.exe` 在沙箱黑名单上，Docker Desktop 拉不起来）。
+>    守护进程起不来。**两个具体原因（都需要人工处理）见文末「部署实机验证的阻塞点」。**
 >    **没跑过的部署流程不算部署流程** —— 这一条原样保留。
-> 2. **生产形态是 PostgreSQL，但从没在 PG 上跑过测试**（默认仍是 SQLite）。
->    并发那段用了 `pg_advisory_xact_lock`，那段代码路径**一行都没被执行过**。
+> 2. ~~**生产形态是 PostgreSQL，但从没在 PG 上跑过测试**~~ → **已解决（`371e1e0`）**：
+>    CI 新增 `postgres` job，用 GitHub runner 自带的 `postgres:16-alpine`
+>    service container 跑「空库 → `alembic upgrade head`」+ 五条唯一索引的 DDL 与
+>    真实插入 + 20 并发抢同一时段必须恰好 1 个成功（那条 `pg_advisory_xact_lock`
+>    路径终于被执行了）+ 清扫的 rowcount 语义。**首次运行即绿。**
+>    它不依赖本机 Docker，所以本机起不了 Docker 也能持续验证。
 > 3. **单 worker + 会话在进程内存**：高峰期长请求会堵住整个服务。**权衡见下，
 >    结论是"接受，但写清触发条件"而不是"悄悄当它不存在"。**
 >
 > 建议路径：先在一个实验室、一个学期内试点（SQLite 单实例足够），
-> 同时把上面第 1、2 条在真机上验证掉，再谈扩大范围。
+> 同时把第 1 条（compose 实机）在真机上验掉，再谈扩大范围。
+
+#### 部署实机验证的阻塞点（需要人处理，不是代码问题）
+
+实测于 2026-09-26。两个原因都会让 `docker compose up` 走不完，
+且**都不是"再试一次就好"**：
+
+1. **`wsl.exe` 在安全中心黑名单里。** Docker Desktop 的 Linux 引擎要拉 WSL，
+   而策略拦截会直接杀掉整条进程树 —— 表现为 `Start-Process Docker Desktop.exe`
+   返回成功、日志里也写下了 `launching com.docker.backend.exe`，
+   但几十秒后 `Get-Process *docker*` 是空的。
+   这是「命令安全 → 程序黑名单」里的配置项，**只能由本人在安全中心里把
+   `wsl.exe` 移出黑名单**（或以管理员身份处理），从命令行绕不过去。
+2. **Docker Desktop 配了手动代理，指向 `http://127.0.0.1:7890`，而该端口当前没有服务在听。**
+   见 `%APPDATA%\Docker\settings-store.json` 的 `OverrideProxyHTTP/HTTPS`。
+   即使引擎起来了，`docker pull postgres:16-alpine` 也会连不上 ——
+   报错会像"网络问题"，其实是本机代理没开。
+
+这两条处理完之后，`docker compose up --build` 与随后的
+`curl http://127.0.0.1:8200/api/health/ready` 就可以作为最终验收命令。
 
 ---
 
