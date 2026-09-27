@@ -18,6 +18,7 @@ import operator
 import threading
 from typing import Annotated, Any, TypedDict
 
+from ..metrics import record_state_backend
 from ..schemas import (
     BookingOutcome,
     ConstraintCheck,
@@ -87,6 +88,8 @@ class SessionStore:
         self._order: list[str] = []
         self._max = max_sessions
         self._max_turns = max_turns
+        # 与限流器同一条理由：后端由组件自己报，换实现时指标自动跟着变。
+        record_state_backend("session", "memory")
 
     def save(
         self,

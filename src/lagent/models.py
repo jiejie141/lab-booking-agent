@@ -231,6 +231,18 @@ class Reservation(Base):
         Index("ix_res_equipment_date", "equipment_id", "date"),
         # 按用户查自己的预约
         Index("ix_res_user_status", "user_id", "status"),
+        # 幂等（P2）：同一个用户 + 同一个幂等键，只能有一条预约。
+        # 用部分索引：没传键的预约（老数据、或不关心幂等的调用方）不受约束。
+        # ⚠️ 键必须由**客户端**生成并在重试时带上 —— 服务端自己算的话，
+        # 重试就是另一个键，这条索引一点用都没有。
+        Index(
+            "uq_res_idempotency",
+            "user_id",
+            "idempotency_key",
+            unique=True,
+            sqlite_where=text("idempotency_key IS NOT NULL"),
+            postgresql_where=text("idempotency_key IS NOT NULL"),
+        ),
         # 违约统计（P1-8）：按「用户 + 判定时刻」扫窗口。
         # 它在**下单的关键路径**上 —— 每次预约前都要查一次窗口内违约数，
         # 没有它那次查询就是全表扫。
@@ -253,6 +265,12 @@ class Reservation(Base):
     # 管理员豁免。**不删 no_show_at**：把判定事实抹掉等于说"系统从没这么认为过"，
     # 而真相是"系统判了、人推翻了"。留着两个字段才能还原全过程。
     pardoned_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    # 幂等键（客户端生成）。**可以为空** —— 老预约没有它，也只有客户端主动
+    # 传了才生效。它的作用是"同一个下单请求重发了也只产生一条预约"：
+    # 没有它，网络重试或用户双击会多出一条用户没打算下的单。
+    # ⚠️ 注意失败形态不是"都会被唯一索引挡住"：同一时段重试会撞 uq_res_active_slot，
+    # 但**换一个时段的重试**会真的多出一条 —— 那正是这条要挡住的。
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # 乐观锁版本号：取消 / 改期时带上读到的版本，避免覆盖别人的并发修改。
     version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now_local)

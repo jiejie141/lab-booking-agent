@@ -162,3 +162,39 @@ class TestCalendarIndependence:
         for case in cases:
             got = case.get("expect_outcome")
             assert got in allowed, f"{case['id']} 的 expect_outcome={got!r} 不在 {sorted(allowed)} 里"
+
+
+# ==========================================================================
+# 报告必须自带「这些数字是哪来的」（P2-16）
+#
+# mock 模型下的 14/14 衡量的是**链路自洽**，不是模型准确率。
+# 它最危险的用途不是被误读，而是被**断章取义地截图**写进对外材料 ——
+# 一句看起来有数据支撑的假话。所以警告必须印在报告里，
+# 而不是只写在文档里（文档不会被截图带过去）。
+# ==========================================================================
+class TestTheReportDeclaresItsProvenance:
+    def test_a_mock_run_says_so_in_the_report_itself(self):
+        from lagent.evaluation import EvalReport
+
+        report = EvalReport(mode="mock", model="mock（离线假模型）")
+        text = report.render()
+        assert "app_mode=mock" in text
+        assert "模型准确率" in text, "mock 报告必须明确说清它不是模型准确率"
+        assert report.is_live_model is False
+
+    def test_a_live_run_carries_the_model_name_and_no_warning(self):
+        from lagent.evaluation import EvalReport
+
+        report = EvalReport(mode="live", model="gpt-4o-mini")
+        text = report.render()
+        assert "app_mode=live" in text
+        assert "gpt-4o-mini" in text
+        assert "请勿引用" not in text, "真模型跑出来的报告不该带那条免责声明"
+        assert report.is_live_model is True
+
+    def test_a_report_without_a_mode_is_not_claimed_to_be_live(self):
+        """来源未知时按「不是真实模型」处理：宁可多印一行警告，
+        也不能让一份来源不明的报告被当成模型评测结果。"""
+        from lagent.evaluation import EvalReport
+
+        assert EvalReport().is_live_model is False

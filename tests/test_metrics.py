@@ -32,6 +32,7 @@ import datetime as dt
 import json
 import logging
 import math
+import pathlib
 import random
 import re
 import threading
@@ -41,6 +42,7 @@ from typing import Any
 
 import httpx
 import pytest
+import yaml
 from sqlalchemy import func, select
 
 # 从 test_obs 借日志捕获工具：它里面有一条容易做错的细节
@@ -48,7 +50,9 @@ from sqlalchemy import func, select
 # 抄一份出来只会把那个细节再踩一次。
 from test_obs import captured_logs, json_lines
 
+from lagent import metrics
 from lagent.agent.llm import LLMError, MockLLMClient, RealLLMClient
+from lagent.agent.state import SessionStore
 from lagent.clock import now_local
 from lagent.config import Settings, reset_settings_cache
 from lagent.db import session_scope
@@ -89,6 +93,9 @@ from lagent.obs import REQUEST_ID_HEADER
 from lagent.ratelimit import SlidingWindowLimiter
 from lagent.schemas import BookingOutcome
 from lagent.sweep import SweepTask, run_once
+
+# 「指标的消费者」那一半（告警规则）。放在仓库里，改名时由本文件的用例兜住。
+ALERTS = pathlib.Path(__file__).resolve().parents[1] / "deploy" / "prometheus-alerts.yml"
 
 
 # ==========================================================================
@@ -1052,3 +1059,64 @@ class TestSweepMetrics:
         await run_once(tasks=[SweepTask("慢的", slowish)])
         series = SWEEP_DURATION.snapshot()[("慢的",)]
         assert 0.01 < series.total_sum < 5.0, "如果这里是毫秒级，说明单位记错了"
+
+
+# ==========================================================================
+# 进程级状态放在哪（P2-5）+ 告警规则（P3-15）
+# ==========================================================================
+class TestStateBackendIsObservable:
+    """限流与会话都是**进程内** dict。单副本没问题，问题只出在多副本，
+    而那时的外表是「配额变多了 / 多轮状态跳变」，看不出根因是副本数。
+
+    这里不试图把它改成共享存储（那是扩容时才做的事），只保证：
+    副本数变多这件事**在指标上看得见** —— 一条隐形前提变成可观测的事实。
+    """
+
+    def test_the_limiter_reports_where_its_state_lives(self):
+        reset_metrics()
+        SlidingWindowLimiter(limit=5)
+        text = render()
+        assert 'lagent_state_backend{component="ratelimit",backend="memory"} 1' in text
+
+    def test_the_session_store_reports_where_its_state_lives(self):
+        reset_metrics()
+        SessionStore()
+        text = render()
+        assert 'lagent_state_backend{component="session",backend="memory"} 1' in text
+
+
+class TestAlertRulesReferenceRealMetrics:
+    """``deploy/prometheus-alerts.yml`` 是「指标的消费者」那一半。
+
+    最容易坏的方式不是表达式写错（那个 Prometheus 加载时就报错），
+    而是**指标改名之后规则悄悄失效** —— 一个永远不会响的告警，
+    比没有告警更糟，因为它让人以为自己是被监控着的。
+    """
+
+    @staticmethod
+    def _known_metric_names() -> set[str]:
+        source = pathlib.Path(metrics.__file__).read_text(encoding="utf-8")
+        return set(re.findall(r"lagent_[a-z0-9_]+", source))
+
+    def test_every_metric_in_the_rules_exists(self):
+        rules = yaml.safe_load(ALERTS.read_text(encoding="utf-8"))
+        known = self._known_metric_names()
+        groups = rules.get("groups") or []
+        assert groups, "告警文件里至少要有一个 group"
+
+        used: set[str] = set()
+        for group in groups:
+            for rule in group.get("rules") or []:
+                expr = rule.get("expr") or ""
+                assert expr, f"规则 {rule.get('alert')} 没有 expr"
+                used |= set(re.findall(r"lagent_[a-z0-9_]+", expr))
+
+        assert used, "一条 lagent_ 指标都没引用，这个文件就只是装饰"
+        missing = used - known
+        assert not missing, f"告警规则引用了不存在的指标（改名了？）：{sorted(missing)}"
+
+    def test_the_sweep_alert_covers_the_freshness_gauge(self):
+        """第 5 组里那条「清扫最近一次成功」的指标，必须真的被某条规则用到 ——
+        埋了指标却没人看，等于没埋。"""
+        text = ALERTS.read_text(encoding="utf-8")
+        assert "lagent_sweep_last_success_timestamp_seconds" in text

@@ -623,3 +623,64 @@ class TestValueDomainStaysConsistent:
             session.add(user)
             await session.flush()
         assert user.role == ROLE_USER
+
+
+# ==========================================================================
+# 目录的「按设备状态过滤」（P3-13）
+#
+# 设备只能改状态不能删除（历史预约要引用它），所以试运行期误建的那台设备
+# 会一直挂在目录里。置成 scrapped 之后它已经约不上，但如果列表里看不出来，
+# 运维就会以为清理没生效 —— 于是又去改库。
+# ==========================================================================
+class TestCatalogStatusFilter:
+    async def test_an_offline_device_can_be_hidden_from_the_catalog(
+        self, http, as_user
+    ):
+        headers = await as_user("管理员")
+        before = await http.get("/api/labs", headers=headers)
+        assert before.status_code == 200
+        count_all = sum(len(lab["equipment"]) for lab in before.json())
+
+        # 把一台设备置为 scrapped（报废）
+        patch = await http.patch(
+            f"/api/equipment/{UV}", headers=headers, json={"status": "scrapped"}
+        )
+        assert patch.status_code == 200, patch.text
+
+        filtered = await http.get(
+            "/api/labs", headers=headers, params={"equipment_status": "normal"}
+        )
+        assert filtered.status_code == 200
+        count_normal = sum(len(lab["equipment"]) for lab in filtered.json())
+        assert count_normal == count_all - 1, (
+            f"过滤掉一台报废设备后应少一台：{count_all} → {count_normal}"
+        )
+        for lab in filtered.json():
+            for item in lab["equipment"]:
+                assert item["status"] == "normal"
+
+    async def test_without_the_filter_nothing_is_hidden(self, http, as_user):
+        """默认必须还是「全列」：这个端点是控制台与模型共用的目录来源，
+        悄悄改成只列 normal 会让"设备怎么不见了"变成一次无法解释的变更。"""
+        headers = await as_user("管理员")
+        await http.patch(
+            f"/api/equipment/{UV}", headers=headers, json={"status": "scrapped"}
+        )
+        rows = (await http.get("/api/labs", headers=headers)).json()
+        assert any(item["status"] == "scrapped" for lab in rows for item in lab["equipment"])
+
+    async def test_an_unknown_status_is_rejected(self, http, as_user):
+        headers = await as_user("管理员")
+        resp = await http.get(
+            "/api/labs", headers=headers, params={"equipment_status": "deleted"}
+        )
+        assert resp.status_code == 422
+
+
+# ==========================================================================
+# 目录的「按设备状态过滤」（P3-13）
+#
+# 设备只能改状态不能删除（历史预约要引用它），所以试运行期误建的那台设备
+# 会一直挂在目录里。置成 scrapped 之后它已经约不上，但如果列表里看不出来，
+# 运维就会以为清理没生效 —— 于是又去改库。
+# ==========================================================================

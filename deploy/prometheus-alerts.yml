@@ -1,0 +1,66 @@
+# 告警规则（Prometheus / Alertmanager 侧）
+#
+# 为什么仓库里要有这个文件：`/metrics` 只解决了「吐得出来」。
+# 「吐得出来」不等于「有人看」—— 没有规则，故障就只能靠用户来报。
+# 部署侧把它挂进 Prometheus 的 rule_files 即可，
+# 里面引用的指标名由 tests/test_metrics.py 守着（改名会测试失败）。
+#
+# 只写四条，每条都对应一个**具体**的事故，不写"看着有用"的：
+
+groups:
+  - name: lab-booking-agent
+    rules:
+      # ① 清扫停了。
+      #    清扫是唯一会自己去修「忘刷出场 / 过期预约」的机制，
+      #    它挂掉之后外表是"没坏任何东西"，要过很久才被发现。
+      #    30 分钟 = 默认间隔 5 分钟的 6 倍，避开单次偶发慢。
+      - alert: LagentSweepStale
+        expr: time() - max(lagent_sweep_last_success_timestamp_seconds) > 1800
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "后台清扫超过 30 分钟没有成功过"
+          description: >-
+            清扫是唯一会自动收尾「忘刷出场 / 过期预约」的机制。
+            它停了不会立刻有用户报错，但状态会持续变坏。
+            先看服务是否在跑，再看 lagent_sweep_runs_total{outcome="error"}。
+
+      # ② 并发争抢变多。
+      #    contention = 重试到上限仍没抢到槽位：真实业务冲突是 conflict，
+      #    这个是**系统承压**，处置方向完全不同（加设备 vs 扩容）。
+      - alert: LagentBookingContention
+        expr: increase(lagent_booking_attempts_total{outcome="contention"}[15m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "15 分钟内出现 {{ $value }} 次并发争抢失败"
+          description: >-
+            用户看到的是"提交失败，请重试"。这不是时段真被占（那是 conflict），
+            而是同一时刻抢同一批槽位的人太多。
+
+      # ③ 服务不可达 / 就绪探针非 200。
+      #    up 由抓取端自己产生：抓不到就是 0，不依赖应用报自己的健康。
+      - alert: LagentDown
+        expr: up{job="lab-booking-agent"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "lab-booking-agent 抓取不到（{{ $labels.instance }}）"
+          description: "进程退出、端口不通或就绪探针失败。先查容器状态与启动日志里的 CRITICAL。"
+
+      # ④ 同一个组件出现了多份内存态 —— 扩容踩到第 5 条的前提。
+      #    限流与会话都是**进程内** dict；副本一多，配额就变成「配额 × 副本数」，
+      #    多轮会话会漂移。这条是「出问题之前」的提醒，不是事故告警。
+      - alert: LagentStateBackendSplitBrain
+        expr: count(lagent_state_backend) by (component) > 1
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "{{ $labels.component }} 有多个副本各持一份内存态"
+          description: >-
+            单副本下这条不会出现。出现了就说明已经扩容，
+            限流与会话必须换成共享存储（Redis / 数据库），否则配额与多轮状态都不对。

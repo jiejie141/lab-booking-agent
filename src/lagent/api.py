@@ -143,6 +143,7 @@ from .schemas import (
     ChatRequest,
     ChatResponse,
     EquipmentCreate,
+    EquipmentStatus,
     EquipmentUpdate,
     InsideEntry,
     LabCreate,
@@ -1129,8 +1130,18 @@ def _equipment_payload(item: Equipment) -> dict:
     }
 
 
-def _lab_payload(lab: Laboratory) -> dict:
-    """实验室（含其设备）的对外结构。"""
+def _lab_payload(lab: Laboratory, *, only_status: str | None = None) -> dict:
+    """实验室（含其设备）的对外结构。
+
+    ``only_status`` 用来按设备状态过滤（默认不过滤 = 全部列出）。
+    为什么需要它：设备只能「改状态」不能「删除」（历史预约要引用它），
+    于是试运行期误建的那台设备会**一直挂在目录里**，看上去还活着。
+    置成 ``scrapped`` 已经让它约不上（下单侧校验 status），
+    但在列表里看不见这件事，运维就会以为清理没生效。
+    """
+    items = lab.equipment
+    if only_status is not None:
+        items = [item for item in items if item.status == only_status]
     return {
         "id": lab.id,
         "label": lab.label,
@@ -1140,18 +1151,25 @@ def _lab_payload(lab: Laboratory) -> dict:
         "capacity": lab.capacity,
         "open_hours": lab.open_hours,
         "note": lab.note,
-        "equipment": [_equipment_payload(item) for item in lab.equipment],
+        "equipment": [_equipment_payload(item) for item in items],
     }
 
 
 @router.get("/api/labs")
-async def labs(_: Principal = Depends(current_user)) -> list[dict]:
+async def labs(
+    _: Principal = Depends(current_user),
+    equipment_status: EquipmentStatus | None = Query(default=None),
+) -> list[dict]:
     """实验室与设备目录。需登录（目录本身不敏感，但按"默认拒绝"统一处理）。
 
     **刻意不分页**：一个院系的实验室是十来间、设备几十台，一屏装得下；
     而这个响应里设备是**嵌套**在实验室下的，分页只能切外层，
     切出来的"第 2 页"含义还随排序漂移 —— 为一个不会撞上的上限付出
     语义复杂度，不划算。真到了几百间的规模再改成"先列房间、再按房间取设备"。
+
+    ``equipment_status`` 只过滤**嵌套的设备**，不过滤实验室本身：
+    想「只看还能约的设备」时用 ``?equipment_status=normal``
+    （取值非法直接 422，由类型声明保证，不必在代码里再判一次）。
     """
     async with session_scope() as session:
         stmt = (
@@ -1160,7 +1178,7 @@ async def labs(_: Principal = Depends(current_user)) -> list[dict]:
             .order_by(Laboratory.id)
         )
         rows = (await session.execute(stmt)).scalars().all()
-    return [_lab_payload(lab) for lab in rows]
+    return [_lab_payload(lab, only_status=equipment_status) for lab in rows]
 
 
 @router.get("/api/users", response_model=list[UserOut])
@@ -1512,7 +1530,9 @@ async def reservations(
 
 
 @router.post("/api/reservations", status_code=201)
-async def create(body: ReservationCreate, request: Request, user: Principal = Depends(current_user)) -> dict:
+async def create(
+    body: ReservationCreate, request: Request, response: Response, user: Principal = Depends(current_user)
+) -> dict:
     """**表单式**下单 —— 不经过模型（P0-3）。
 
     与对话入口共用 ``domain.booking.create_reservation``，
@@ -1547,6 +1567,7 @@ async def create(body: ReservationCreate, request: Request, user: Principal = De
         start=body.start,
         end=body.end,
         purpose=body.purpose,
+        idempotency_key=body.idempotency_key,
     )
     await audit.record(
         action=audit.ACTION_BOOK,
@@ -1571,7 +1592,15 @@ async def create(body: ReservationCreate, request: Request, user: Principal = De
             reason=outcome.outcome_label,
         )
     await _notify_booking_result(outcome, target)
-    return outcome.model_dump(mode="json")
+    payload = outcome.model_dump(mode="json")
+    if outcome.replayed:
+        # 201 的意思是"创建了新资源"，而回放什么都没创建 —— 回 200 才是对的。
+        # 客户端据此也能分辨"我的重发被忽略了"和"我真的下了一单"。
+        # 用注入的 Response 改码（而不是直接 return JSONResponse），是为了让
+        # 这条路径和别的处理器一样：返回体仍是模型序列化出来的 dict，
+        # 状态码由响应对象携带，函数签名不用退化成 Any。
+        response.status_code = 200
+    return payload
 
 
 # --------------------------------------------------------------------------

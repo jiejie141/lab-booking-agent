@@ -830,6 +830,17 @@ class TestSweepCanBeTurnedOff:
 # 命令行入口
 # ==========================================================================
 class TestSweepCommand:
+    @staticmethod
+    def _argv(*extra: str):
+        """用**真的解析器**造参数，而不是手搓一个 Namespace。
+
+        手搓的 Namespace 会漏掉新加的字段，于是"默认跑一轮"这件事
+        在测试里永远成立、在命令行里却可能不成立。
+        """
+        from lagent.cli import build_parser
+
+        return build_parser().parse_args(["sweep", *extra])
+
     async def test_cli_runs_one_round_and_reports_counts(self, isolated_db, capsys):
         from lagent.cli import _sweep
 
@@ -845,7 +856,7 @@ class TestSweepCommand:
                 )
             )
         capsys.readouterr()
-        assert await _sweep() == 0
+        assert await _sweep(self._argv()) == 0
         out = capsys.readouterr().out
         assert "后台清扫" in out
         assert "清扫前待处理" in out and "清扫后待处理" in out
@@ -881,7 +892,7 @@ class TestSweepCommand:
                     )
                 )
             capsys.readouterr()
-            assert await _sweep() == 1
+            assert await _sweep(self._argv()) == 1
             out = capsys.readouterr().out
             assert "失败" in out
             # 一个任务失败不能把其它任务一起拖停 —— 退出码要反映"有失败"，
@@ -889,3 +900,106 @@ class TestSweepCommand:
             assert "✓" in out
         finally:
             reset_settings_cache()
+
+
+# ==========================================================================
+# ``sweep --loop``（P2-10 的执行手段）
+#
+# 清扫跑在 API 进程内，多副本时每个副本都会扫一遍。任务本身是幂等的
+# （带条件的 UPDATE + rowcount），所以**不会算错**，只是白花 CPU。
+# 要把它搬出去，先得有一个"能自己循环"的命令 —— 这里验的就是这个命令。
+# ==========================================================================
+class TestSweepLoop:
+    @staticmethod
+    def _args(**overrides):
+        from argparse import Namespace
+
+        base = {"loop": True, "interval": 0, "ticks": 0}
+        base.update(overrides)
+        return Namespace(**base)
+
+    async def test_it_runs_exactly_the_requested_number_of_rounds(self, monkeypatch):
+        from lagent import cli
+
+        calls: list[int] = []
+
+        async def fake_once() -> int:
+            calls.append(len(calls) + 1)
+            return 0
+
+        monkeypatch.setattr(cli, "_sweep_once", fake_once)
+        assert await cli._sweep(self._args(ticks=3)) == 0
+        assert calls == [1, 2, 3]
+
+    async def test_zero_ticks_means_run_forever(self, monkeypatch):
+        """``--ticks 0``（默认）是**不限**：它必须真的不退出。
+
+        这里用"第三次就抛异常"跳出死循环 —— 没有这条，
+        「不限」和「跑一轮」的差别不会被任何用例发现。
+        """
+        from lagent import cli
+
+        calls: list[int] = []
+
+        async def fake_once() -> int:
+            calls.append(len(calls) + 1)
+            if len(calls) >= 3:
+                raise RuntimeError("stop")
+            return 0
+
+        monkeypatch.setattr(cli, "_sweep_once", fake_once)
+        with pytest.raises(RuntimeError, match="stop"):
+            await cli._sweep(self._args(ticks=0))
+        assert len(calls) == 3
+
+    async def test_a_failed_round_is_not_forgiven_by_a_later_success(self, monkeypatch):
+        """循环里只要有一轮出错，退出码就非 0 ——
+        否则 ``sweep --loop`` 在脚本里永远"看起来成功"。"""
+        from lagent import cli
+
+        codes = iter([1, 0])
+
+        async def fake_once() -> int:
+            return next(codes)
+
+        monkeypatch.setattr(cli, "_sweep_once", fake_once)
+        assert await cli._sweep(self._args(ticks=2)) == 1
+
+    async def test_without_loop_it_runs_once(self, monkeypatch):
+        from lagent import cli
+
+        calls: list[int] = []
+
+        async def fake_once() -> int:
+            calls.append(1)
+            return 0
+
+        monkeypatch.setattr(cli, "_sweep_once", fake_once)
+        assert await cli._sweep(self._args(loop=False, ticks=0)) == 0
+        assert len(calls) == 1
+
+    async def test_interval_zero_is_not_silently_replaced_by_the_default(
+        self, monkeypatch
+    ):
+        """``--interval 0`` 必须真的是 0。
+
+        用 ``or`` 取默认值的写法会把 0 当成"没给"，于是明写了 0 的人
+        要等 300 秒 —— 一次无法解释的等待。
+        """
+        from lagent import cli
+
+        slept: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            slept.append(seconds)
+            if len(slept) >= 2:
+                raise RuntimeError("stop")
+
+        async def fake_once() -> int:
+            return 0
+
+        monkeypatch.setattr(cli, "_sweep_once", fake_once)
+        monkeypatch.setattr(cli.asyncio, "sleep", fake_sleep)
+        with pytest.raises(RuntimeError, match="stop"):
+            await cli._sweep(self._args(ticks=0, interval=0))
+        assert slept == [0, 0]

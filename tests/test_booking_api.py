@@ -728,3 +728,79 @@ class TestReschedule:
             json={"start": "14:00:00", "end": "16:00:00", "equipment_id": CENTRIFUGE},
         )
         assert resp.status_code == 422
+
+
+class TestIdempotencyKey:
+    """下单幂等（P2）。
+
+    要挡住的不是"同一时段重复下单"（那个已被 ``uq_res_active_slot`` 挡住，
+    会明确回 409），而是 **换一个时段的重试**：网络超时后客户端重发，
+    这次的时段与上一条不同，于是系统老老实实又建一条 ——
+    一条用户从没打算下的预约。
+    """
+
+    async def test_retry_with_the_same_key_does_not_create_a_second_one(
+        self, http, as_user
+    ):
+        lina = await as_user("李娜")
+        base = {
+            "equipment_id": UV,
+            "date": free_day().isoformat(),
+            "start": "10:00",
+            "end": "12:00",
+            "purpose": "幂等用例",
+            "idempotency_key": "order-2026-0911-a",
+        }
+        first = await http.post("/api/reservations", headers=lina, json=base)
+        assert first.status_code == 201, first.text
+        # 同一个键重发，但**换了一个时段** —— 这才是真会漏的那种
+        retry = await http.post(
+            "/api/reservations", headers=lina, json={**base, "start": "14:00", "end": "16:00"}
+        )
+        assert retry.status_code == 200, retry.text
+        # 200 之外还要能**看出**是回放：状态码只是给 HTTP 层的礼貌，
+        # 客户端（和控制台）真正据以提示"你这条其实是重发"的是这个标记
+        assert retry.json()["replayed"] is True
+        assert retry.json()["ok"] is True
+        assert retry.json()["reservation"]["id"] == first.json()["reservation"]["id"]
+        # 库里仍然只有一条
+        rows = (await http.get("/api/reservations", headers=lina)).json()
+        mine = [r for r in rows if "幂等用例" in (r.get("purpose") or "")]
+        assert len(mine) == 1, f"重发应当只保留一条，实际 {len(mine)} 条"
+
+    async def test_a_new_key_creates_a_new_booking(self, http, as_user):
+        """换个键 = 新的一单，不该被误当成重试。"""
+        lina = await as_user("李娜")
+        base = {
+            "equipment_id": UV,
+            "date": free_day().isoformat(),
+            "start": "10:00",
+            "end": "12:00",
+            "purpose": "幂等-新键",
+        }
+        a = await http.post("/api/reservations", headers=lina, json={**base, "idempotency_key": "k1"})
+        assert a.status_code == 201
+        # 同一时段换键 —— 会被唯一索引挡住（409 冲突），这是对的：
+        # 幂等不负责"同一时段重复下单"那件事
+        b = await http.post("/api/reservations", headers=lina, json={**base, "idempotency_key": "k2"})
+        assert b.status_code == 409
+        assert b.json()["reason"] == "conflict"
+
+    async def test_the_same_key_does_not_collide_across_users(self, http, as_user):
+        """两个用户用同一个键不应当互相影响 —— 否则客户端拿固定字符串当键时，
+        全系统就只有一个人能下单了。"""
+        lina = await as_user("李娜")
+        zhang = await as_user("张伟")
+        base = {
+            "equipment_id": UV,
+            "date": free_day().isoformat(),
+            "start": "13:00",
+            "end": "15:00",
+            "purpose": "幂等-跨用户",
+            "idempotency_key": "same-key-for-everyone",
+        }
+        assert (await http.post("/api/reservations", headers=lina, json=base)).status_code == 201
+        second = await http.post(
+            "/api/reservations", headers=zhang, json={**base, "start": "16:00", "end": "18:00"}
+        )
+        assert second.status_code == 201, second.text

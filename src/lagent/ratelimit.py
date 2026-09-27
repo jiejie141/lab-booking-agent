@@ -18,6 +18,8 @@ import threading
 import time
 from collections import deque
 
+from .metrics import record_state_backend
+
 
 class SlidingWindowLimiter:
     """按 key（这里是用户）计数的滑动窗口限流器。
@@ -33,6 +35,9 @@ class SlidingWindowLimiter:
         self._lock = threading.Lock()
         self._hits: dict[str, deque[float]] = {}
         self._clock = time.monotonic
+        # 由**组件自己**上报后端，而不是服务启动时统一登记：
+        # 哪天换成 Redis，改的是这个类，指标跟着变，不会留在 "memory" 上骗人。
+        record_state_backend("ratelimit", "memory")
 
     @property
     def enabled(self) -> bool:

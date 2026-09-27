@@ -282,6 +282,10 @@ class BookingOutcome(BaseModel):
     retries: int = 0
     conflict_with: ReservationOut | None = None
     reason: BookingReason | None = None
+    # 幂等回放：这条结果是"重发的请求命中了已有预约"，**没有新建任何东西**。
+    # 特意做成显式字段而不是让调用方去比对 id —— HTTP 层据此回 200 而不是 201，
+    # 因为 201 的意思是"创建了新资源"，而这里什么都没创建。
+    replayed: bool = False
 
     @property
     def outcome_label(self) -> str:
@@ -529,6 +533,9 @@ class ReservationCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     equipment_id: int
+    # 幂等键：**客户端**生成，重试时带同一个值。
+    # 不传 = 不启用幂等（老调用方不受影响）。
+    idempotency_key: str | None = Field(default=None, max_length=64)
     # ISO 日期（"2026-09-25"）与 "HH:MM" 时刻 —— 交给 pydantic 解析，
     # 业务层的粒度对齐校验仍然由 domain 负责（不在这里重复一遍，
     # 两处规则一旦不一致就是"过了校验却下不了单"）。

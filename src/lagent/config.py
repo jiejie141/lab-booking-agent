@@ -10,9 +10,10 @@
 from __future__ import annotations
 
 import functools
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 AppMode = Literal["mock", "live", "degraded"]
@@ -101,6 +102,17 @@ class Settings(BaseSettings):
     # 不再只是打一条告警。理由：一个能伪造管理员身份的密钥，
     # 没有"先跑起来再说"的余地 —— 告警会被忽略，异常不会。
     jwt_secret: str = "dev-insecure-secret-change-me"
+    # 密钥的**文件**投递方式（``LAB_JWT_SECRET_FILE=/run/secrets/lab_jwt``）。
+    #
+    # 这是 Docker secret / K8s Secret 挂载的通用约定：环境变量里只给**路径**，
+    # 内容在文件里。为什么值得为它多一个字段：
+    #   * 纯环境变量会把密钥写进 shell 历史、`docker inspect`、`/proc/<pid>/environ`；
+    #   * 文件方式下轮换 = 换文件 + 重启，有明确落点，也不必改一堆部署脚本。
+    #
+    # 两者都给时**文件优先**（显式指向文件的意图更强，且 env 常常是历史遗留）。
+    # 给了路径却读不出来 / 读到空 → **拒绝启动**，而不是退回默认值：
+    # 一个"我配了密钥但其实没生效"的服务，比"配错就起不来"危险得多。
+    jwt_secret_file: str = ""
     # 显式承认「我就是要用不安全的默认密钥」。默认 false。
     #
     # 为什么留这个开关而不是无条件拒绝：本项目主打"克隆下来就能演示"，
@@ -172,6 +184,8 @@ class Settings(BaseSettings):
     smtp_port: int = Field(default=587, ge=1, le=65535)
     smtp_user: str = ""
     smtp_password: str = ""
+    # 同 ``jwt_secret_file``：邮箱口令是另一个会被写进环境变量的密钥。
+    smtp_password_file: str = ""
     smtp_from: str = ""
     smtp_use_tls: bool = True
     # 一次投递任务最多处理多少条。太小会积压，太大会让一次失败牵连太多。
@@ -244,6 +258,36 @@ class Settings(BaseSettings):
     # 归档单个文件的行数上限：一次导出几百万行会把内存吃光。
     # 超过就分批，每批一个文件。
     archive_batch_size: int = 5000
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_secret_files(cls, data: Any) -> Any:
+        """把 ``*_FILE`` 指向的文件内容读进对应的密钥字段。
+
+        放在 **before** 校验器里（而不是 after 里赋值）是因为这个模型是
+        **冻结**的（见模块 docstring）：frozen 实例不允许事后 setattr，
+        而在值进入字段之前替换掉它，就不需要"先建好再改"这一步。
+        """
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        for name in ("jwt_secret", "smtp_password"):
+            raw = out.get(f"{name}_file")
+            if not raw:
+                continue
+            path = Path(str(raw))
+            # fail-closed：文件读不出来 / 是空的，都算配置错误
+            try:
+                value = path.read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                raise ValueError(
+                    f"{name.upper()}_FILE={path} 读不出来（{exc.strerror}）—— "
+                    "拒绝带着不确定来源的密钥启动"
+                ) from exc
+            if not value:
+                raise ValueError(f"{name.upper()}_FILE={path} 是空文件，拒绝启动")
+            out[name] = value
+        return out
 
     @property
     def cors_origin_list(self) -> list[str]:

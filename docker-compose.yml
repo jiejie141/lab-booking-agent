@@ -42,6 +42,12 @@ services:
       # ⚠️ 不给默认值：没设就**起不来**（compose 会在解析阶段报错退出）。
       # 若在这里写死一个密钥，它和仓库里的默认密钥一样是公开的 ——
       # 那等于把 fail-closed 这道闸又关掉了。
+      #
+      # 想用文件投递（Docker secret / K8s Secret 挂载）时，把这一行换成：
+      #   LAB_JWT_SECRET_FILE: /run/secrets/lab_jwt
+      # 并在下面挂上 secrets（内容不放环境变量，就不会进 `docker inspect`）：
+      #   secrets: [lab_jwt]
+      # 两者同时存在时**文件优先**。
       LAB_JWT_SECRET: ${LAB_JWT_SECRET:?请先在 .env 或环境中设置 LAB_JWT_SECRET}
     ports:
       - "8200:8200"
@@ -61,3 +67,24 @@ services:
 volumes:
   pgdata:
   labvar:
+
+# 多副本时才需要的清扫 worker —— 单副本**不要**加。
+#
+# 清扫默认跑在 api 进程里。多副本时每个副本都会扫一遍：任务本身幂等
+# （带条件的 UPDATE + rowcount），所以不会算错，只是白花 CPU。
+# 真到了那一步，给 api 加 LAB_SWEEP_ENABLED: "false"，再放开下面这一段：
+#
+#   sweeper:
+#     build: .
+#     depends_on:
+#       db:
+#         condition: service_healthy
+#     command: python main.py sweep --loop
+#     environment:
+#       LAB_DATABASE_URL: postgresql+asyncpg://lab:lab@db:5432/lab
+#       LAB_JWT_SECRET: ${LAB_JWT_SECRET:?...}
+#     volumes:
+#       - labvar:/app/var
+#     restart: unless-stopped
+#
+# 多一个进程就多一份要盯的东西 —— 所以它默认不存在，不是默认开着。

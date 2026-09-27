@@ -627,8 +627,8 @@ async def _notify(limit: int = 100) -> int:
     return 0 if result.ok else 1
 
 
-async def _sweep() -> int:
-    """跑一轮清扫并打印每项处理了多少。
+async def _sweep(args: argparse.Namespace) -> int:
+    """跑清扫并打印每项处理了多少。
 
     为什么运维命令和后台循环要共用同一份实现：如果 CLI 是另一套代码，
     它就会慢慢长成「演示时好使、线上跑的是另一个东西」。
@@ -636,6 +636,36 @@ async def _sweep() -> int:
 
     退出码非 0 表示**至少有一项失败**。刻意不给"部分成功"单独的码：
     运维只需要一个可判断的信号 —— 有没有东西出错。
+
+    ``--loop`` 是为了把清扫从 API 进程里搬出去（多副本时每个副本都扫一遍，
+    虽然不会算错，但白花 CPU）：API 侧把 ``LAB_SWEEP_ENABLED`` 置 false，
+    另起一个 service 跑 ``sweep --loop``。单副本下**不必**这样做 ——
+    多一个进程就多一份要盯的东西。
+    """
+    code = await _sweep_once()
+    if not getattr(args, "loop", False):
+        return code
+    settings = get_settings()
+    # 用 ``is None`` 而不是 ``or``：间隔 0 是合法的（测试与一次性巡检要快），
+    # 被 ``or`` 悄悄换成默认 300 秒，会让"我明明写了 0"变成一次无法解释的等待。
+    interval = args.interval if args.interval is not None else settings.sweep_interval_seconds
+    interval = max(int(interval), 0)
+    ticks = max(int(args.ticks), 0)
+    done = 1
+    while ticks == 0 or done < ticks:
+        await asyncio.sleep(interval)
+        round_code = await _sweep_once()
+        if round_code:
+            code = round_code
+        done += 1
+    return code
+
+
+async def _sweep_once() -> int:
+    """跑**一轮**清扫并打印结果。返回 0 / 1。
+
+    与 ``--loop`` 分开是为了让"跑一轮"这件事能被单独测：
+    循环只要验证轮次与间隔，不该把每轮的打印逻辑再验一遍。
     """
     from .sweep import count_pending, run_once
 
@@ -715,9 +745,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="人员准入实证：未预约拦截 / 单次核销 / 人卡一致 / 容量不变式（沙箱库）",
     )
 
-    sub.add_parser(
+    sweep_parser = sub.add_parser(
         "sweep",
-        help="后台清扫单轮：过期预约 / 凭证超时与关门收尾 / 审计归档（会改数据）",
+        help="后台清扫：过期预约 / 凭证超时与关门收尾 / 审计归档（会改数据）",
+    )
+    sweep_parser.add_argument(
+        "--loop",
+        action="store_true",
+        help=(
+            "跑完一轮不退出，按间隔持续跑 —— 把清扫搬出 API 进程时用它"
+            "（compose 里再加一个 service，并把 api 的 LAB_SWEEP_ENABLED=false）"
+        ),
+    )
+    sweep_parser.add_argument(
+        "--interval",
+        type=int,
+        default=None,
+        help="--loop 的间隔秒数（默认取 LAB_SWEEP_INTERVAL_SECONDS）",
+    )
+    sweep_parser.add_argument(
+        "--ticks",
+        type=int,
+        default=0,
+        help="--loop 时最多跑几轮，0 = 不限（默认）。给测试与一次性巡检用",
     )
 
     backup_parser = sub.add_parser("backup", help="备份数据库（SQLite / PostgreSQL）")
@@ -777,7 +827,7 @@ async def _run(args: argparse.Namespace) -> int:
         # 先走一遍 seed()：它会 ensure_schema（迁移到 head + 校验结构），
         # 于是「库过期」这种情况在这里就报出可照做的提示，而不是等清扫 SQL 崩。
         await seed()
-        return await _sweep()
+        return await _sweep(args)
     build_parser().print_help()
     return 0
 

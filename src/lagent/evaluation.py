@@ -56,6 +56,14 @@ class CaseResult:
 @dataclass
 class EvalReport:
     results: list[CaseResult] = field(default_factory=list)
+    # 这两个字段是**防呆**用的，不是装饰。
+    #
+    # 14/14 这个数字在 mock 模型下衡量的是「链路自洽」—— 假模型按规则把中文
+    # 映射成字段，它当然"全对"。一旦有人把它当成模型准确率写进简历或汇报，
+    # 那就是一句**看起来有数据支撑的假话**。所以报告必须自带来源：
+    # 不是 live 模式的报告里直接印一行警告，让它没法被断章取义地截图。
+    mode: str = ""
+    model: str = ""
 
     @property
     def total(self) -> int:
@@ -71,11 +79,27 @@ class EvalReport:
     def passed(self) -> bool:
         return all(r.ok for r in self.results)
 
+    @property
+    def is_live_model(self) -> bool:
+        """只有真跑在 ``app_mode=live`` 上的报告才配叫「模型准确率」。"""
+        return self.mode == "live"
+
     def render(self) -> str:
+        header = f"评测报告 · {self.total} 条用例"
+        if self.mode:
+            header += f" · 模型 {self.model}（app_mode={self.mode}）"
         lines = [
             "=" * 78,
-            f"评测报告 · {self.total} 条用例",
+            header,
             "=" * 78,
+        ]
+        if self.mode and not self.is_live_model:
+            lines += [
+                "⚠ 本轮**不是**真实模型：下面的三个百分比衡量的是链路自洽，",
+                "   不是模型准确率 —— 请勿引用到简历 / 答辩 / 汇报等对外材料。",
+                "=" * 78,
+            ]
+        lines += [
             f"{'用例':<6}{'意图':<5}{'槽位':<5}{'端到端':<7} 说明",
             "-" * 78,
         ]
@@ -197,7 +221,10 @@ async def run_eval(cases_path: str | Path | None = None, *, verbose: bool = Fals
     store = SessionStore()
     agent = LabBookingAgent(client, store)
     today = now_local().date()
-    report = EvalReport()
+    model_label = (
+        f"{settings.llm_model}" if client.name == "live" else f"{client.name}（离线假模型）"
+    )
+    report = EvalReport(mode=settings.app_mode, model=model_label)
 
     for case in load_cases(cases_path):
         case_id = case.get("id", "?")

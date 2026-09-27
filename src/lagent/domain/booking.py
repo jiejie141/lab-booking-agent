@@ -291,6 +291,19 @@ async def _validate(
     return problems
 
 
+async def _find_by_idempotency_key(
+    session: AsyncSession, *, user_id: int, key: str
+) -> Reservation | None:
+    """按幂等键找已经建过的那条预约。
+
+    刻意**不看状态**：取消过的也算命中 —— 幂等回答的是"这个请求已经处理过了"，
+    而不是"现在还有一单"。否则用户取消后重试，会被当成新请求再下一次。
+    """
+    stmt = select(Reservation).where(
+        Reservation.user_id == user_id, Reservation.idempotency_key == key
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
 async def _load_equipment(session: AsyncSession, equipment_id: int) -> Equipment | None:
     """带 lab 预加载地取设备。
 
@@ -318,6 +331,7 @@ async def create_reservation(
     start: dt.time,
     end: dt.time,
     purpose: str = "",
+    idempotency_key: str | None = None,
     now: dt.datetime | None = None,
 ) -> BookingOutcome:
     settings = get_settings()
@@ -364,6 +378,24 @@ async def create_reservation(
                         reason="not_found",
                     )
 
+                # ★ 幂等：同一个键重发 → 回放上一条，而不是再建一条。
+                if idempotency_key:
+                    existing = await _find_by_idempotency_key(
+                        session, user_id=user_id, key=idempotency_key
+                    )
+                    if existing is not None:
+                        # 变量名刻意不叫 out：下面那条成功路径已经用着 out（单条），
+                        # 同名会让读的人以为这两处是同一个东西
+                        replay = (await _to_outs(session, [existing]))[0]
+                        return BookingOutcome(
+                            ok=True,
+                            message=f"重复请求已忽略（同一幂等键），原预约：{replay.slot}",
+                            reservation=replay,
+                            retries=attempt,
+                            reason="ok",
+                            replayed=True,
+                        )
+
                 problems = await _validate(session, user, equipment, date_, start, end)
                 if problems:
                     return BookingOutcome(
@@ -407,6 +439,7 @@ async def create_reservation(
                     end_time=end,
                     status=STATUS_PENDING if needs_review else STATUS_CONFIRMED,
                     purpose=purpose,
+                    idempotency_key=idempotency_key,
                     version=1,
                 )
                 session.add(res)

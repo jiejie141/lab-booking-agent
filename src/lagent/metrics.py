@@ -639,6 +639,24 @@ def record_rate_limited(limiter: str) -> None:
     RATE_LIMITED.inc(limiter=limiter)
 
 
+# ---- 进程级状态放在哪（限流 / 会话）----------------------------------------
+# 为什么要为「实现细节」出一条指标：两者都是**进程内** dict，单副本下完全没问题，
+# 问题只出在多副本 —— 而那时的外表是「配额变多了」「多轮状态跳变」，
+# 光看现象看不出根因是副本数。每个副本都报一条 backend="memory" 之后，
+# 抓取端一聚合就会看到「同一个 component 有多条时间序列」：
+# 把一条隐形前提变成看得见的数字，也让扩容前该做的那件事有了明确的判据。
+STATE_BACKEND = REGISTRY.gauge(
+    "lagent_state_backend",
+    "进程级状态的存放位置（恒为 1，取值在标签里）："
+    '同一 component 出现多条序列 = 有多个副本各自持有内存态',
+    ("component", "backend"),
+)
+
+
+def record_state_backend(component: str, backend: str) -> None:
+    STATE_BACKEND.set(1, component=component, backend=backend)
+
+
 # ---- 预约 ----------------------------------------------------------------
 # outcome 的取值刻意把两种「冲突」分开：
 #   conflict  —— 复检时就已经被别人占了（用户看到的是"这坑没了"，真实业务冲突）
