@@ -970,8 +970,15 @@ class TestGateApi:
         )
         assert real.json()["granted"] is True, "预检之后凭证仍应可用"
 
-    async def test_inside_roster_requires_admin(self, http, as_user):
-        """在馆名单是敏感信息：回答"楼里现在都有谁"，只给管理员。"""
+    async def test_inside_roster_requires_admin(self, http, as_user, mid_day):
+        """在馆名单是敏感信息：回答"楼里现在都有谁"，只给管理员。
+
+        ``mid_day`` 不是可选项：闸门 8 之后，"签发 → 核验 → 在馆"这条链
+        只在实验室开放时段内才走得通，而这个用例没有钉时钟 ——
+        CI 在北京时间 18:06（周日）跑，生物楼周末 18:00 关门，
+        核验被 lab_closed 如实拒绝，在馆名单 0 人 → assert 0 >= 1 红。
+        这是 2026-09-27 那轮 CI 两连红的第二个根因（第一个是 smoke 脚本，见 scripts/smoke_http.py）。
+        """
         admin = await as_user("管理员")
         lina = await as_user("李娜")
 

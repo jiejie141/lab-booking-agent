@@ -33,3 +33,7 @@ var/
 .idea/
 .DS_Store
 Thumbs.db
+
+# CI 调查用的临时文件（curl 输出 / job 日志），不该进仓库 —— f98502f 误提交过一次
+/_*.json
+/_l*.txt

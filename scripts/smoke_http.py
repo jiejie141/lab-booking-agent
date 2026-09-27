@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import datetime
 import json
 import os
 import pathlib
@@ -38,19 +39,37 @@ SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
 
+def smoke_now() -> "datetime.datetime":
+    """这份清单的"现在"：**今天 12:00**。
+
+    为什么必须钉：闸门 8（开放时间）上线后，门禁段只能在实验室开放时段内
+    验"放行"。三个实验室开放时段的交集是 10:00-16:00（生物楼周末最紧），
+    钉 12:00 意味着**任何一天、任何时间跑这份清单都在时段内** ——
+    不然 CI 在北京时间 18:06 跑，生物楼周末 18:00 关门，
+    `持凭证刷卡 → 放行` 会被 lab_closed 如实拒绝（2026-09-27 实际发生）。
+
+    这正是 ``LAB_FAKE_NOW`` 被造出来的用途：演示与验收不该被真实时钟绑住。
+    服务端经 ``running_server`` 注入同一个值；脚本侧的
+    ``live_window()`` / ``today_iso()`` 也从这里推导 —— 两边看到同一个"现在"，
+    凭证窗口（11:00-13:00）必然落在开放时段（10:00-16:00）内。
+    """
+    return datetime.datetime.combine(datetime.date.today(), datetime.time(12, 0))
+
+
 def live_window() -> dict[str, str]:
     """围绕"此刻"取一段入场时间窗。
 
-    这里的清单是对着**真实 uvicorn 进程**跑的，没有地方注入 now ——
-    服务端取的是自己的时钟。写死 14:00-16:00 的话，这份清单只在下午两点到
-    四点之间全绿，其余时段末节必然红，然后就没人再看这一节了。
+    这里的清单是对着**真实 uvicorn 进程**跑的，服务端的"现在"由
+    ``LAB_FAKE_NOW`` 注入（见 ``smoke_now``）—— 脚本侧必须从**同一个**现在
+    推导窗口，否则判定看到 12:00、窗口却从真实时钟推出来，
+    会自己把自己变成 ``not_yet_valid``。
 
     具体算法用 ``lagent.clock.window_covering``（同一个时区、且已处理
     "23:0x 之后 now+1h 跨午夜"那个坑 —— 它在 23:52 真打红过这一节两条）。
     """
-    from lagent.clock import now_local, window_covering
+    from lagent.clock import window_covering
 
-    start, end = window_covering(now_local())
+    start, end = window_covering(smoke_now())
     return {"valid_from": start.strftime("%H:%M:%S"), "valid_to": end.strftime("%H:%M:%S")}
 
 SMOKE_SECRET = "smoke-test-secret"
@@ -132,6 +151,10 @@ def running_server(extra_env: dict[str, str] | None = None):
         "LAB_DATABASE_URL": f"sqlite+aiosqlite:///{(root / 'smoke.db').as_posix()}",
         "LAB_JWT_SECRET": SMOKE_SECRET,
         "LAB_APP_MODE": "mock",
+        # 把服务端的"现在"钉在今天 12:00（见 smoke_now）：
+        # 闸门 8 之后，门禁段只能在开放时段内验"放行"，不钉的话
+        # 这份清单只在 10:00-16:00 之间全绿 —— 看时段才过的清单比没有更糟。
+        "LAB_FAKE_NOW": smoke_now().strftime("%Y-%m-%d %H:%M"),
         # 演示口令的 KDF 成本调低：这份脚本会登录很多次，没必要每次等 140ms
         "LAB_PASSWORD_KDF_N": "1024",
         "LAB_RATE_LIMIT_PER_MINUTE": str(RATE_LIMIT),
@@ -440,9 +463,12 @@ def run_checks(base: str) -> None:
 
 
 def today_iso() -> str:
-    from lagent.clock import today_local
+    """与服务端同一个"今天"：从 smoke_now() 推导，而不是真实时钟。
 
-    return today_local().isoformat()
+    服务端跑在 LAB_FAKE_NOW 注入的时钟上；凭证的 date 必须是
+    **服务端认为的今天**，两边才对得上。
+    """
+    return smoke_now().date().isoformat()
 
 
 def run_react_checks(base: str) -> None:
