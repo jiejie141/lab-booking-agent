@@ -39,7 +39,7 @@ SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
 
-def smoke_now() -> "datetime.datetime":
+def smoke_now() -> datetime.datetime:
     """这份清单的"现在"：**今天 12:00**。
 
     为什么必须钉：闸门 8（开放时间）上线后，门禁段只能在实验室开放时段内
