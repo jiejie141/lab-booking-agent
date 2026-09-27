@@ -1,41 +1,51 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>lab-booking-agent · 智能实验室预约控制台</title>
 <style>
 :root{
-  /* Foundation：与 browser-agent、qa-agent 共用同一套中性色 */
-  --bg:#0a0c10; --bg-grid:#111419; --panel:#111419; --panel-2:#171b22; --panel-3:#1d222b;
-  --border:#2a313e; --border-soft:#1e242e; --text:#e9ecef; --text-dim:#9aa3b2;
-  --text-faint:#6e7787;
-  /* Brand：本项目主色=靛，300 级，取代偏默认的 #3d9bff */
-  --accent:#a5b4fc; --accent-2:#c4b5fd; --accent-soft:rgba(165,180,252,.12);
-  /* 语义色：与 browser-agent 完全一致 */
-  --ok:#6ee7b7; --warn:#fcd34d; --danger:#fca5a5; --chip:rgba(255,255,255,.04);
-  /* 深色底分层：内描边比阴影更有效，e2/e3 让卡片与弹窗浮起来 */
+  /* ================================================================
+     设计令牌：明暗双主题
+     默认「纸感浅色」——参考 whiteboard.is 的设计语言：
+     纸白底 / 极细标题 / 胶囊按钮 / tan 米色点缀 / 小圆角 / 无网格无发光。
+     :root 是暖墨深色（切换用），[data-theme="light"] 覆盖为纸感浅色。
+  ================================================================ */
+  --bg:#191612; --bg-grid:#211d18; --panel:#211d18; --panel-2:#29241d; --panel-3:#322c24;
+  --border:#453d32; --border-soft:#322c24; --text:#f3efe7; --text-dim:#b3a99a;
+  --text-faint:#837a6c;
+  /* Brand：本项目主色=靛；浅色主题下压深为可读写墨蓝 */
+  --accent:#a5b4fc; --accent-2:#c4b5fd; --accent-soft:rgba(165,180,252,.14);
+  --accent-ink:#191612;
+  --tan:#3a352a; --tan-soft:#29241d;
+  --ok:#6ee7b7; --warn:#fcd34d; --danger:#fca5a5; --chip:rgba(255,255,255,.05);
   --shadow:0 1px 2px rgba(0,0,0,.4), 0 0 0 1px rgba(255,255,255,.04);
   --shadow-2:0 4px 16px -4px rgba(0,0,0,.5);
   --shadow-3:0 16px 48px -12px rgba(0,0,0,.6);
-  --radius:14px; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --radius:10px; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+  color-scheme:dark;
 }
 [data-theme="light"]{
-  --bg:#f4f6f8; --bg-grid:#e9eef4; --panel:#ffffff; --panel-2:#f1f3f6; --panel-3:#e8ebf0;
-  --border:#cfd5de; --border-soft:#e3e7ec; --text:#0f1419; --text-dim:#5b6672; --text-faint:#7d8794;
-  --accent:#4f46e5; --accent-2:#7c3aed; --accent-soft:rgba(79,70,229,.08);
-  --ok:#059669; --warn:#b45309; --danger:#dc2626; --chip:rgba(15,20,25,.04);
-  --shadow:0 1px 2px rgba(15,20,25,.06), 0 0 0 1px rgba(15,20,25,.05);
-  --shadow-2:0 4px 16px -4px rgba(15,20,25,.12);
-  --shadow-3:0 16px 48px -12px rgba(15,20,25,.18);
+  /* 纸感浅色：色值取自 whiteboard.is 的 swatches（off-white/tan/dark/medium-grey） */
+  --bg:#fcf7f9; --bg-grid:#f0eddd; --panel:#ffffff; --panel-2:#f7f2ec; --panel-3:#f0eddd;
+  --border:#d8d8d8; --border-soft:#eae3de; --text:#231f20; --text-dim:#666662; --text-faint:#8f8a85;
+  --accent:#4f46e5; --accent-2:#0284c7; --accent-soft:rgba(79,70,229,.07);
+  --accent-ink:#fcf7f9;
+  --tan:#f0eddd; --tan-soft:#f7f4ea;
+  --ok:#059669; --warn:#b45309; --danger:#dc2626; --chip:rgba(35,31,32,.04);
+  --shadow:0 1px 2px rgba(35,31,32,.05);
+  --shadow-2:0 4px 14px -6px rgba(35,31,32,.10);
+  --shadow-3:0 20px 50px -20px rgba(35,31,32,.22);
+  color-scheme:light;
 }
 *{box-sizing:border-box}
 html,body{margin:0;padding:0}
+/* 纸感底：whiteboard 没有网格与光晕，质感靠留白与排版 */
 body{
   background:var(--bg); color:var(--text); font-family:var(--sans); font-size:14px; line-height:1.6;
-  background-image:linear-gradient(var(--bg-grid) 1px,transparent 1px),linear-gradient(90deg,var(--bg-grid) 1px,transparent 1px);
-  background-size:48px 48px; min-height:100vh;
+  background-image:none; min-height:100vh; transition:background .25s, color .25s;
 }
 .wrap{max-width:1360px;margin:0 auto;padding:0 24px 64px}
 header.top{
@@ -43,61 +53,66 @@ header.top{
   background:color-mix(in srgb,var(--bg) 88%,transparent); border-bottom:1px solid var(--border-soft);
 }
 .top-in{max-width:1360px;margin:0 auto;padding:12px 24px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-.brand{display:flex;align-items:center;gap:10px;font-weight:500;font-size:17px;letter-spacing:.2px}
-.brand .mark{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--accent),var(--accent-2));display:grid;place-items:center;font-size:13px;color:#0a0c10}
-.brand small{font-weight:400;color:var(--text-faint);font-size:12px;margin-left:2px}
+/* whiteboard 的标题是极细字重 + 负字距，这是它最独特的识别点 */
+.brand{display:flex;align-items:center;gap:10px;font-weight:300;font-size:20px;letter-spacing:-.02em}
+/* 标记块用 tan 实色，不用渐变——渐变是"科技感"，不是纸感 */
+.brand .mark{width:28px;height:28px;border-radius:8px;background:var(--tan);display:grid;place-items:center;font-size:13px;color:var(--text)}
+.brand small{font-weight:400;color:var(--text-faint);font-size:12px;margin-left:2px;letter-spacing:.2px}
 .spacer{flex:1}
 .badge{display:inline-flex;align-items:center;gap:8px;padding:4px 12px;border-radius:999px;border:1px solid var(--border);background:var(--panel);font-size:12px;color:var(--text-dim)}
 .badge b{color:var(--text);font-weight:500}
-/* 状态圆点是"活动指示"，属于规范允许发光的唯一两类元素之一 */
-.dot{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 18%,transparent)}
-.dot.warn{background:var(--warn);box-shadow:0 0 0 3px color-mix(in srgb,var(--warn) 18%,transparent)}
-.dot.bad{background:var(--danger);box-shadow:0 0 0 3px color-mix(in srgb,var(--danger) 18%,transparent)}
-.icon-btn{width:34px;height:34px;border-radius:10px;border:1px solid var(--border);background:var(--panel);color:var(--text-dim);cursor:pointer;display:grid;place-items:center;transition:.16s}
-.icon-btn:hover{color:var(--text);border-color:var(--accent);background:var(--accent-soft)}
+/* 纸感：状态点不做发光——发光在白纸上只会显脏 */
+.dot{width:7px;height:7px;border-radius:50%;background:var(--ok)}
+.dot.warn{background:var(--warn)}
+.dot.bad{background:var(--danger)}
+.icon-btn{width:34px;height:34px;border-radius:100rem;border:1px solid var(--border);background:var(--panel);color:var(--text-dim);cursor:pointer;display:grid;place-items:center;transition:.16s}
+.icon-btn:hover{color:var(--text);border-color:var(--text-faint);background:var(--tan-soft)}
 .icon-btn svg{width:16px;height:16px}
-h2.sec{font-size:14px;font-weight:500;color:var(--text-faint);letter-spacing:.4px;margin:0 0 12px}
+h2.sec{font-size:12px;font-weight:400;color:var(--text-faint);letter-spacing:.4px;margin:0 0 12px}
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:16px;margin:24px 0}
 .stat{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow);position:relative;overflow:hidden}
 .stat::after{content:"";position:absolute;left:0;top:0;bottom:0;width:2px;background:var(--accent);opacity:.5}
 .stat.v2::after{background:var(--accent-2)} .stat.v3::after{background:var(--ok)} .stat.v4::after{background:var(--warn)}
 .stat .k{font-size:12px;color:var(--text-faint);letter-spacing:.4px}
-.stat .n{font-family:var(--mono);font-size:24px;font-weight:500;margin-top:2px;font-variant-numeric:tabular-nums}
+/* 数字走极细字重 + 负字距，与 whiteboard 的大号细体标题同源 */
+.stat .n{font-family:var(--mono);font-size:28px;font-weight:300;margin-top:2px;letter-spacing:-.02em;line-height:1.15;font-variant-numeric:tabular-nums}
 .cols{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:16px;align-items:start}
 @media(max-width:1020px){.cols{grid-template-columns:1fr}}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow)}
 .card-h{padding:12px 16px;border-bottom:1px solid var(--border-soft);display:flex;align-items:center;gap:12px}
-.card-h .t{font-weight:500;font-size:14px}
+.card-h .t{font-weight:400;font-size:14px;letter-spacing:-.01em}
 .card-b{padding:16px}
-.tabs{display:flex;gap:4px;padding:4px;background:var(--panel-3);border-radius:10px;border:1px solid var(--border-soft)}
-.tab{padding:6px 12px;border-radius:6px;font-size:12px;color:var(--text-dim);cursor:pointer;border:none;background:transparent;transition:.16s;white-space:nowrap}
+.tabs{display:flex;gap:2px;padding:3px;background:var(--panel-2);border-radius:100rem;border:1px solid var(--border-soft)}
+.tab{padding:6px 14px;border-radius:100rem;font-size:12px;color:var(--text-dim);cursor:pointer;border:none;background:transparent;transition:.16s;white-space:nowrap}
 .tab:hover{color:var(--text)}
 .tab.on{background:var(--panel);color:var(--text);border:1px solid var(--border)}
-select,input,textarea{font-family:inherit;font-size:13px;color:var(--text);background:var(--panel-2);border:1px solid var(--border);border-radius:10px;padding:9px 12px;outline:none;transition:.16s;width:100%}
+select,input,textarea{font-family:inherit;font-size:13px;color:var(--text);background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:9px 12px;outline:none;transition:.16s;width:100%}
 select:focus,input:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 textarea{resize:vertical;min-height:74px;line-height:1.6}
 label.f{display:block;font-size:12px;color:var(--text-faint);margin:0 0 6px;letter-spacing:.4px}
 .row{display:flex;gap:12px;align-items:flex-end}
 .row>*{flex:1}
-/* 主色是亮色（300 级），按钮文字必须用深色才有对比度 */
-.btn{padding:9px 16px;border-radius:10px;border:1px solid var(--accent);background:var(--accent);color:#0a0c10;font-size:13px;font-weight:500;cursor:pointer;transition:.16s;white-space:nowrap}
-.btn:hover{filter:brightness(1.08)}
+/* 按钮一律胶囊形（whiteboard: border-radius 100rem）；
+   文字色用 --accent-ink 而不是写死 #0a0c10——主色深浅随主题变，写死必然有一边不可读 */
+.btn{padding:9px 18px;border-radius:100rem;border:1px solid var(--accent);background:var(--accent);color:var(--accent-ink);font-size:13px;font-weight:500;cursor:pointer;transition:.16s;white-space:nowrap}
+.btn:hover{opacity:.88}
 .btn:disabled{opacity:.45;cursor:not-allowed;filter:none}
 .btn.ghost{background:transparent;color:var(--text-dim);border-color:var(--border)}
-.btn.ghost:hover{color:var(--text);border-color:var(--accent)}
+.btn.ghost:hover{color:var(--text);border-color:var(--text-faint);background:var(--tan-soft)}
 .btn.sm{padding:5px 12px;font-size:12px}
 .msgs{display:flex;flex-direction:column;gap:12px;max-height:420px;overflow-y:auto;padding-right:4px}
 .msg{display:flex;gap:8px;animation:rise .24s ease both}
-.msg .who{width:26px;height:26px;border-radius:8px;flex:none;display:grid;place-items:center;font-size:11px;font-weight:500}
-.msg.u .who{background:var(--accent-soft);color:var(--accent);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent)}
-.msg.a .who{background:var(--chip);color:var(--accent-2);border:1px solid color-mix(in srgb,var(--accent-2) 30%,transparent)}
-.msg .bub{background:var(--panel-2);border:1px solid var(--border-soft);border-radius:10px;padding:9px 12px;white-space:pre-wrap;word-break:break-word;flex:1;font-size:13px}
-.msg.u .bub{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 22%,transparent)}
+.msg .who{width:26px;height:26px;border-radius:100rem;flex:none;display:grid;place-items:center;font-size:11px;font-weight:400}
+.msg.u .who{background:var(--accent-soft);color:var(--accent);border:1px solid color-mix(in srgb,var(--accent) 26%,transparent)}
+.msg.a .who{background:var(--chip);color:var(--text-dim);border:1px solid var(--border)}
+.msg .bub{background:var(--panel-2);border:1px solid var(--border-soft);border-radius:8px;padding:10px 14px;white-space:pre-wrap;word-break:break-word;flex:1;font-size:13px;line-height:1.7}
+/* 用户气泡用 tan 底——whiteboard 式「划重点」的米色块 */
+.msg.u .bub{background:var(--tan);border-color:var(--border-soft)}
 .msg.err .bub{border-color:var(--danger);color:var(--danger)}
 @keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 .props{display:flex;flex-direction:column;gap:8px;margin-top:4px}
-.prop{border:1px solid var(--border);border-radius:10px;padding:12px;background:var(--panel-2);display:flex;gap:10px;align-items:flex-start;transition:.16s}
-.prop:hover{border-color:var(--accent);background:var(--panel-3)}
+.prop{border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--panel);display:flex;gap:10px;align-items:flex-start;transition:.16s}
+.prop:hover{border-color:var(--accent);background:var(--tan-soft)}
 .prop .idx{font-family:var(--mono);font-size:12px;color:var(--text-faint);min-width:18px}
 .prop .main{flex:1;min-width:0}
 .prop .line1{font-weight:500;font-size:13px}
@@ -114,9 +129,9 @@ label.f{display:block;font-size:12px;color:var(--text-faint);margin:0 0 6px;lett
 .bar{height:3px;border-radius:2px;background:var(--accent);opacity:.55;min-width:2px}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--border-soft)}
-th{font-size:11px;color:var(--text-faint);font-weight:500;letter-spacing:.4px}
+th{font-size:11px;color:var(--text-faint);font-weight:400;letter-spacing:.4px}
 tbody tr{transition:.16s}
-tbody tr:hover{background:var(--panel-2)}
+tbody tr:hover{background:var(--tan-soft)}
 td .mono{font-family:var(--mono)}
 .tag{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--border);color:var(--text-dim)}
 .tag.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 35%,transparent);background:color-mix(in srgb,var(--ok) 10%,transparent)}
@@ -129,13 +144,14 @@ td .mono{font-family:var(--mono)}
 @keyframes sh{0%{background-position:100% 50%}100%{background-position:0 50%}}
 .sk-row{height:34px;margin-bottom:8px}
 .sk-card{height:78px;margin-bottom:12px}
-.cite{border-left:2px solid var(--accent-2);padding:8px 0 8px 12px;margin-bottom:12px}
+/* 引用块：tan 底 + 墨色竖线，替代原来的彩色左边框 */
+.cite{background:var(--tan);border-left:3px solid var(--text);padding:10px 14px;border-radius:0 8px 8px 0;margin-bottom:12px}
 .cite .h{font-size:13px;font-weight:500}
 .cite .x{font-size:13px;color:var(--text-dim);margin-top:2px}
 .cite .s{font-family:var(--mono);font-size:11px;color:var(--text-faint)}
 .hint{font-size:12px;color:var(--text-faint);margin-top:6px}
 .toasts{position:fixed;right:24px;bottom:24px;display:flex;flex-direction:column;gap:8px;z-index:95}
-.toast{background:var(--panel);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:10px;padding:12px 16px;font-size:13px;box-shadow:var(--shadow-2);animation:rise .24s ease both;max-width:330px}
+.toast{background:var(--panel);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:8px;padding:12px 16px;font-size:13px;box-shadow:var(--shadow-2);animation:rise .24s ease both;max-width:330px}
 .toast.err{border-left-color:var(--danger)}
 .toast.ok{border-left-color:var(--ok)}
 .pill-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
@@ -146,11 +162,11 @@ td .mono{font-family:var(--mono)}
 /* ---------- 登录闸门 ---------- */
 .gate{position:fixed;inset:0;z-index:80;background:var(--bg);display:grid;place-items:center;padding:24px}
 .gate[hidden]{display:none}
-.gate .box{width:100%;max-width:392px;background:var(--panel);border:1px solid var(--border);border-radius:14px;
+.gate .box{width:100%;max-width:392px;background:var(--panel);border:1px solid var(--border);border-radius:10px;
   box-shadow:var(--shadow-3);padding:28px;animation:rise .24s ease both}
 .gate .logo{display:flex;align-items:center;gap:12px;margin-bottom:6px}
-.gate .logo .mark{width:34px;height:34px;border-radius:10px;font-size:15px;background:linear-gradient(135deg,var(--accent),var(--accent-2));display:grid;place-items:center;color:#0a0c10}
-.gate .logo b{font-size:17px;font-weight:500}
+.gate .logo .mark{width:34px;height:34px;border-radius:9px;font-size:15px;background:var(--tan);display:grid;place-items:center;color:var(--text)}
+.gate .logo b{font-size:19px;font-weight:300;letter-spacing:-.02em}
 .gate .sub{color:var(--text-dim);font-size:13px;margin:0 0 20px}
 .gate label.f{margin-top:12px}
 .gate .btn{width:100%;margin-top:18px;padding:11px}
@@ -387,7 +403,9 @@ const $$ = (s,r)=> Array.from((r||document).querySelectorAll(s));
 const esc = s => String(s==null?"":s).replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
 /* ---------- 主题 ---------- */
-const THEME_KEY="lagent-theme";
+/* 存储键升到 -v2：老用户 localStorage 里存着 'dark'，
+   沿用旧键的话刷新一次就被记忆弹回深色，本次纸感改版等于白做。 */
+const THEME_KEY="lagent-theme-v2";
 function applyTheme(t){
   document.documentElement.setAttribute("data-theme",t);
   $("#btn-theme").innerHTML = t==="dark"
@@ -395,10 +413,10 @@ function applyTheme(t){
     : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></svg>';
   try{localStorage.setItem(THEME_KEY,t);}catch(e){}
 }
+/* 默认「纸感浅色」，不再跟随系统：深色是一个可选口味，由按钮切换，不是默认值 */
 (function initTheme(){
   let saved=null; try{saved=localStorage.getItem(THEME_KEY);}catch(e){}
-  const prefers = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light":"dark";
-  applyTheme(saved || prefers);
+  applyTheme(saved || "light");
 })();
 $("#btn-theme").addEventListener("click",()=>{
   applyTheme(document.documentElement.getAttribute("data-theme")==="dark"?"light":"dark");
