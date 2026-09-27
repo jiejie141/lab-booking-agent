@@ -1001,6 +1001,9 @@ compose 实机验收:     25/25（PostgreSQL 上 revision=0005 / 容器 healthy 
 含摩擦点清单与已修项）见 [`docs/TRIAL-RUN.md`](docs/TRIAL-RUN.md)。
 
 **还没解决的问题**逐项列在 [`docs/OPEN-ISSUES.md`](docs/OPEN-ISSUES.md)（模块 / 具体表现 / 潜在影响 / 优先级 / 排查方向）。
+
+**现场演示怎么做**（五分钟主线 / 六十秒版 / 被追问时的深挖点 / 翻车预案）
+见 [`docs/DEMO-SCRIPT.md`](docs/DEMO-SCRIPT.md)。
 后台维护 CRUD:      38 项（新增/改字段/显式 null 不动 / 停用即失效 / **没有删除路由** / 冲突与越权）
 设备级审批:         11 项（申请即占坑 / 驳回释放时段 / 重复处理 409 / 非管理员拿不到待办）
 通知:               22 项（四类业务事件都留痕 / 没配 SMTP 不假装成功 / 失败留原因不重发 / **通知崩了不影响下单**）
