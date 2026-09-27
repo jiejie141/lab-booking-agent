@@ -506,8 +506,29 @@ async function enterApp(){
 
 /* ---------- 顶部与统计 ---------- */
 async function loadHealth(){
+  /* 健康详情需要登录。这里刻意**不走 api()**：
+     api() 在 401 时会调 sessionExpired() 并把错误抛进来，
+     于是 boot() 在**未登录**状态下第一次加载时，会把"还没登录"
+     显示成红点"连接失败" —— 把凭证问题误报成网络问题，
+     正是本项目 everywhere else 都在避免的那类两类失败混报。
+     可见状态分四档：
+       未登录（灰）→ 登录过期（黄，回闸门）→ 连接失败（红）→ 正常（绿/黄）。 */
   try{
-    const h=await api("/api/health/details");
+    const t=tokenApi.get();
+    if(!t){
+      $("#dot-health").className="dot warn";
+      $("#badge-mode").innerHTML='<span class="dot warn" id="dot-health"></span>未登录';
+      return;
+    }
+    const r=await fetch("/api/health/details",{headers:{"Authorization":"Bearer "+t}});
+    if(r.status===401){
+      $("#dot-health").className="dot warn";
+      $("#badge-mode").innerHTML='<span class="dot warn" id="dot-health"></span>登录已过期';
+      sessionExpired();
+      return;
+    }
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    const h=await r.json();
     $("#dot-health").className="dot"+(h.agent_available?"":" warn");
     $("#badge-mode").innerHTML='<span class="dot'+(h.agent_available?"":" warn")+'" id="dot-health"></span>'+esc(h.app_mode)+" · "+esc(h.database);
     $("#badge-backend").textContent=h.retrieval_backend+(h.retrieval_degraded_reason?"（降级）":"");

@@ -2069,7 +2069,14 @@ async def index() -> Response:
     target = WEB_DIR / "index.html"
     if not target.exists():
         return JSONResponse({"detail": "web/index.html 不存在"}, status_code=404)
-    return FileResponse(target, media_type="text/html")
+    # ★ 必须带 no-cache：这个文件是零构建的单文件前端，JS 全部内联在内。
+    # 不带的话浏览器会启发式缓存，控制台改版后用户拿到的还是**旧 JS**，
+    # 而接口已经是新的 —— 表现是"登录都正常、某个面板莫名报错"，
+    # 一次 cache 强刷才能治好的那种灵异问题（2026-09-27 实际撞过）。
+    # no-cache（而不是 no-store）：每次仍会协商，304 时省的是传输不是验证。
+    return FileResponse(target, media_type="text/html", headers={
+        "Cache-Control": "no-cache",
+    })
 
 
 @router.get("/api/today")

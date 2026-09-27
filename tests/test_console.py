@@ -380,3 +380,49 @@ class TestRescheduleWiring:
     def test_it_reports_the_server_reason_rather_than_guessing(self, html):
         """失败时把服务端的话原样说给用户 —— 不自己猜"大概是冲突"。"""
         assert "改期失败：" in html
+
+
+# ==========================================================================
+# 健康徽章的语义（2026-09-27 的事故）
+#
+# boot() 在**未登录**时就调 /api/health/details，401 被 api() 当成
+# 会话结束抛进来，落进 catch 之后徽章显示红点「连接失败」——
+# 把「还没登录」误报成「连不上」。用户看到的正是这一幕：
+# 右上角明明写着管理员，徽章却是连接失败，统计全是"—"。
+# ==========================================================================
+class TestHealthBadgeSemantics:
+    @pytest.fixture(scope="class")
+    def html(self) -> str:
+        return WEB_INDEX.read_text(encoding="utf-8")
+
+    def test_health_details_is_not_fetched_through_api(self, html):
+        """健康详情必须用裸 fetch：api() 在 401 时会清会话 + 抛错，
+        而「未登录时探活」是 boot 的正常路径，不该触发那一套。"""
+        assert 'fetch("/api/health/details"' in html
+        assert 'await api("/api/health/details")' not in html
+
+    def test_anonymous_boot_shows_not_signed_in_not_connection_failed(self, html):
+        """没有令牌时徽章必须是「未登录」（灰黄），不许是「连接失败」（红）——
+        这两种状态的用户动作完全不同：前者去登录，后者查后端。"""
+        assert "未登录" in html
+        assert html.index("未登录") < html.index("连接失败"), (
+            "「未登录」分支应先于兜底的「连接失败」出现"
+        )
+
+    def test_expired_session_is_its_own_visible_state(self, html):
+        """令牌过期（401）也要单独说「登录已过期」，并且才允许清会话。"""
+        assert "登录已过期" in html
+
+
+class TestConsoleCachePolicy:
+    """控制台是零构建单文件：JS 全内联在 index.html 里。
+
+    FileResponse 不带 Cache-Control 时，浏览器启发式缓存会让人拿着
+    **旧 JS** 打**新接口** —— 表现是"登录正常、某面板莫名报错"，
+    一次强刷才能治好。这类问题在用户那边就是"灵异"，必须从服务端堵死。
+    """
+
+    async def test_index_is_served_with_no_cache(self, http):
+        resp = await http.get("/")
+        assert resp.status_code == 200
+        assert resp.headers.get("cache-control") == "no-cache"
