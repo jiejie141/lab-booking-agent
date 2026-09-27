@@ -777,20 +777,23 @@ async def decide_reservation(
     )
 
 
-async def pending_reservations(session: AsyncSession) -> list[ReservationOut]:
+async def pending_reservations(
+    session: AsyncSession, *, limit: int | None = None, offset: int = 0
+) -> list[ReservationOut]:
     """待审批列表（管理员后台用）。
 
     ⚠️ 不能图省事复用 :func:`list_reservations` 再在内存里过滤：它返回的是
     **全量**，而"待审批"接口一旦返回全部预约，管理员在页面上就分不清
     哪些要处理 —— 这正是"省一个函数"的代价。
     """
-    rows = (
-        await session.execute(
-            select(Reservation)
-            .where(Reservation.status == STATUS_PENDING)
-            .order_by(Reservation.date, Reservation.start_time)
-        )
-    ).scalars().all()
+    stmt = (
+        select(Reservation)
+        .where(Reservation.status == STATUS_PENDING)
+        .order_by(Reservation.date, Reservation.start_time)
+    )
+    if limit is not None:
+        stmt = stmt.limit(limit).offset(offset)
+    rows = (await session.execute(stmt)).scalars().all()
     return await _to_outs(session, rows)
 
 

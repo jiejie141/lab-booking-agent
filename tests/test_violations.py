@@ -596,3 +596,36 @@ class TestConfig:
                 get_settings()
         finally:
             reset_settings_cache()
+
+
+class TestViolationBreakdown:
+    """违约账要能分开回答「判过几次」与「计入几次」。
+
+    只给一个数字的后果很具体：豁免之后 `count` 归零，管理员看到"0 次"会以为
+    系统从没判过 —— 而实际可能是"判了 5 次、全部被豁免"。这两件事含义相反：
+    前者是这个人守规矩，后者可能是门禁在误判。
+    """
+
+    async def test_judged_and_counted_are_reported_separately(self, isolated_db, http, as_user):
+        ids = await stamp_violations(ZHANGWEI, 2)
+        admin_headers = await as_user("管理员")
+        before = (await http.get(f"/api/users/{ZHANGWEI}/violations", headers=admin_headers)).json()
+        assert before["total"] == 2 and before["count"] == 2 and before["pardoned"] == 0
+
+        # 豁免其中一条：判过的事实还在，只是不再计入
+        await http.post(f"/api/reservations/{ids[0]}/pardon", headers=admin_headers)
+        after = (await http.get(f"/api/users/{ZHANGWEI}/violations", headers=admin_headers)).json()
+        assert after["total"] == 2, "判过几次不能因为豁免而变少"
+        assert after["count"] == 1, "计入次数应当减少"
+        assert after["pardoned"] == 1
+
+    async def test_all_pardoned_does_not_look_like_never_judged(self, isolated_db, http, as_user):
+        """★ 全部豁免后，`count` 是 0 但 `total` 必须仍是 2 —— 否则会被读成"这个人从没违约"。"""
+        ids = await stamp_violations(ZHANGWEI, 2)
+        admin_headers = await as_user("管理员")
+        for rid in ids:
+            await http.post(f"/api/reservations/{rid}/pardon", headers=admin_headers)
+        body = (await http.get(f"/api/users/{ZHANGWEI}/violations", headers=admin_headers)).json()
+        assert body["count"] == 0
+        assert body["total"] == 2, "『判过』与『计入』必须分开，否则全部豁免看着像从未判过"
+        assert body["pardoned"] == 2

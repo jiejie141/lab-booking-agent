@@ -36,8 +36,33 @@ def tz() -> dt.tzinfo:
 
 
 def now_local() -> dt.datetime:
-    """当前本地时间（无 tzinfo，便于直接入库）。"""
+    """当前本地时间（无 tzinfo，便于直接入库）。
+
+    ★ ``LAB_FAKE_NOW`` 打开时返回被覆盖的值 —— 全链路**只有这一个出口**，
+    所以覆盖一次即可，不需要在每个入口都改一遍。这也是为什么它必须放在这里：
+    分散在各处记时间的话，"覆盖了但某处没生效"这类漏网之鱼会非常难查
+    （表现是"同一秒里系统认为有两个不同的现在"）。
+
+    非法的值**不静默回退到真实时钟**：那样演示时你以为自己在 14:00，
+    实际跑在 23:00 的判定上，比报错更难发现。解析不出来就直接抛。
+    """
+    override = get_settings().fake_now.strip()
+    if override:
+        return _parse_override(override)
     return dt.datetime.now(tz()).replace(tzinfo=None)
+
+
+def _parse_override(raw: str) -> dt.datetime:
+    """解析时间覆盖值。接受 ``YYYY-MM-DD HH:MM[:SS]`` 或 ``YYYY-MM-DDTHH:MM``。"""
+    text = raw.replace("T", " ").strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return dt.datetime.strptime(text, fmt).replace(tzinfo=None)
+        except ValueError:
+            continue
+    raise ValueError(
+        f"LAB_FAKE_NOW 无法解析：{raw!r}（应为 YYYY-MM-DD HH:MM 或 YYYY-MM-DDTHH:MM）"
+    )
 
 
 def today_local() -> dt.date:

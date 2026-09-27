@@ -114,6 +114,7 @@ from .models import (
     DENY_IDENTITY_MISMATCH,
     EQUIPMENT_NORMAL,
     PERMIT_CHECKED_IN,
+    STATUS_PENDING,
     EntryPermit,
     Equipment,
     Laboratory,
@@ -265,6 +266,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 放在最前面不是因为"顺序好看"，而是因为**启动阶段的失败最需要结构化日志** ——
     # 服务起不来时，一个能按字段检索的 JSON 行比一句自由文本有用得多。
     configure_from_settings()
+
+    # 时间被覆盖时必须**喊出来**：这是演示/验收形态，任何业务结论都不该当成真的。
+    # 与"用了公开默认密钥"同一档（CRITICAL），而不是 INFO —— 静默生效的时钟覆盖
+    # 是最难排查的一类问题：数据看起来都对，只是全是另一个时间点的答案。
+    if get_settings().fake_now.strip():
+        get_logger("lagent.api").critical(
+            f"时间已被 LAB_FAKE_NOW 覆盖为 {get_settings().fake_now.strip()}"
+            f"（真实时间 {dt.datetime.now()}）—— 仅用于演示/培训/验收，"
+            f"此形态下的一切业务结论都不可信"
+        )
 
     # ★ 签名密钥 **fail-closed**（原来是只打一条 WARNING 然后照常跑）。
     # 一个能伪造任意身份（含管理员）的密钥，不该有"先跑起来再说"的余地：
@@ -1135,7 +1146,13 @@ def _lab_payload(lab: Laboratory) -> dict:
 
 @router.get("/api/labs")
 async def labs(_: Principal = Depends(current_user)) -> list[dict]:
-    """实验室与设备目录。需登录（目录本身不敏感，但按"默认拒绝"统一处理）。"""
+    """实验室与设备目录。需登录（目录本身不敏感，但按"默认拒绝"统一处理）。
+
+    **刻意不分页**：一个院系的实验室是十来间、设备几十台，一屏装得下；
+    而这个响应里设备是**嵌套**在实验室下的，分页只能切外层，
+    切出来的"第 2 页"含义还随排序漂移 —— 为一个不会撞上的上限付出
+    语义复杂度，不划算。真到了几百间的规模再改成"先列房间、再按房间取设备"。
+    """
     async with session_scope() as session:
         stmt = (
             select(Laboratory)
@@ -1148,11 +1165,24 @@ async def labs(_: Principal = Depends(current_user)) -> list[dict]:
 
 @router.get("/api/users", response_model=list[UserOut])
 async def users(
-    request: Request, admin: Principal = Depends(require_admin)
+    response: Response,
+    request: Request,
+    limit: int | None = Query(default=None, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    admin: Principal = Depends(require_admin),
 ) -> list[UserOut]:
-    """列出全部用户。**管理员专用**：普通用户没有任何业务理由拿到花名册。"""
+    """列出全部用户。**管理员专用**：普通用户没有任何业务理由拿到花名册。
+
+    分页与其它列表同一套约定：可选 ``limit``/``offset``，总数走 ``X-Total-Count``，
+    响应形状仍是数组。
+    """
     async with session_scope() as session:
-        rows = (await session.execute(select(User).order_by(User.id))).scalars().all()
+        stmt = select(User).order_by(User.id)
+        if limit is not None:
+            stmt = stmt.limit(limit).offset(offset)
+        rows = (await session.execute(stmt)).scalars().all()
+        total = int(await session.scalar(select(func.count()).select_from(User)) or 0)
+    response.headers["X-Total-Count"] = str(total)
     # 读花名册也留痕：审计不只记"改了什么"，也要能回答"谁看过什么"
     await audit.record(
         action=audit.ACTION_ADMIN_READ,
@@ -1683,10 +1713,28 @@ async def reschedule(
 
 
 @router.get("/api/reservations/pending")
-async def reservations_pending(admin: Principal = Depends(require_admin)) -> list[dict]:
-    """待审批列表。**管理员专用**。"""
+async def reservations_pending(
+    response: Response,
+    admin: Principal = Depends(require_admin),
+    limit: int | None = Query(default=None, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict]:
+    """待审批列表。**管理员专用**。
+
+    分页与其它列表同一套约定。这一条是试运行之后加的：待审批会随
+    "开了审批的设备越多"而增长，是几个列表里最可能先撞上上限的一个。
+    """
     async with session_scope() as session:
-        rows = await pending_reservations(session)
+        rows = await pending_reservations(session, limit=limit, offset=offset)
+        total = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(Reservation)
+                .where(Reservation.status == STATUS_PENDING)
+            )
+            or 0
+        )
+    response.headers["X-Total-Count"] = str(total)
     return [row.model_dump(mode="json") for row in rows]
 
 
@@ -1790,9 +1838,17 @@ async def user_violations(
     async with session_scope() as session:
         state = await state_for(session, scope)
         rows = await list_violations(session, scope)
+    # 三个数字要分开给：`count` 是**计入**的次数（已豁免的不算），`total` 是
+    # **判过**的次数。只给一个的话，管理员看到"0 次"会以为系统从没判过 ——
+    # 而实际可能是"判了 5 次、全部被豁免"。这两件事的含义完全相反：
+    # 前者是这个人守规矩，后者可能是门禁有问题。
+    judged = len(rows)
+    pardoned = sum(1 for r in rows if r.pardoned_at is not None)
     return {
         "user_id": scope,
         "count": state.count,
+        "total": judged,
+        "pardoned": pardoned,
         "threshold": state.threshold,
         "window_days": state.window_days,
         "blocked": state.blocked,

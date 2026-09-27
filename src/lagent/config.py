@@ -111,6 +111,15 @@ class Settings(BaseSettings):
     # 刻意**不**用「按 app_mode 或数据库类型推断是不是生产」这类启发式：
     # 让代码猜环境，等于给误配置留了一条连告警都不会响的路。
     allow_insecure_defaults: bool = False
+    # 时间覆盖（演示 / 培训 / 验收用）。**默认空** = 用真实时钟。
+    #
+    # 为什么要有它：领域层与 sweep_demo 都能注入 ``now=``，但 HTTP 接口一律
+    # 取真实时间 —— 于是闭馆时段做不了门禁与预约的演示与验收
+    # （只能看到 permit_expired），培训新管理员也要挑时间。
+    #
+    # 与 allow_insecure_defaults 同一套写法：默认关、打开必须**显式**，且启动
+    # 就会打一条 CRITICAL。它不该是那种"改了没人知道"的开关。
+    fake_now: str = ""
     # 访问令牌有效期（分钟）。刻意偏短：本项目没做 refresh token，
     # 与其签一个 7 天的令牌假装很安全，不如 2 小时一续、把风险窗口压小。
     jwt_ttl_minutes: int = 120

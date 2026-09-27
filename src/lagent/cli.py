@@ -802,7 +802,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        return asyncio.run(_run(args))
+        # ★ 命令与"释放引擎"必须在**同一个事件循环**里，所以是
+        #   ``_run_and_dispose`` 而不是"跑完再开一个 loop 去 dispose"。
+        #
+        #   早先这里写的是 ``finally: asyncio.run(dispose_engine())``：
+        #   asyncio 的连接带着 loop 亲和性，那时第一个 loop 已经关了，
+        #   dispose 拿到的连接属于一个已关闭的 loop，于是甩
+        #     RuntimeError: Event loop is closed /
+        #     got Future attached to a different loop
+        #   命令本身是成功的、退出码也是 0 —— 但运维看到的就是一段 traceback，
+        #   他会以为失败了；脚本里 ``grep -i error`` 也会误报。
+        return asyncio.run(_run_and_dispose(args))
     except SchemaDriftError as exc:
         # 库结构过期是**配置问题，不是程序缺陷**：给一段能照着做的话，
         # 而不是让用户从五十行 SQLAlchemy 堆栈里自己看出「该重建库」。
@@ -810,9 +820,21 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     except KeyboardInterrupt:
         return 130
+
+
+async def _run_and_dispose(args) -> int:
+    """跑完命令后**在同一个 loop 里**释放引擎。
+
+    刻意单独抽出来：把 dispose 塞进 ``main`` 的 ``finally`` 会忍不住
+    再写一个 ``asyncio.run``（那正是这个 bug 的来源），而抽成一个协程
+    后"必须在同一个 loop"这件事就写在了签名里。
+    """
+    try:
+        return await _run(args)
     finally:
         with suppress(Exception):
-            asyncio.run(dispose_engine())
+            # 收尾失败不该盖掉命令本身的结果；但也不再会真失败了 —— 见 main() 的说明。
+            await dispose_engine()
 
 
 if __name__ == "__main__":

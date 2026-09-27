@@ -75,3 +75,51 @@ def test_parse_time_and_minutes_between_and_overlaps_still_work() -> None:
     assert overlaps(dt.time(14, 0), dt.time(16, 0), dt.time(15, 0), dt.time(17, 0))
     # 首尾相接不算重叠 —— 这是预约系统最容易写错的边界
     assert not overlaps(dt.time(14, 0), dt.time(16, 0), dt.time(16, 0), dt.time(18, 0))
+
+
+class TestFakeNowOverride:
+    """时间覆盖（演示 / 培训 / 验收用）。
+
+    为什么要有它：领域层能注入 ``now=``，但 **HTTP 接口一律取真实时间** ——
+    于是闭馆时段做不了门禁与预约的演示（只能看到 permit_expired），
+    培训与验收都得挑时间。
+
+    ★ 最关键的一条是**不静默回退**：解析不出来就抛。
+    演示时你以为自己在 14:00、实际跑在 23:00 的判定上，比直接报错难查得多。
+    """
+
+    async def test_empty_means_the_real_clock(self, isolated_db):
+        from lagent.clock import now_local
+
+        assert abs((now_local() - dt.datetime.now()).total_seconds()) < 120
+
+    async def test_override_is_returned_verbatim(self, isolated_db, monkeypatch):
+        from lagent.config import reset_settings_cache
+
+        monkeypatch.setenv("LAB_FAKE_NOW", "2026-10-11 14:30")
+        reset_settings_cache()
+        from lagent.clock import now_local
+
+        assert now_local() == dt.datetime(2026, 10, 11, 14, 30)
+
+    async def test_iso_t_separator_also_works(self, isolated_db, monkeypatch):
+        from lagent.config import reset_settings_cache
+
+        monkeypatch.setenv("LAB_FAKE_NOW", "2026-10-11T09:05:00")
+        reset_settings_cache()
+        from lagent.clock import now_local
+
+        assert now_local() == dt.datetime(2026, 10, 11, 9, 5)
+
+    async def test_unparsable_value_raises_instead_of_falling_back(self, isolated_db, monkeypatch):
+        """★ 不静默回退到真实时钟。"""
+        import pytest
+
+        from lagent.config import reset_settings_cache
+
+        monkeypatch.setenv("LAB_FAKE_NOW", "明天下午两点")
+        reset_settings_cache()
+        from lagent.clock import now_local
+
+        with pytest.raises(ValueError, match="LAB_FAKE_NOW"):
+            now_local()

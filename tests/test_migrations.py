@@ -646,3 +646,146 @@ class TestSecondRevisionOnPopulatedTables:
         assert row[1] == "probe.migrated"
         assert row[2] == "迁移后写入"
         assert AuditLog.__tablename__ == "audit_logs"  # 顺手钉住表名没被改过
+
+
+class TestCliTeardown:
+    """CLI 收尾不许再开一个事件循环。
+
+    为什么值得单列一组：早先 ``main()`` 的 ``finally`` 里写着
+    ``asyncio.run(dispose_engine())``。asyncio 的连接带着 **loop 亲和性** ——
+    那时第一个 loop 已经关了，dispose 拿到的连接属于一个已关闭的 loop，
+    于是甩 ``RuntimeError: Event loop is closed``。
+
+    ⚠️ 这个 bug 的坏处全在"看起来"：命令是成功的、退出码也是 0、数据也是对的，
+    但运维看到的就是一段 traceback —— 他会以为失败了，脚本里
+    ``grep -i error`` 也会误报。所以这条断言直接钉根因：
+    **一次命令只允许有一个事件循环。**
+    """
+
+    def test_the_engine_is_disposed_in_the_same_loop(self, isolated_db, monkeypatch):
+        """★ 判据是"同一个 loop"，不是"只有一个 loop"。
+
+        ⚠️ 别去数 ``asyncio.run`` 的次数：alembic 的 env.py 自己会在线程里
+        ``asyncio.run`` 一次（`migrate()` 必须丢到线程里跑正是因为它），
+        所以一次命令本来就有两次 —— 数数只会得到一个必然红的断言。
+        真正的判据是：**释放引擎的那个 loop 必须是跑命令的那个 loop**。
+        """
+        import asyncio
+
+        from lagent import cli
+
+        seen: dict[str, object] = {}
+        real_dispose, real_run = cli.dispose_engine, cli._run
+
+        async def spy_dispose():
+            seen["dispose"] = asyncio.get_running_loop()
+            await real_dispose()
+
+        async def spy_run(args):
+            seen["run"] = asyncio.get_running_loop()
+            return await real_run(args)
+
+        monkeypatch.setattr(cli, "dispose_engine", spy_dispose)
+        monkeypatch.setattr(cli, "_run", spy_run)
+        assert cli.main(["seed", "--force"]) == 0
+        assert "dispose" in seen, "命令跑完没有释放引擎"
+        assert seen["dispose"] is seen["run"], (
+            "引擎在**另一个**事件循环里被释放 —— asyncio 的连接带着 loop 亲和性，"
+            "这就会甩 'attached to a different loop'"
+        )
+
+    def test_no_event_loop_noise_on_stderr(self, isolated_db, capsys):
+        from lagent import cli
+
+        assert cli.main(["seed", "--force"]) == 0
+        err = capsys.readouterr().err
+        assert "Event loop is closed" not in err
+        assert "attached to a different loop" not in err
+
+
+class TestLaterRevisionsOnPopulatedTables:
+    """把「给有数据的表加列」的演练从 0002 扩到 0003 与 0005。
+
+    为什么值得补：`TestSecondRevisionOnPopulatedTables` 只覆盖了第二条 revision。
+    但 **0003（equipment 加 requires_approval）与 0005（reservations 加
+    no_show_at / pardoned_at）同样是加列**，此前只在**空表**上升过 ——
+    测试里的 upgrade 发生在刚建好的库上，一行数据都没有。
+
+    生产库是有数据的，所以第一次真实升级将是那条路径**第一次真正执行**。
+    "SQLite 的 ADD COLUMN 一般安全"——但"一般"不是"验过"，
+    而这个项目的风格就是把"一般"变成"验过"。
+
+    两条刻意不做的事：
+    * 不用 ORM 插入历史数据（ORM 已经认识新列，等于让今天的代码写昨天的结构）；
+    * 不依赖外键（裸 sqlite3 默认不开外键，正好只验"表里有行"）。
+    """
+
+    async def _raw(self, url: str, sql: str, params: tuple) -> None:
+        conn = sqlite3.connect(_sqlite_path(url).as_posix(), timeout=10)
+        try:
+            conn.execute(sql, params)
+            conn.commit()
+        finally:
+            conn.close()
+
+    async def test_0003_adds_a_column_without_losing_equipment_rows(self, migrated_db):
+        """0003：equipment 加 requires_approval（NOT NULL 且有默认值）。"""
+        db_module, url = migrated_db
+
+        await db_module.downgrade("0002")
+        assert await db_module.current_revision() == "0002"
+        assert "requires_approval" not in _columns(url, "equipment")
+
+        await self._raw(
+            url,
+            "INSERT INTO equipment (id, lab_id, name, model, code, category, "
+            " status, max_hours, requires_training) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (99, 1, "迁移前就有的设备", "OLD-1", "OLD-0001", "光谱", "normal", 4.0, 0),
+        )
+        await db_module.migrate("head")
+        assert await db_module.current_revision() == db_module.head_revision()
+
+        from lagent.db import session_scope
+
+        async with session_scope() as session:
+            row = (
+                await session.execute(
+                    text("SELECT name, requires_training, requires_approval FROM equipment WHERE id = 99")
+                )
+            ).one()
+        assert row[0] == "迁移前就有的设备", "老数据原样保留"
+        assert row[1] in (0, False), "requires_training 没被改坏"
+        assert row[2] in (0, False), f"老行的 requires_approval 应是默认值，实际 {row[2]!r}"
+        assert _metadata_diff(url) == []
+
+    async def test_0005_adds_nullable_columns_without_losing_reservations(self, migrated_db):
+        """0005：reservations 加两个**可空**的时间戳列。"""
+        db_module, url = migrated_db
+
+        await db_module.downgrade("0004")
+        assert await db_module.current_revision() == "0004"
+        assert "no_show_at" not in _columns(url, "reservations")
+        assert "pardoned_at" not in _columns(url, "reservations")
+
+        await self._raw(
+            url,
+            "INSERT INTO reservations (id, user_id, equipment_id, date, start_time, "
+            " end_time, status, purpose, cancel_reason, version, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (99, 1, 2, "2026-10-11", "10:00:00", "12:00:00", "confirmed",
+             "迁移前就有的预约", "", 1, "2026-09-01 09:00:00", "2026-09-01 09:00:00"),
+        )
+        await db_module.migrate("head")
+        assert await db_module.current_revision() == db_module.head_revision()
+
+        from lagent.db import session_scope
+
+        async with session_scope() as session:
+            row = (
+                await session.execute(
+                    text("SELECT purpose, no_show_at, pardoned_at FROM reservations WHERE id = 99")
+                )
+            ).one()
+        assert row[0] == "迁移前就有的预约", "老数据原样保留"
+        assert row[1] is None and row[2] is None, "没判过违约的老行，两个时间戳都应是 NULL"
+        assert _metadata_diff(url) == []
