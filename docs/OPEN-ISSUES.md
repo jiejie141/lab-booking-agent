@@ -66,6 +66,7 @@
 | **py3.10 job 的 pytest 曾失败一次且机制未知** | 本地用 Python 3.10.21 + 同源依赖（SQLAlchemy 2.0.54）复现不出；之后 5 次运行该 job 全绿 | **已埋伏**：失败时把 `FAILED` 行抬进 CI **注解**（无需鉴权可读）。下次复现先读注解拿用例名，别再花时间本地复现 |
 | **2026-09-27 两个 py job 同时红 —— 这次不是 flake** | 第一轮：`mypy` 步骤报 `Settings(_env_file=...)` call-arg（**pytest 全过**）。根因：本地只跑了 `mypy src`（40 文件），CI 跑的是 pyproject `files` 配置的**全量 85 文件** | 修法不是加 `type: ignore`（全仓 0 处是硬指标），改用仓库既有写法（`monkeypatch.setenv` + `reset_settings_cache`）。**教训一：本地必须跑与 CI 同名的命令** —— `mypy src` 绿不代表 `mypy` 绿，它们查的根本不是同一批文件 |
 | **同日第二轮：`test_clock` 只在 CI 红** | `assert 28799.999997 < 120` —— 差值恰好 8 小时。`now_local()` 是**配置时区**的墙上时间，测试却拿 naive 的 `datetime.now()`（**宿主机**本地时间）当对照；本机 UTC+8 恰好相等，CI 的 TZ=UTC 差 28800s | 对照基准改成 `datetime.now(tz())`，断言与宿主机时区无关。**教训二：拿"本机跑得绿"当验证，量出来的只是"本机时区恰好没踩中"**。时区、路径分隔符、大小写文件名这三类东西，本地绿不算数 |
+| **同日第三轮：ruff 在 CI 红，本地绿** | `smoke_now` 注解带引号（UP037）。本地 venv **根本没装 ruff**，于是 lint 层回归只能在 CI 第一次看见 | 装 ruff 到本地 venv（与 CI 同为最新版）。**教训三：本地静态检查要装齐 CI 工具链** —— `mypy`/`ruff` 缺哪一个，哪一层就只靠 CI 兜底 |
 
 ---
 
