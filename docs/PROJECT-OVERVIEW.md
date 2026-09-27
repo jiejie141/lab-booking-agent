@@ -253,3 +253,4 @@ main.py → server.serve() → api.create_app()
 > [`DELIVERY-READINESS.md`](DELIVERY-READINESS.md)；
 > 技术选型与分期升级方案见 [`ENTERPRISE-UPGRADE.md`](ENTERPRISE-UPGRADE.md)；
 > **真实栈上的试用结果与摩擦点清单**见 [`TRIAL-RUN.md`](TRIAL-RUN.md)。
+> **当前仍未解决的问题（逐项带表现 / 影响 / 优先级 / 排查思路）**见 [`OPEN-ISSUES.md`](OPEN-ISSUES.md)。
