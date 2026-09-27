@@ -89,9 +89,23 @@ class TestFakeNowOverride:
     """
 
     async def test_empty_means_the_real_clock(self, isolated_db):
-        from lagent.clock import now_local
+        """不设覆盖时，返回的就是真实时钟。
 
-        assert abs((now_local() - dt.datetime.now()).total_seconds()) < 120
+        ⚠️ 对照基准必须用**同一个时区**（``tz()``），不能用
+        ``dt.datetime.now()``：``now_local()`` 是**配置时区**的墙上时间，
+        而 naive 的 ``datetime.now()`` 是**宿主机**本地时间 —— 两者只在
+        「宿主机时区恰好等于配置时区」时才相等。这台机器是 UTC+8 所以绿，
+        CI 的 TZ=UTC，差值恰好 28800 − ε 秒，把这条测试打红了
+        （2026-09-27，run 36303336159）。用 aware 的 ``datetime.now(tz())``
+        之后，断言在任何宿主机上都成立：它量的只剩"两次取钟的间隔"。
+        """
+        from lagent.clock import now_local, tz
+
+        # 与 now_local 同一个形状：aware → 取墙钟、剥掉 tzinfo。
+        # 这样两边都是"配置时区的墙上时间"，差值只剩两次取钟的间隔，
+        # 在任何宿主机时区下都成立。
+        real = dt.datetime.now(tz()).replace(tzinfo=None)
+        assert abs((now_local() - real).total_seconds()) < 120
 
     async def test_override_is_returned_verbatim(self, isolated_db, monkeypatch):
         from lagent.config import reset_settings_cache
