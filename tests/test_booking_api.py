@@ -566,3 +566,165 @@ class TestContract:
         # 业务上能分类的失败，一个都不能落进默认分支
         for label in ("not_found", "invalid", "forbidden", "state", "conflict", "contention"):
             assert label in _BOOKING_STATUS
+
+
+class TestReschedule:
+    """改期（P1）。
+
+    要证明的核心只有一句：**改期失败时，旧预约必须原样保留。**
+    用户要的是"换个时间"，不是"取消再重约"——后者在新旧时段之间
+    有一个窗口，别人一抢就两头落空。而这个接口最容易写错的地方恰恰就是：
+    先释放旧格、再判冲突、冲突分支直接 return —— 这时事务一提交，
+    旧格已经放了、新格没占上，用户的预约就这么没了。
+    """
+
+    @staticmethod
+    async def _book(http, headers, equipment_id: int = UV, start: str = "10:00", end: str = "12:00"):
+        return await http.post(
+            "/api/reservations", headers=headers,
+            json={
+                "equipment_id": equipment_id,
+                "date": free_day().isoformat(),
+                "start": start,
+                "end": end,
+                "purpose": "改期用例",
+            },
+        )
+
+    async def test_reschedule_moves_the_slot(self, http, as_user):
+        """成功：时段变了，且不改设备、不改日期。"""
+        lina = await as_user("李娜")
+        created = await self._book(http, lina)
+        assert created.status_code == 201
+        res_id = created.json()["reservation"]["id"]
+
+        moved = await http.patch(
+            f"/api/reservations/{res_id}", headers=lina,
+            json={"start": "14:00:00", "end": "16:00:00"},
+        )
+        assert moved.status_code == 200, moved.text
+        body = moved.json()
+        assert body["ok"] is True
+        assert "14:00" in body["reservation"]["slot"]
+        assert body["reservation"]["id"] == res_id
+        assert body["reservation"]["equipment_id"] == UV
+        assert body["reservation"]["date"] == free_day().isoformat()
+
+    async def test_the_old_slot_is_released(self, http, as_user):
+        """★ 旧的时段要真的放出来（否则这个时段就永远订不回来了）。"""
+        lina = await as_user("李娜")
+        res_id = (await self._book(http, lina)).json()["reservation"]["id"]
+        await http.patch(
+            f"/api/reservations/{res_id}", headers=lina,
+            json={"start": "14:00:00", "end": "16:00:00"},
+        )
+        # 张伟来约那个刚腾出来的 10:00-12:00 —— 应当成功
+        zhang = await as_user("张伟")
+        taken = await self._book(http, zhang, start="10:00", end="12:00")
+        assert taken.status_code == 201, taken.text
+
+    async def test_failed_reschedule_keeps_the_original_booking(self, http, as_user):
+        """★ 核心：改期到一个已被占用的时段 → 失败，但**旧预约原样还在**。
+
+        这是"改期"和"取消再重约"的分水岭。失败了也必须一条不少地保留：
+        时段、状态、占用格。
+        """
+        lina = await as_user("李娜")
+        res_id = (await self._book(http, lina, start="10:00", end="12:00")).json()["reservation"]["id"]
+        before = (await http.get("/api/reservations", headers=lina)).json()
+        target = next(r for r in before if r["id"] == res_id)
+        original_slot = target["slot"]
+
+        # 别人先占住 14:00-16:00
+        zhang = await as_user("张伟")
+        blocker = await self._book(http, zhang, start="14:00", end="16:00")
+        assert blocker.status_code == 201
+
+        moved = await http.patch(
+            f"/api/reservations/{res_id}", headers=lina,
+            json={"start": "14:00:00", "end": "16:00:00"},
+        )
+        assert moved.status_code == 409, moved.text
+        assert moved.json()["reason"] == "conflict"
+
+        after = (await http.get("/api/reservations", headers=lina)).json()
+        now_row = next(r for r in after if r["id"] == res_id)
+        # 时段没变、状态没变 —— 用户没有被"改期失败"这件事伤到
+        assert now_row["slot"] == original_slot
+        assert now_row["status"] == target["status"]
+
+    async def test_cannot_reschedule_someone_elses(self, http, as_user):
+        """改别人的 → 403 forbidden（分类带上，不靠解析中文）。"""
+        lina = await as_user("李娜")
+        res_id = (await self._book(http, lina)).json()["reservation"]["id"]
+        zhang = await as_user("张伟")
+        resp = await http.patch(
+            f"/api/reservations/{res_id}", headers=zhang,
+            json={"start": "14:00:00", "end": "16:00:00"},
+        )
+        assert resp.status_code == 403
+        assert resp.json()["reason"] == "forbidden"
+
+    async def test_as_user_id_requires_admin(self, http, as_user):
+        """非管理员传 as_user_id → 403 且**留痕**。"""
+        lina = await as_user("李娜")
+        res_id = (await self._book(http, lina)).json()["reservation"]["id"]
+        resp = await http.patch(
+            f"/api/reservations/{res_id}", headers=lina,
+            json={"start": "14:00:00", "end": "16:00:00", "as_user_id": ZHANGWEI},
+        )
+        assert resp.status_code == 403
+        admin = await as_user("管理员")
+        rows = (await http.get("/api/audit", params={"action": ACTION_BOOK},
+                               headers=admin)).json()
+        denials = [r for r in rows if r["outcome"] == OUTCOME_DENIED]
+        assert denials, "越权尝试必须留下审计记录"
+
+    async def test_admin_can_reschedule_on_behalf(self, http, as_user):
+        """管理员代他人改期：成功，且预约仍属于那个人。"""
+        lina = await as_user("李娜")
+        res_id = (await self._book(http, lina)).json()["reservation"]["id"]
+        admin = await as_user("管理员")
+        resp = await http.patch(
+            f"/api/reservations/{res_id}", headers=admin,
+            json={"start": "14:00:00", "end": "16:00:00", "as_user_id": LINA},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["ok"] is True
+
+    async def test_cannot_reschedule_a_cancelled_one(self, http, as_user):
+        """已取消的预约不能改期（state，不是 not_found）。"""
+        lina = await as_user("李娜")
+        res_id = (await self._book(http, lina)).json()["reservation"]["id"]
+        cancelled = await http.post(
+            "/api/reservations/cancel", headers=lina,
+            json={"reservation_id": res_id, "reason": "不想去了"},
+        )
+        assert cancelled.status_code == 200
+        resp = await http.patch(
+            f"/api/reservations/{res_id}", headers=lina,
+            json={"start": "14:00:00", "end": "16:00:00"},
+        )
+        assert resp.status_code == 409
+        assert resp.json()["reason"] == "state"
+
+    async def test_unaligned_time_is_rejected(self, http, as_user):
+        """粒度不对齐 → 422 invalid（不对齐会让占用格算漏，等于漏保护）。"""
+        lina = await as_user("李娜")
+        res_id = (await self._book(http, lina)).json()["reservation"]["id"]
+        resp = await http.patch(
+            f"/api/reservations/{res_id}", headers=lina,
+            json={"start": "14:07:00", "end": "16:00:00"},
+        )
+        assert resp.status_code == 422
+        assert resp.json()["reason"] == "invalid"
+
+    async def test_device_and_date_cannot_be_changed_here(self, http, as_user):
+        """改期只挪时间。换设备/换日期要拿 422（extra=forbid），不是被静默忽略。"""
+        lina = await as_user("李娜")
+        res_id = (await self._book(http, lina)).json()["reservation"]["id"]
+        resp = await http.patch(
+            f"/api/reservations/{res_id}", headers=lina,
+            json={"start": "14:00:00", "end": "16:00:00", "equipment_id": CENTRIFUGE},
+        )
+        assert resp.status_code == 422

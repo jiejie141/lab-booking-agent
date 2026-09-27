@@ -50,6 +50,7 @@ from ..models import (
     DENY_CERT_MISSING,
     DENY_CERT_REVOKED,
     DENY_IDENTITY_MISMATCH,
+    DENY_LAB_CLOSED,
     DENY_LAB_FULL,
     DENY_NO_PERMIT,
     DENY_NO_SUCH_USER,
@@ -74,6 +75,7 @@ from ..models import (
     Laboratory,
 )
 from ..obs import current_request_id
+from .availability import open_window
 
 # 允许比 valid_from 早多少入场。给迟到/早到留一点余量，
 # 但**绝不**允许超时入场：valid_to 之后凭证即失效，不存在"晚几分钟没事"。
@@ -162,6 +164,14 @@ class EntryContext:
     # 该人当前是否已在馆（在馆凭证 id）
     inside_permit_id: int | None = None
     grace_minutes: int = ENTRY_GRACE_MINUTES
+    # 该实验室**当天**的开放时段；None = 当天不开放。
+    # 与下单路径同一口径：``availability.open_window`` 返回 None 时，
+    # 下单那边判的是「该实验室当天不开放」（fail-closed），门禁必须一致 ——
+    # 否则会出现"约不到但进得去"这种最让人怀疑系统的组合。
+    lab_open_window: tuple[dt.time, dt.time] | None = None
+    # 管理员显式授权在非开放时段放行（见 api 层的 override_reason）。
+    # 只有**管理员**能给这个标记；门禁设备给不了（设备越权等于门禁失效）。
+    allow_after_hours: bool = False
 
 
 # 资质失效的三种原因要分开：处置方式不同（去考证 / 找管理员 / 去复训）
@@ -345,6 +355,42 @@ def evaluate_entry(ctx: EntryContext) -> EntryDecision:
             lab_id=permit.lab_id,
             extra={"inside_permit_id": ctx.inside_permit_id},
         )
+
+    # ---- 闸门 8：实验室现在是不是开放时段 ----
+    # ★ 这一道是试运行之后补的，此前完全没有：下单严格卡开放时间，
+    #   而门禁只看凭证有效期 —— 于是"约不到但进得去"。
+    #   实测：周六 23:24（分析楼 301 周末 09:00-18:00）拿管理员签发的凭证刷卡，放行。
+    #   正常流程下凭证窗口来自预约（⊆ 开放时间），所以问题只出在**手工签发**
+    #   这条路径上 —— 而它正是"访客 / 临时人员 / 忘约补救"用的，最该谨慎。
+    #
+    # 放在最后一道的理由：前面几道回答"你是谁、你凭什么"，这一道回答
+    # "现在能不能进"。它排在资质之后、占座之前 —— 占座会写库，不该为一次
+    # 注定要拒的请求占座；而它比"已在馆"更靠后，是因为"已在馆"是死路（先出场再说）。
+    if not ctx.allow_after_hours:
+        window = ctx.lab_open_window
+        if window is None:
+            return EntryDecision(
+                ok=False,
+                reason_code=DENY_LAB_CLOSED,
+                message="该实验室今天不开放。",
+                permit_id=permit.id,
+                user_id=permit.user_id,
+                lab_id=permit.lab_id,
+            )
+        current = ctx.now.time()
+        if not (window[0] <= current <= window[1]):
+            return EntryDecision(
+                ok=False,
+                reason_code=DENY_LAB_CLOSED,
+                message=(
+                    f"实验室开放时间为 {window[0].strftime('%H:%M')}-"
+                    f"{window[1].strftime('%H:%M')}，当前不在开放时段。"
+                    "如需在非开放时段进入，请联系管理员授权。"
+                ),
+                permit_id=permit.id,
+                user_id=permit.user_id,
+                lab_id=permit.lab_id,
+            )
 
     return EntryDecision(
         ok=True,
@@ -643,6 +689,7 @@ async def verify_entry(
     identity_user_id: int | None = None,
     gate_id: str = "",
     check_in: bool = True,
+    allow_after_hours: bool = False,
 ) -> EntryDecision:
     """核验一次入场请求；``check_in=True`` 时顺带核销并占座。
 
@@ -692,6 +739,9 @@ async def verify_entry(
         permit=permit,
         cert_states=cert_states,
         inside_permit_id=(inside.id if inside is not None else None),
+        # 与下单路径同一个函数、同一口径（None = 当天不开放）
+        lab_open_window=open_window(lab, today),
+        allow_after_hours=allow_after_hours,
     )
     decision = evaluate_entry(ctx)
 

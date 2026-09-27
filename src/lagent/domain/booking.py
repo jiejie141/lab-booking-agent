@@ -542,6 +542,153 @@ async def cancel_reservation(
 
 
 # --------------------------------------------------------------------------
+# 改期（乐观锁 + 原子换坑）
+# --------------------------------------------------------------------------
+@_counted(record_booking_outcome)
+async def reschedule_reservation(
+    *,
+    reservation_id: int,
+    user_id: int,
+    start: dt.time,
+    end: dt.time,
+    now: dt.datetime | None = None,
+) -> BookingOutcome:
+    """把一条预约挪到**同一天、同一台设备**的另一个时段。
+
+    ★ 语义是「换个时间」，**不是**「取消再重约」。
+    后者在数据库层面是两个事务：中间那个窗口里旧时段已经释放、新时段还没占上，
+    别人一抢，用户就**同时失去新旧两个时段** —— 那正是本项目最不该出现的失败形态
+    （"我只是想改个时间，怎么就没了"）。所以整件事必须在一个事务里：
+    **要么整体成功，要么原样保留**。
+
+    ── 顺序为什么是这样 ──
+    1. **先判冲突，后动数据库。** ``session_scope`` 在退出时是 **commit** 的
+       （见 db.py）—— 所以"先释放旧格再判冲突"这种写法，在冲突分支上一提交，
+       就变成"旧格已放、新格没占"。那不是失败，那是把用户的预约直接弄丢了。
+       ``find_conflict`` 支持 ``exclude_id``，正好可以在**不动任何数据**的前提下
+       判断新时段是否被别人占着（自己不算冲突）。
+    2. 换坑时先释放旧格、再占新格。顺序反了会撞到**自己**的旧锁（新旧时段重叠时）。
+       原子性由事务兜底：占新格失败 → 抛 IntegrityError → 整体回滚，旧格原样回来。
+    3. 状态用带版本条件的 UPDATE：并发下不会丢掉别人的修改。
+
+    日期与设备不变（只挪时段），所以校验与下单共用同一套
+    （资质 / 开放时间 / 单次上限 / 粒度对齐）。
+    """
+    settings = get_settings()
+    now = now or now_local()
+    retries = 0
+
+    for attempt in range(settings.booking_max_retry):
+        retries = attempt
+        try:
+            async with session_scope() as session:
+                res = await session.get(Reservation, reservation_id)
+                if res is None:
+                    return BookingOutcome(
+                        ok=False,
+                        message=f"预约 {reservation_id} 不存在",
+                        retries=attempt,
+                        reason="not_found",
+                    )
+                if res.user_id != user_id:
+                    return BookingOutcome(
+                        ok=False, message="只能改自己的预约", retries=attempt, reason="forbidden"
+                    )
+                if res.status not in ACTIVE_STATUSES:
+                    return BookingOutcome(
+                        ok=False,
+                        message=f"该预约当前状态为 {res.status}，不能改期",
+                        retries=attempt,
+                        reason="state",
+                    )
+
+                user = await session.get(User, res.user_id)
+                equipment = await _load_equipment(session, res.equipment_id)
+                if user is None or equipment is None:
+                    return BookingOutcome(
+                        ok=False,
+                        message="预约关联的用户或设备已不存在",
+                        retries=attempt,
+                        reason="not_found",
+                    )
+
+                problems = await _validate(session, user, equipment, res.date, start, end)
+                if problems:
+                    return BookingOutcome(
+                        ok=False, message="；".join(problems), retries=attempt, reason="invalid"
+                    )
+                if dt.datetime.combine(res.date, start) <= now:
+                    return BookingOutcome(
+                        ok=False,
+                        message="该时间点已经过去，请选择之后的时间",
+                        retries=attempt,
+                        reason="invalid",
+                    )
+
+                # 锁内复检（排除自己）—— 此刻还没动数据库，冲突分支上没有任何东西可提交
+                conflict = await find_conflict(
+                    session, res.equipment_id, res.date, start, end, exclude_id=res.id
+                )
+                if conflict is not None:
+                    return BookingOutcome(
+                        ok=False,
+                        message=f"目标时段已被占用：{conflict.slot_label}",
+                        retries=attempt,
+                        conflict_with=_to_out(
+                            conflict, equipment.name, equipment.lab.label
+                        ),
+                        reason="conflict",
+                    )
+
+                target_version = res.version
+                stmt = (
+                    update(Reservation)
+                    .where(
+                        Reservation.id == reservation_id,
+                        Reservation.version == target_version,
+                        Reservation.status.in_(ACTIVE_STATUSES),
+                    )
+                    .values(
+                        start_time=start,
+                        end_time=end,
+                        version=target_version + 1,
+                        updated_at=now_local(),
+                    )
+                )
+                result = cast(CursorResult, await session.execute(stmt))
+                if result.rowcount == 0:
+                    continue  # 版本被别人改过，重读再试
+
+                # ★ 换坑：先放旧、再占新。任一格被占 → IntegrityError → 整体回滚
+                await release_slots(session, reservation_id)
+                await session.refresh(res)
+                await attach_slots(session, res)
+
+                await session.refresh(res)
+                out = _to_out(res, equipment.name, equipment.lab.label)
+                return BookingOutcome(
+                    ok=True,
+                    message=f"已改期到 {out.slot} {equipment.name}（{equipment.lab.label}）",
+                    reservation=out,
+                    retries=attempt,
+                    reason="ok",
+                )
+
+        except IntegrityError:
+            # 抢坑的是并发请求；此时事务已回滚，旧时段还在用户手上
+            record_booking_retry()
+            await asyncio.sleep(0.005 * (attempt + 1))
+            continue
+
+    return BookingOutcome(
+        ok=False,
+        message=f"并发冲突，已重试 {settings.booking_max_retry} 次仍未成功，请稍后再试",
+        retries=retries,
+        reason="contention",
+    )
+
+
+# --------------------------------------------------------------------------
 # 审批（P1-5）
 # --------------------------------------------------------------------------
 @_counted(record_review_outcome)

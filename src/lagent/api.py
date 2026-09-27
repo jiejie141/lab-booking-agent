@@ -45,7 +45,7 @@ import json
 import time
 from collections.abc import AsyncIterator, MutableMapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -76,6 +76,7 @@ from .domain.booking import (
     decide_reservation,
     list_reservations,
     pending_reservations,
+    reschedule_reservation,
 )
 from .domain.catalog import (
     CatalogError,
@@ -146,6 +147,7 @@ from .schemas import (
     LabCreate,
     LabUpdate,
     LoginRequest,
+    RescheduleRequest,
     ReservationCreate,
     ReviewRequest,
     TokenResponse,
@@ -206,6 +208,39 @@ _BOOKING_STATUS = {
     "contention": 409,
     "unknown": 500,
 }
+
+
+class DomainError(HTTPException):
+    """带**机器可读分类**的 HTTP 错误。
+
+    为什么需要它：进程内早就有那个分类（``BookingOutcome.reason``，7 类），
+    但它此前只用来**选状态码**、没带出边界 —— 于是响应体里只剩一句中文
+    ``detail``。客户端要区分「换个时段」和「去补资质」就只能解析文案，
+    而这正是本项目在 ``BookingOutcome`` 的 docstring 里明令禁止的做法：
+    *"抓『从人话里找关键词』当分类依据，是典型的「改一句文案，指标就静默错位」"*。
+    在进程内守住了这条原则、却在 API 契约上漏了，等于没守。
+
+    ``reason`` 与 ``detail`` **并列**返回：``detail`` 保持字符串，
+    老客户端与现有断言（``body["detail"]``）都不受影响；``reason`` 是新增的。
+    """
+
+    def __init__(self, status_code: int, detail: str, reason: str) -> None:
+        super().__init__(status_code=status_code, detail=detail)
+        self.reason = reason
+
+
+async def _domain_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """把 ``DomainError`` 序列化成 ``{"detail": 人话, "reason": 分类}``。
+
+    ⚠️ Starlette 的默认处理器只回 ``{"detail": ...}``，会把我们自己加的字段丢掉 ——
+    所以必须显式注册。忘了注册的表现很隐蔽：状态码与人话都对，只有 ``reason`` 不见了。
+    """
+    assert isinstance(exc, DomainError)  # 由 add_exception_handler 的类型绑定保证
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail, "reason": exc.reason},
+        headers=getattr(exc, "headers", None),
+    )
 
 # 进程启动时刻（monotonic）。用 monotonic 而不是墙钟：启动时长要能在
 # NTP 校正前后保持一致，否则会出现"运行时间变短了"这种没法解释的现象。
@@ -533,6 +568,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 若直接 @app.get，路由会绑死在模块级那一个实例上 ——
     # create_app() 造出来的第二个应用会「一个接口都没有」（曾如此，测试里全是 404）。
     application.include_router(router)
+    # 业务错误要带上机器可读分类（见 DomainError 的说明）。
+    # 注册在应用上而不是 router 上 —— exception handler 是应用级的概念。
+    application.add_exception_handler(DomainError, _domain_error_handler)
     # ⚠️ 必须**最后**添加：Starlette 的 add_middleware 是"后添加的更靠外"。
     # 放最后它才能包住 BodySizeLimitMiddleware ——
     # 那层会在读 body 之前直接回 413/411，请求根本不进路由，
@@ -581,7 +619,7 @@ async def current_user(
 async def require_admin(user: Principal = Depends(current_user)) -> Principal:
     """"必须是管理员"的依赖。普通用户命中即 403 —— 认证通过但权限不足。"""
     if not user.is_admin:
-        raise HTTPException(status_code=403, detail="需要管理员权限")
+        raise DomainError(status_code=403, detail="需要管理员权限", reason="forbidden")
     return user
 
 
@@ -1469,7 +1507,7 @@ async def create(body: ReservationCreate, request: Request, user: Principal = De
                 detail="非管理员尝试用 as_user_id 代他人下单",
                 client_host=_client_host(request),
             )
-            raise HTTPException(status_code=403, detail="只有管理员可以代他人预约")
+            raise DomainError(status_code=403, detail="只有管理员可以代他人预约", reason="forbidden")
         target = body.as_user_id
 
     outcome = await create_reservation(
@@ -1496,9 +1534,11 @@ async def create(body: ReservationCreate, request: Request, user: Principal = De
         # 默认分支给 500：走到这里的标签要么是新增的 ``BookingReason`` 忘了
         # 在上面登记，要么是领域层漏了分类 —— 两种都是**我们的**问题。
         # 假装成 409（冲突）会让用户去重试一个永远重试不成的操作。
-        raise HTTPException(
+        # 分类一并带出去：客户端据此分支，而不是去解析 detail 里的中文
+        raise DomainError(
             status_code=_BOOKING_STATUS.get(outcome.outcome_label, 500),
             detail=outcome.message,
+            reason=outcome.outcome_label,
         )
     await _notify_booking_result(outcome, target)
     return outcome.model_dump(mode="json")
@@ -1513,7 +1553,14 @@ async def create(body: ReservationCreate, request: Request, user: Principal = De
 # --------------------------------------------------------------------------
 @router.get("/api/notifications")
 async def notifications(
+    response: Response,
     user_id: int | None = Query(default=None),
+    # 取值域用 Literal 而不是自由字符串：写错了会被 FastAPI 挡成 422，
+    # 而不是静默返回一个空列表（"没有通知"和"我拼错了参数"必须能分开）。
+    status: Literal["pending", "sent", "failed"] | None = Query(default=None),
+    all_users: bool = Query(default=False),
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     user: Principal = Depends(current_user),
 ) -> list[dict]:
     """我的通知（管理员可指定 ``user_id`` 看别人的）。
@@ -1521,17 +1568,48 @@ async def notifications(
     为什么要有这个接口：通知最常见的问题是"用户说没收到"。
     有了它，管理员能当场看到"这条通知生成了没有、发出去没有、为什么没发出去" ——
     不需要去翻库。
+
+    三种视角：
+    * 默认 —— 本人的通知；
+    * 管理员带 ``user_id`` —— 指定某个人的（"他说没收到"时用这个）；
+    * 管理员带 ``all_users=true`` —— **全系统**（"到底有没有卡住的"用这个）。
+      第二条视角单独存在时是不够的：回答"有没有积压"不该需要先知道去查谁。
+
+    总数走 ``X-Total-Count`` 响应头（与 ``/api/reservations`` 同一约定），
+    响应形状仍是数组 —— 不为了分页把所有调用方一起改一遍。
     """
-    scope = user_id if user.is_admin and user_id is not None else user.user_id
+    if all_users:
+        # 全系统视图：只在管理员手里有意义（他就是那个要回答"有没有卡住的"的人）。
+        # 试运行时暴露的缺口正是这个：管理员只能逐个 user_id 去查，
+        # 于是"通知在堆积"这件事没有任何地方能一眼看到。
+        if not user.is_admin:
+            raise DomainError(
+                status_code=403, detail="只有管理员可以查看全系统通知", reason="forbidden"
+            )
+        scope = None
+    else:
+        scope = user_id if user.is_admin and user_id is not None else user.user_id
+
+    stmt = select(Notification)
+    count_stmt = select(func.count()).select_from(Notification)
+    if scope is not None:
+        stmt = stmt.where(Notification.user_id == scope)
+        count_stmt = count_stmt.where(Notification.user_id == scope)
+    if status is not None:
+        stmt = stmt.where(Notification.status == status)
+        count_stmt = count_stmt.where(Notification.status == status)
+
     async with session_scope() as session:
         rows = (
             await session.execute(
-                select(Notification)
-                .where(Notification.user_id == scope)
-                .order_by(Notification.created_at.desc())
-                .limit(200)
+                stmt.order_by(Notification.created_at.desc()).limit(limit).offset(offset)
             )
         ).scalars().all()
+        total = int(await session.scalar(count_stmt) or 0)
+    # ★ 总数必须给出来。原来这里是硬编码 ``.limit(200)`` 且**不告知被截断** ——
+    # 管理员看到 200 条会以为"总共就这些"，而真实积压可能是 800 条。
+    # "静默截断"比"没有分页"更糟：它给出一个看起来完整的答案。
+    response.headers["X-Total-Count"] = str(total)
     return [
         {
             "id": row.id,
@@ -1547,6 +1625,61 @@ async def notifications(
         }
         for row in rows
     ]
+
+
+@router.patch("/api/reservations/{reservation_id}")
+async def reschedule(
+    reservation_id: int,
+    body: RescheduleRequest,
+    request: Request,
+    user: Principal = Depends(current_user),
+) -> dict:
+    """改期：把预约挪到同一天、同一台设备的另一个时段。
+
+    ★ 这是「换时间」，不是「取消再重约」。后者会让用户在新旧时段之间
+    被别人抢走，两头落空；所以领域层把换坑做成**一个事务**：
+    要么整体成功，要么原样保留（详见 ``reschedule_reservation`` 的说明）。
+
+    身份规则与取消一致：默认改自己的；管理员要代他人改期用 ``as_user_id``，
+    非管理员传了会 403 —— 显式拒绝，而不是静默当成改自己。
+    """
+    if body.as_user_id is not None and not user.is_admin:
+        # 与取消同一套处理：越权尝试本身要留痕（"谁想动别人的预约"是有意义的信号）
+        await audit.record(
+            action=audit.ACTION_BOOK,
+            outcome=audit.OUTCOME_DENIED,
+            actor_id=user.user_id,
+            actor_name=user.username,
+            target_type="reservation",
+            target_id=reservation_id,
+            detail="非管理员试图代他人改期，已拒绝",
+            client_host=_client_host(request),
+        )
+        raise DomainError(
+            status_code=403, detail="只有管理员可以代他人改期", reason="forbidden"
+        )
+    target = body.as_user_id if body.as_user_id is not None else user.user_id
+
+    outcome = await reschedule_reservation(
+        reservation_id=reservation_id, user_id=target, start=body.start, end=body.end
+    )
+    if not outcome.ok:
+        raise DomainError(
+            status_code=_BOOKING_STATUS.get(outcome.outcome_label, 500),
+            detail=outcome.message,
+            reason=outcome.outcome_label,
+        )
+    await audit.record(
+        action=audit.ACTION_BOOK,
+        actor_id=user.user_id,
+        actor_name=user.username,
+        target_type="reservation",
+        target_id=reservation_id,
+        detail=f"改期到 {outcome.reservation.slot if outcome.reservation else ''}",
+        client_host=_client_host(request),
+    )
+    await _notify_booking_result(outcome, target)
+    return outcome.model_dump(mode="json")
 
 
 @router.get("/api/reservations/pending")
@@ -1605,9 +1738,10 @@ async def _review(
         client_host=_client_host(request),
     )
     if not outcome.ok:
-        raise HTTPException(
+        raise DomainError(
             status_code=_BOOKING_STATUS.get(outcome.outcome_label, 500),
             detail=outcome.message,
+            reason=outcome.outcome_label,
         )
     # 审批结果要通知到申请人 —— 尤其是驳回，必须说清楚原因，
     # 否则用户只会看到"我的预约没了"而不知道为什么。
@@ -1744,7 +1878,7 @@ async def cancel(
                 detail="非管理员尝试用 as_user_id 代他人取消",
                 client_host=_client_host(request),
             )
-            raise HTTPException(status_code=403, detail="只有管理员可以代他人取消预约")
+            raise DomainError(status_code=403, detail="只有管理员可以代他人取消预约", reason="forbidden")
         target = body.as_user_id
 
     outcome = await cancel_reservation(
@@ -1763,7 +1897,9 @@ async def cancel(
         client_host=_client_host(request),
     )
     if not outcome.ok:
-        raise HTTPException(status_code=409, detail=outcome.message)
+        raise DomainError(
+            status_code=409, detail=outcome.message, reason=outcome.outcome_label
+        )
     if outcome.reservation is not None:
         await _notify(
             target, notify.KIND_CANCELLED, "预约已取消",
@@ -1916,7 +2052,29 @@ async def access_verify(
 
     ``precheck=true`` 用于门禁屏预显示：只判定、不核销、不占座 ——
     否则"屏幕上看一眼能不能进"就把凭证消耗掉了。
+
+    ``override_reason`` 是**非开放时段**的显式放行（夜间取样这类真实需求）。
+    三条约束缺一不可：只有管理员能传（门禁设备传了直接 403）、必须写明理由、
+    每次都进审计。不设这个口子的话，唯一的办法是把凭证窗口开到 23:59 ——
+    那等于用一个隐式动作绕过开放时间，事后没人说得清谁批的。
     """
+    if req.override_reason.strip():
+        if _caller is None:
+            # 设备身份不能越权：门禁机能越权，门禁本身就失效了
+            raise DomainError(
+                status_code=403,
+                detail="门禁设备不能越权放行非开放时段，需管理员令牌并写明理由",
+                reason="forbidden",
+            )
+        await audit.record(
+            action="access.override",
+            actor_id=_caller.user_id,
+            actor_name=_caller.username,
+            target_type="lab",
+            target_id=req.lab_id,
+            detail=f"非开放时段放行；理由：{req.override_reason.strip()}",
+        )
+
     async with session_scope() as session:
         lab = await session.get(Laboratory, req.lab_id)
         label = _lab_label(lab) if lab is not None else ""
@@ -1944,6 +2102,8 @@ async def access_verify(
             identity_user_id=req.user_id,
             gate_id=req.gate_id,
             check_in=not req.precheck,
+            # 走到这里还带着理由 = 上面已经确认了是管理员（设备会被 403 拦掉）
+            allow_after_hours=bool(req.override_reason.strip()),
         )
         user_name = ""
         if decision.user_id is not None:

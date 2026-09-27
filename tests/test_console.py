@@ -353,3 +353,30 @@ class TestConsoleJavaScript:
             [node, "--check", str(script)], capture_output=True, text=True, check=False
         )
         assert done.returncode == 0, f"控制台 JS 语法错误：\n{done.stderr}"
+
+
+class TestRescheduleWiring:
+    """改期入口的接线（P1 的守门）。
+
+    为什么值得单列一组：**没有改期入口，用户就只能用"取消 + 重新约"代替** ——
+    而那正是这个项目最不该出现的失败形态（中间那个窗口里旧时段已经释放、
+    新时段还没占上，别人一抢就两头落空）。所以"改期"不能只是接口存在，
+    必须真的点得到。
+    """
+
+    @pytest.fixture(scope="class")
+    def html(self) -> str:
+        return WEB_INDEX.read_text(encoding="utf-8")
+
+    def test_the_reschedule_button_exists(self, html):
+        assert 'data-move=' in html, "预约记录里没有「改期」按钮"
+
+    def test_it_patches_instead_of_cancel_and_rebook(self, html):
+        """必须是 PATCH（一个事务里换坑），不能是"取消 + 再下单"的组合。"""
+        assert 'method:"PATCH"' in html
+        # 同一个按钮不许同时发取消与创建两次请求
+        assert 'data-move' in html and '/api/reservations/${id}' in html
+
+    def test_it_reports_the_server_reason_rather_than_guessing(self, html):
+        """失败时把服务端的话原样说给用户 —— 不自己猜"大概是冲突"。"""
+        assert "改期失败：" in html

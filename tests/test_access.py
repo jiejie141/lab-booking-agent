@@ -45,9 +45,11 @@ from lagent.models import (
     DENY_CERT_MISSING,
     DENY_CERT_REVOKED,
     DENY_IDENTITY_MISMATCH,
+    DENY_LAB_CLOSED,
     DENY_LAB_FULL,
     DENY_NO_PERMIT,
     DENY_NOT_YET,
+    DENY_PERMIT_EXPIRED,
     DENY_PERMIT_USED,
     DENY_WRONG_LAB,
     PERMIT_CHECKED_IN,
@@ -104,6 +106,38 @@ def live_window_json() -> dict[str, str]:
         "valid_from": start.strftime("%H:%M:%S"),
         "valid_to": end.strftime("%H:%M:%S"),
     }
+
+
+@pytest.fixture
+def mid_day(monkeypatch):
+    """把**门禁判定**里的"现在"钉在中午 12:00。
+
+    ★ 闸门 8（开放时间）上线之后，走 HTTP 的门禁用例就**不能再用真实时钟**了：
+    判定会去看实验室的开放时段，而 CI 什么时候跑是不固定的 ——
+    北京时间凌晨跑就会全红，而且看起来完全像真回归。
+
+    三个实验室的开放时间取交集是 **10:00-16:00**（生物楼周末 10:00-16:00 最紧），
+    所以钉 12:00：任何一天、任何一间都在开放时段内。
+
+    ``live_window()`` 的注释里已经写过这件事：*"这种『看时段才过』的测试
+    比没有测试更糟"* —— 这里用同一套原则处理，只是换了个手段
+    （那个是从当前时刻推窗口，这个是直接把时钟钉住）。
+
+    同时钉**两个**地方，少了任何一个都会自己把自己绊倒：
+    * ``domain.access.now_local`` —— 门禁判定里的"现在"；
+    * 本文件的 ``now_local`` —— ``live_window()`` 从这里推导凭证窗口。
+    只钉第一个的后果很具体：判定看到 12:00，而凭证窗口是从真实时钟
+    （比如 13:33）推出来的 12:33-14:33 → 反而变成 ``not_yet_valid``。
+    日期仍取真实的今天，所以与其它按真实时钟产生的记录对得上。
+    """
+    import sys
+
+    import lagent.domain.access as access_module
+
+    real_today = now_local().date()
+    noon = lambda: dt.datetime.combine(real_today, dt.time(12, 0))  # noqa: E731
+    monkeypatch.setattr(access_module, "now_local", noon)
+    monkeypatch.setattr(sys.modules[__name__], "now_local", noon)
 
 
 # ---------------------------------------------------------------------------
@@ -821,6 +855,9 @@ class TestPureDecision:
         ctx = EntryContext(
             now=at(14, 30), lab_id=1, identity_user_id=7, permit=permit,
             cert_states={LAB_BASIC_CERT: CertState("ok")},
+            # 开放时段 08:00-18:00。**必须显式给** —— 默认 None 表示"当天不开放"
+            # （与下单路径同一口径），不给窗口就会被闸门 8 拦下。
+            lab_open_window=(dt.time(8, 0), dt.time(18, 0)),
         )
         first = evaluate_entry(ctx)
         second = evaluate_entry(ctx)
@@ -870,7 +907,7 @@ class TestGateApi:
         assert body["reason_code"] == DENY_NO_PERMIT
         assert body["message"]
 
-    async def test_admin_can_issue_then_gate_grants_entry(self, http, as_user):
+    async def test_admin_can_issue_then_gate_grants_entry(self, http, as_user, mid_day):
         """★ 端到端：管理员发凭证 → 门禁核验放行。这是真实主链路。"""
         admin = await as_user("管理员")
         issued = await http.post(
@@ -903,7 +940,7 @@ class TestGateApi:
         assert verify.json()["granted"] is True, verify.text
         assert verify.json()["lab_label"]
 
-    async def test_precheck_does_not_consume_the_credential(self, http, as_user):
+    async def test_precheck_does_not_consume_the_credential(self, http, as_user, mid_day):
         """预检不能把凭证用掉 —— 否则"屏幕上显示能不能进"就等于进了一次。"""
         admin = await as_user("管理员")
         issued = await http.post(
@@ -965,7 +1002,7 @@ class TestGateApi:
         names = [row["username"] for row in body["inside"]]
         assert "李娜" in names
 
-    async def test_exit_through_the_api_frees_the_roster(self, http, as_user):
+    async def test_exit_through_the_api_frees_the_roster(self, http, as_user, mid_day):
         """走接口出场后，在馆名单里就查不到他了。"""
         admin = await as_user("管理员")
         issued = await http.post(
@@ -1002,3 +1039,180 @@ class TestGateApi:
             headers=admin,
         )
         assert resp.status_code == 422
+
+
+# ===========================================================================
+# 九、闸门 8：实验室开放时间
+#
+# 这一组是试运行报告里 M1 的回归守门。此前**下单**严格卡开放时间、
+# **门禁**完全不看（全仓连 lab_closed 这个拒绝码都没有），
+# 于是出现"约不到但进得去"——实测周六 23:24 拿管理员签发的凭证刷卡直接放行。
+# 正常流程下凭证窗口来自预约（⊆ 开放时间），所以问题只出在**手工签发**那条路径，
+# 而它正是访客 / 临时人员 / 忘约补救用的，最该谨慎。
+# ===========================================================================
+class TestLabClosedGate:
+    @staticmethod
+    def _ctx(*, when: dt.time, window, allow_after_hours: bool = False):
+        from lagent.domain.access import CertState, EntryContext
+
+        permit = EntryPermit(
+            user_id=7, lab_id=1, date=today(),
+            valid_from=dt.time(0, 0), valid_to=dt.time(23, 59),
+            status=PERMIT_ISSUED, credential_hash="x",
+            required_certs=[LAB_BASIC_CERT],
+        )
+        return EntryContext(
+            now=dt.datetime.combine(today(), when), lab_id=1, identity_user_id=7,
+            permit=permit, cert_states={LAB_BASIC_CERT: CertState("ok")},
+            lab_open_window=window, allow_after_hours=allow_after_hours,
+        )
+
+    @pytest.mark.parametrize("when", [dt.time(7, 59), dt.time(18, 30), dt.time(23, 24)])
+    def test_outside_open_hours_is_denied(self, when):
+        """开放时段之外一律拒 —— 凭证本身完全有效，唯一的理由就是"现在不能进"。"""
+        decision = evaluate_entry(self._ctx(when=when, window=(dt.time(8, 0), dt.time(18, 0))))
+        assert decision.denied
+        assert decision.reason_code == DENY_LAB_CLOSED
+
+    @pytest.mark.parametrize("when", [dt.time(8, 0), dt.time(12, 0), dt.time(18, 0)])
+    def test_inside_open_hours_is_granted(self, when):
+        """两端都算**开**（与区间重叠的"左闭右开"不是一套语义：
+        这里是"此刻是否落在营业区间内"，边界含两端）。"""
+        decision = evaluate_entry(self._ctx(when=when, window=(dt.time(8, 0), dt.time(18, 0))))
+        assert decision.ok, decision.reason_code
+
+    def test_no_window_means_closed_today(self):
+        """没配开放时间 = 当天不开放。
+
+        ★ 这条口径必须与**下单**一致：`availability` 那边 `open_window()` 返回
+        None 时判的就是「该实验室当天不开放」。两边不一致就会造出
+        "约不到但进得去"这种最让人怀疑系统的组合。
+        """
+        decision = evaluate_entry(self._ctx(when=dt.time(12, 0), window=None))
+        assert decision.denied
+        assert decision.reason_code == DENY_LAB_CLOSED
+        assert "不开放" in decision.message
+
+    def test_reason_code_is_its_own_not_permit_expired(self):
+        """不许并进 permit_expired。
+
+        前者是"这个房间现在不接人"（改时间 / 找管理员授权），
+        后者是"你的凭证过期了"（去重约）—— 处置动作完全不同，
+        混用会让事后统计把"半夜来敲门"算成"凭证管理有问题"。
+        """
+        decision = evaluate_entry(self._ctx(when=dt.time(23, 24), window=(dt.time(8, 0), dt.time(18, 0))))
+        assert decision.reason_code != DENY_PERMIT_EXPIRED
+        assert decision.reason_code == DENY_LAB_CLOSED
+
+    def test_admin_override_lets_it_through(self):
+        """管理员显式授权在非开放时段放行（夜间取样是真实需求）。
+
+        没有这个口子的话，唯一的办法是把凭证窗口开到 23:59 ——
+        那等于用一个**隐式**动作绕过开放时间，事后没人说得清谁批的。
+        """
+        decision = evaluate_entry(
+            self._ctx(when=dt.time(23, 24), window=(dt.time(8, 0), dt.time(18, 0)),
+                      allow_after_hours=True)
+        )
+        assert decision.ok, decision.reason_code
+
+
+# ===========================================================================
+# 十：非开放时段的越权放行（闸门 8 的另一半）
+#
+# 光有"拒"不够：夜间取样是真实需求。没有**显式**的授权口子，唯一的办法就是
+# 把凭证窗口开到 23:59 —— 那是一个隐式动作，事后没人说得清谁批的。
+# 所以口子要有，但必须同时满足三条：只有管理员能传、必须写明理由、每次进审计。
+# ===========================================================================
+class TestAfterHoursOverride:
+    async def test_a_gate_device_cannot_override(self, http, monkeypatch):
+        """门禁设备不能越权。
+
+        设备能越权，门禁本身就失效了 —— 那等于任何人拿着设备密钥（或伪造一次
+        设备身份）就能在半夜进细胞房。
+        """
+        from lagent.config import reset_settings_cache
+
+        monkeypatch.setenv("LAB_GATE_API_KEY", "gate-secret-override")
+        reset_settings_cache()
+        resp = await http.post(
+            "/api/access/verify",
+            headers={"X-Gate-Key": "gate-secret-override"},
+            json={
+                "lab_id": LAB_ANALYSIS,
+                "user_id": ZHANGWEI,
+                "override_reason": "夜间取样",
+            },
+        )
+        assert resp.status_code == 403, resp.text
+        # 带上 reason 分类：客户端不用去解析中文
+        assert resp.json().get("reason") == "forbidden"
+
+    async def test_admin_override_grants_entry_after_hours(self, http, as_user, monkeypatch):
+        """管理员带理由 → 放行（凭证本身没问题，唯一的障碍是"现在不开放"）。"""
+        import lagent.domain.access as access_module
+
+        real_today = now_local().date()
+        # 钉在 23:24：三个实验室在这一刻都已关门（试运行实测的那个时刻）
+        monkeypatch.setattr(
+            access_module, "now_local",
+            lambda: dt.datetime.combine(real_today, dt.time(23, 24)),
+        )
+        admin = await as_user("管理员")
+        issued = await http.post(
+            "/api/access/issue",
+            headers=admin,
+            json={
+                "user_id": LINA,
+                "lab_id": LAB_ANALYSIS,
+                "date": real_today.isoformat(),
+                "valid_from": "23:00:00",   # 凭证窗口本身是"现在有效"的
+                "valid_to": "23:59:00",
+                "reason": "夜间取样",
+            },
+        )
+        assert issued.status_code == 200, issued.text
+        credential = issued.json()["credential"]
+
+        # 先证明确实会被闸门 8 拦下 —— 不先证明这点，后面的"放行"就没有意义
+        denied = await http.post(
+            "/api/access/verify",
+            headers=admin,
+            json={"lab_id": LAB_ANALYSIS, "credential": credential},
+        )
+        assert denied.json()["granted"] is False
+        assert denied.json()["reason_code"] == DENY_LAB_CLOSED
+
+        granted = await http.post(
+            "/api/access/verify",
+            headers=admin,
+            json={
+                "lab_id": LAB_ANALYSIS,
+                "credential": credential,
+                "override_reason": "导师批准的夜间取样，已报备",
+            },
+        )
+        assert granted.status_code == 200, granted.text
+        assert granted.json()["granted"] is True, granted.text
+
+    async def test_admin_override_is_audited(self, http, as_user, monkeypatch):
+        """每一次越权都要留痕：谁、什么时候、以什么理由。
+
+        "谁在什么时候给谁开了后门"是这类系统最该被追问的一件事 ——
+        审计里查不到，就等于这件事没发生过。
+        """
+        admin = await as_user("管理员")
+        await http.post(
+            "/api/access/verify",
+            headers=admin,
+            json={
+                "lab_id": LAB_ANALYSIS,
+                "user_id": ZHANGWEI,
+                "override_reason": "审计留痕用例",
+            },
+        )
+        rows = (await http.get("/api/audit", params={"action": "access.override"},
+                               headers=admin)).json()
+        assert rows, "管理员越权放行必须留下审计记录"
+        assert "审计留痕用例" in rows[0]["detail"]
+        assert rows[0]["actor_name"]

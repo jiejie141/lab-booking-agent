@@ -842,7 +842,10 @@ async function loadReservations(){
         <td>${esc(r.equipment_name)}<div style="color:var(--text-faint);font-size:11px">${esc(r.lab_label)}</div></td>
         <td class="mono">${esc(r.slot)}</td>
         <td><span class="tag ${STATUS_TAG[r.status]||""}">${esc(STATUS_CN[r.status]||r.status)}</span></td>
-        <td>${canCancel?`<button class="btn ghost sm" data-cancel="${r.id}">取消</button>`:""}</td>
+        <td>${canCancel
+          ? `<button class="btn ghost sm" data-move="${r.id}">改期</button>`
+            + `<button class="btn ghost sm" data-cancel="${r.id}">取消</button>`
+          : ""}</td>
       </tr>`;
     }).join("");
 
@@ -850,6 +853,26 @@ async function loadReservations(){
       <table style="margin-top:10px"><thead><tr><th>ID</th><th>设备</th><th>时段</th><th>状态</th><th></th></tr></thead>
       <tbody>${table}</tbody></table>`;
 
+    // 改期：走 PATCH（**一个事务**里换坑），不是"取消再重约"。
+    // 后者在新旧时段之间有个窗口，别人一抢就两头落空 —— 界面上必须给出
+    // 真正的改期入口，否则用户只能自己那么干。
+    $$("[data-move]",box).forEach(b=>b.addEventListener("click",()=>{
+      const id=b.getAttribute("data-move");
+      const row=rows.find(x=>String(x.id)===String(id));
+      const raw=window.prompt(
+        "新的时段（HH:MM-HH:MM）", (row&&row.slot?String(row.slot).slice(-13):"")
+      );
+      if(!raw) return;
+      const parts=String(raw).split(/[-–—～~]/).map(s=>s.trim());
+      if(parts.length!==2 || !/^\d{2}:\d{2}$/.test(parts[0]) || !/^\d{2}:\d{2}$/.test(parts[1])){
+        toast("格式不对，请写成 14:00-16:00","err"); return;
+      }
+      b.disabled=true; const old=b.textContent; b.textContent="…";
+      api(`/api/reservations/${id}`,{method:"PATCH",body:JSON.stringify({
+        start: parts[0]+":00", end: parts[1]+":00"})})
+        .then(out=>{ toast(out.message||("已改期 #"+id),"ok"); loadReservations(); loadHealth(); })
+        .catch(e=>{ toast("改期失败："+e.message,"err"); b.disabled=false; b.textContent=old; });
+    }));
     $$("[data-cancel]",box).forEach(b=>b.addEventListener("click",async()=>{
       const id=b.getAttribute("data-cancel");
       b.disabled=true; b.textContent="…";

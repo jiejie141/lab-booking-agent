@@ -140,6 +140,11 @@ DENY_CERT_EXPIRED = "cert_expired"
 DENY_CERT_REVOKED = "cert_revoked"
 DENY_LAB_FULL = "lab_full"
 DENY_ALREADY_INSIDE = "already_inside"
+# 「不在开放时段」是**独立**一类，不能并进 permit_expired：
+# 前者是"这个房间现在不接人"（改时间或由管理员授权），
+# 后者是"你的凭证过期了"（去重约）。混用会让事后统计把
+# "有人半夜来敲门"算成"凭证管理有问题"。处置动作完全不同。
+DENY_LAB_CLOSED = "lab_closed"
 DENY_NO_SUCH_USER = "no_such_user"
 DENY_CONFLICT = "concurrent_conflict"
 

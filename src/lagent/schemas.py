@@ -417,6 +417,10 @@ class AccessVerifyRequest(BaseModel):
     direction: str = Field(default="in", pattern="^(in|out)$")
     # 预检：只判定不落库，用于门禁屏上"你随时可以进"的提示
     precheck: bool = False
+    # 管理员显式授权在**非开放时段**放行（如夜间取样）。
+    # 三条约束缺一不可：只有管理员能传、必须写明理由、每次都会进审计。
+    # 门禁设备传它会被 403 —— 设备能越权等于门禁本身失效。
+    override_reason: str = Field(default="", max_length=200)
 
 
 class AccessVerifyResponse(BaseModel):
@@ -472,6 +476,21 @@ class AccessIssueResponse(BaseModel):
     # 明文凭证**只在签发时返回这一次**，系统只留哈希
     credential: str
     required_certs: list[str] = Field(default_factory=list)
+
+
+class RescheduleRequest(BaseModel):
+    """改期：把一条预约挪到同一天、同一台设备的另一个时段。
+
+    刻意**只接受开始与结束时间**：设备与日期不可变（改期就是"挪时间"，
+    换设备那是另一件事——那是取消再加新单，因为资质与上限都要重算）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    start: dt.time
+    end: dt.time
+    # 管理员代他人改期时用；非管理员传了会 403（显式拒绝，不是静默忽略）
+    as_user_id: int | None = None
 
 
 class CancelRequest(BaseModel):
