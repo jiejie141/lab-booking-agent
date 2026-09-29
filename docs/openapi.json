@@ -1,0 +1,3239 @@
+{
+  "components": {
+    "schemas": {
+      "AccessIssueRequest": {
+        "additionalProperties": false,
+        "description": "手工签发一张凭证（访客、临时人员、忘记预约的补救）。\n\n有副作用的动作，只允许管理员调用，且**必须写明理由** ——\n\"谁能绕过预约流程\"这件事本身要留痕。",
+        "properties": {
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          },
+          "lab_id": {
+            "title": "Lab Id",
+            "type": "integer"
+          },
+          "reason": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Reason",
+            "type": "string"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "integer"
+          },
+          "valid_from": {
+            "format": "time",
+            "title": "Valid From",
+            "type": "string"
+          },
+          "valid_to": {
+            "format": "time",
+            "title": "Valid To",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "lab_id",
+          "date",
+          "valid_from",
+          "valid_to"
+        ],
+        "title": "AccessIssueRequest",
+        "type": "object"
+      },
+      "AccessIssueResponse": {
+        "properties": {
+          "credential": {
+            "title": "Credential",
+            "type": "string"
+          },
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          },
+          "lab_id": {
+            "title": "Lab Id",
+            "type": "integer"
+          },
+          "permit_id": {
+            "title": "Permit Id",
+            "type": "integer"
+          },
+          "required_certs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Certs",
+            "type": "array"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "integer"
+          },
+          "valid_from": {
+            "format": "time",
+            "title": "Valid From",
+            "type": "string"
+          },
+          "valid_to": {
+            "format": "time",
+            "title": "Valid To",
+            "type": "string"
+          }
+        },
+        "required": [
+          "permit_id",
+          "user_id",
+          "lab_id",
+          "date",
+          "valid_from",
+          "valid_to",
+          "credential"
+        ],
+        "title": "AccessIssueResponse",
+        "type": "object"
+      },
+      "AccessVerifyRequest": {
+        "additionalProperties": false,
+        "description": "门禁机发起的一次核验请求。\n\n``credential``（二维码 / 卡片内的凭证串）与 ``user_id``（刷卡或人脸识别出的\n身份）**至少要有一个**：前者是\"你带了什么\"，后者是\"你是谁\"。\n两个都给时会被交叉校验 —— 这正是防\"拿别人截图进门\"的关键一步。\n\n严格模式（``extra=\"forbid\"``）：门禁集成最容易出的错是字段名写错却被静默忽略，\n结果门禁以为在传身份、后端根本没收到，于是所有人都被当成无凭证拒掉。",
+        "properties": {
+          "credential": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credential"
+          },
+          "direction": {
+            "default": "in",
+            "pattern": "^(in|out)$",
+            "title": "Direction",
+            "type": "string"
+          },
+          "gate_id": {
+            "default": "",
+            "maxLength": 32,
+            "title": "Gate Id",
+            "type": "string"
+          },
+          "lab_id": {
+            "title": "Lab Id",
+            "type": "integer"
+          },
+          "override_reason": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Override Reason",
+            "type": "string"
+          },
+          "precheck": {
+            "default": false,
+            "title": "Precheck",
+            "type": "boolean"
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id"
+          }
+        },
+        "required": [
+          "lab_id"
+        ],
+        "title": "AccessVerifyRequest",
+        "type": "object"
+      },
+      "AccessVerifyResponse": {
+        "description": "核验结论。**带原因码**，门禁屏据此显示\"为什么不开门\"。",
+        "properties": {
+          "granted": {
+            "title": "Granted",
+            "type": "boolean"
+          },
+          "lab_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lab Id"
+          },
+          "lab_label": {
+            "default": "",
+            "title": "Lab Label",
+            "type": "string"
+          },
+          "message": {
+            "default": "",
+            "title": "Message",
+            "type": "string"
+          },
+          "permit_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Permit Id"
+          },
+          "reason_code": {
+            "default": "",
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id"
+          },
+          "user_name": {
+            "default": "",
+            "title": "User Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "granted"
+        ],
+        "title": "AccessVerifyResponse",
+        "type": "object"
+      },
+      "AuditLogOut": {
+        "description": "审计记录视图（管理员可读）。",
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "actor_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor Id"
+          },
+          "actor_name": {
+            "default": "",
+            "title": "Actor Name",
+            "type": "string"
+          },
+          "client_host": {
+            "default": "",
+            "title": "Client Host",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "detail": {
+            "default": "",
+            "title": "Detail",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "target_id": {
+            "default": "",
+            "title": "Target Id",
+            "type": "string"
+          },
+          "target_type": {
+            "default": "",
+            "title": "Target Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "created_at",
+          "action",
+          "outcome"
+        ],
+        "title": "AuditLogOut",
+        "type": "object"
+      },
+      "BatchReviewRequest": {
+        "additionalProperties": false,
+        "description": "批量审批一群预约。\n\n上限 50：再多就该走导出 + 线下处理，而不是在页面上点 ——\n批量接口把\"机械重复\"省掉，但它不该变成\"一次性改一大片\"的工具。",
+        "properties": {
+          "approve": {
+            "title": "Approve",
+            "type": "boolean"
+          },
+          "ids": {
+            "items": {
+              "type": "integer"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Ids",
+            "type": "array"
+          },
+          "reason": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ids",
+          "approve"
+        ],
+        "title": "BatchReviewRequest",
+        "type": "object"
+      },
+      "BookingOutcome": {
+        "description": "下单/取消的结果。``retries`` 暴露乐观并发重试了几次，评测与压测都看这个数。\n\n``reason`` 是**机器可读**的结果分类（P1-4 加的），与 ``message`` 分工明确：\nmessage 给人看、可以随便改文案；reason 给指标分组、**不能**靠解析 message 得到。\n\n为什么值得单开一个字段：抓\"从人话里找关键词\"当分类依据，是典型的\n「改一句文案，指标就静默错位」—— 而且它不会报错，只会让图上的数字\n慢慢变得没有意义。这种错误发现得极晚，代价却是整条可观测性链路。",
+        "properties": {
+          "conflict_with": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReservationOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "ok",
+                  "not_found",
+                  "invalid",
+                  "forbidden",
+                  "state",
+                  "conflict",
+                  "contention"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "replayed": {
+            "default": false,
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "reservation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReservationOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "retries": {
+            "default": 0,
+            "title": "Retries",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ok",
+          "message"
+        ],
+        "title": "BookingOutcome",
+        "type": "object"
+      },
+      "CancelRequest": {
+        "additionalProperties": false,
+        "description": "取消预约。\n\n``user_id`` 已从请求体里**删除** —— 取消者身份一律取自 token。\n需要管理员代他人取消时用 ``as_user_id``，且该字段对非管理员返回 403\n（显式拒绝，而不是静默忽略）。",
+        "properties": {
+          "as_user_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As User Id"
+          },
+          "reason": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Reason",
+            "type": "string"
+          },
+          "reservation_id": {
+            "title": "Reservation Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "reservation_id"
+        ],
+        "title": "CancelRequest",
+        "type": "object"
+      },
+      "ChatRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "accept_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accept Date"
+          },
+          "accept_end": {
+            "anyOf": [
+              {
+                "format": "time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accept End"
+          },
+          "accept_equipment_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accept Equipment Id"
+          },
+          "accept_start": {
+            "anyOf": [
+              {
+                "format": "time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accept Start"
+          },
+          "message": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "session_id": {
+            "default": "default",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "ChatRequest",
+        "type": "object"
+      },
+      "ChatResponse": {
+        "properties": {
+          "booking": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BookingOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "citations": {
+            "items": {
+              "$ref": "#/components/schemas/DocHit"
+            },
+            "title": "Citations",
+            "type": "array"
+          },
+          "degraded": {
+            "default": false,
+            "title": "Degraded",
+            "type": "boolean"
+          },
+          "intent": {
+            "anyOf": [
+              {
+                "enum": [
+                  "query_availability",
+                  "create_reservation",
+                  "cancel_reservation",
+                  "check_admission",
+                  "smalltalk"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Intent"
+          },
+          "missing": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing",
+            "type": "array"
+          },
+          "proposals": {
+            "items": {
+              "$ref": "#/components/schemas/Proposal"
+            },
+            "title": "Proposals",
+            "type": "array"
+          },
+          "reply": {
+            "title": "Reply",
+            "type": "string"
+          },
+          "stage": {
+            "default": "",
+            "title": "Stage",
+            "type": "string"
+          },
+          "trace": {
+            "items": {
+              "$ref": "#/components/schemas/TraceStep"
+            },
+            "title": "Trace",
+            "type": "array"
+          }
+        },
+        "required": [
+          "reply"
+        ],
+        "title": "ChatResponse",
+        "type": "object"
+      },
+      "DocHit": {
+        "properties": {
+          "heading": {
+            "title": "Heading",
+            "type": "string"
+          },
+          "matched_by": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Matched By",
+            "type": "array"
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "heading",
+          "text",
+          "score"
+        ],
+        "title": "DocHit",
+        "type": "object"
+      },
+      "EquipmentCreate": {
+        "additionalProperties": false,
+        "description": "新增设备。``code`` 是资产编号，全库唯一。",
+        "properties": {
+          "category": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Category",
+            "type": "string"
+          },
+          "code": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Code",
+            "type": "string"
+          },
+          "lab_id": {
+            "title": "Lab Id",
+            "type": "integer"
+          },
+          "max_hours": {
+            "default": 4,
+            "maximum": 24.0,
+            "minimum": 1.0,
+            "title": "Max Hours",
+            "type": "integer"
+          },
+          "model": {
+            "default": "",
+            "maxLength": 64,
+            "title": "Model",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "requires_approval": {
+            "default": false,
+            "title": "Requires Approval",
+            "type": "boolean"
+          },
+          "requires_training": {
+            "default": false,
+            "title": "Requires Training",
+            "type": "boolean"
+          },
+          "status": {
+            "default": "normal",
+            "enum": [
+              "normal",
+              "maintenance",
+              "scrapped"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "lab_id",
+          "name",
+          "code",
+          "category"
+        ],
+        "title": "EquipmentCreate",
+        "type": "object"
+      },
+      "EquipmentUpdate": {
+        "additionalProperties": false,
+        "description": "改设备。改 ``status`` 是最常用的动作（维护 / 报废 / 恢复）。",
+        "properties": {
+          "category": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "code": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Code"
+          },
+          "lab_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lab Id"
+          },
+          "max_hours": {
+            "anyOf": [
+              {
+                "maximum": 24.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Hours"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "requires_approval": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requires Approval"
+          },
+          "requires_training": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requires Training"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "normal",
+                  "maintenance",
+                  "scrapped"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          }
+        },
+        "title": "EquipmentUpdate",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "LabCreate": {
+        "additionalProperties": false,
+        "description": "新建实验室。",
+        "properties": {
+          "building": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Building",
+            "type": "string"
+          },
+          "capacity": {
+            "default": 1,
+            "maximum": 999.0,
+            "minimum": 0.0,
+            "title": "Capacity",
+            "type": "integer"
+          },
+          "floor": {
+            "maximum": 99.0,
+            "minimum": 0.0,
+            "title": "Floor",
+            "type": "integer"
+          },
+          "note": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Note",
+            "type": "string"
+          },
+          "open_hours": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": "Open Hours",
+            "type": "object"
+          },
+          "room": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Room",
+            "type": "string"
+          }
+        },
+        "required": [
+          "building",
+          "floor",
+          "room"
+        ],
+        "title": "LabCreate",
+        "type": "object"
+      },
+      "LabUpdate": {
+        "additionalProperties": false,
+        "description": "改实验室。**所有字段都可省略**，省略即不改。",
+        "properties": {
+          "building": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Building"
+          },
+          "capacity": {
+            "anyOf": [
+              {
+                "maximum": 999.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capacity"
+          },
+          "floor": {
+            "anyOf": [
+              {
+                "maximum": 99.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Floor"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "open_hours": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Open Hours"
+          },
+          "room": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Room"
+          }
+        },
+        "title": "LabUpdate",
+        "type": "object"
+      },
+      "LoginRequest": {
+        "additionalProperties": false,
+        "description": "登录请求。用户名 + 口令，别无其他。",
+        "properties": {
+          "password": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          },
+          "username": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "title": "LoginRequest",
+        "type": "object"
+      },
+      "Proposal": {
+        "description": "一个可用方案。``relaxations`` 是相对原始诉求放宽了哪些约束。",
+        "properties": {
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          },
+          "end": {
+            "format": "time",
+            "title": "End",
+            "type": "string"
+          },
+          "equipment_id": {
+            "title": "Equipment Id",
+            "type": "integer"
+          },
+          "equipment_name": {
+            "title": "Equipment Name",
+            "type": "string"
+          },
+          "hours": {
+            "title": "Hours",
+            "type": "number"
+          },
+          "kind": {
+            "enum": [
+              "exact",
+              "shift",
+              "shorten",
+              "switch_equipment",
+              "switch_lab"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "lab_label": {
+            "title": "Lab Label",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "relaxations": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Relaxations",
+            "type": "array"
+          },
+          "score": {
+            "default": 1.0,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Score",
+            "type": "number"
+          },
+          "start": {
+            "format": "time",
+            "title": "Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "equipment_id",
+          "equipment_name",
+          "lab_label",
+          "date",
+          "start",
+          "end",
+          "hours"
+        ],
+        "title": "Proposal",
+        "type": "object"
+      },
+      "RescheduleRequest": {
+        "additionalProperties": false,
+        "description": "改期：把一条预约挪到同一天、同一台设备的另一个时段。\n\n刻意**只接受开始与结束时间**：设备与日期不可变（改期就是\"挪时间\"，\n换设备那是另一件事——那是取消再加新单，因为资质与上限都要重算）。",
+        "properties": {
+          "as_user_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As User Id"
+          },
+          "end": {
+            "format": "time",
+            "title": "End",
+            "type": "string"
+          },
+          "start": {
+            "format": "time",
+            "title": "Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "title": "RescheduleRequest",
+        "type": "object"
+      },
+      "ReservationCreate": {
+        "additionalProperties": false,
+        "description": "**表单式**下单（P0-3）。\n\n为什么必须补这个接口：原来预约**只能**经过 ``/api/agent/chat`` 走模型 ——\n模型不可用（断网 / 额度用完 / 端点挂了）时，预约功能是**整体停摆**的。\nREADME 里那条\"降级链只覆盖模型不听话、不覆盖模型不在\"说的就是这件事，\n而它的后果在当时是\"所有人都约不了实验室\"。学校系统不能接受这种失败形态。\n\n所以这里提供一条**不经过模型**的确定性路径：\n``create_reservation`` 的全部不变式（资质 / 开放时间 / 粒度对齐 /\n唯一索引兜底）原样生效，只是把\"把中文需求翻译成槽位\"这一步交给人。\n对话入口降级为**可选的便捷方式**，不再是唯一入口。\n\n身份同样取自令牌；管理员可用 ``as_user_id`` 代他人下单（与取消接口一致）。",
+        "properties": {
+          "as_user_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As User Id"
+          },
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          },
+          "end": {
+            "format": "time",
+            "title": "End",
+            "type": "string"
+          },
+          "equipment_id": {
+            "title": "Equipment Id",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key"
+          },
+          "purpose": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Purpose",
+            "type": "string"
+          },
+          "start": {
+            "format": "time",
+            "title": "Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "equipment_id",
+          "date",
+          "start",
+          "end"
+        ],
+        "title": "ReservationCreate",
+        "type": "object"
+      },
+      "ReservationOut": {
+        "properties": {
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          },
+          "end_time": {
+            "format": "time",
+            "title": "End Time",
+            "type": "string"
+          },
+          "equipment_id": {
+            "title": "Equipment Id",
+            "type": "integer"
+          },
+          "equipment_name": {
+            "default": "",
+            "title": "Equipment Name",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "lab_label": {
+            "default": "",
+            "title": "Lab Label",
+            "type": "string"
+          },
+          "no_show_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "No Show At"
+          },
+          "pardoned_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pardoned At"
+          },
+          "purpose": {
+            "default": "",
+            "title": "Purpose",
+            "type": "string"
+          },
+          "slot": {
+            "default": "",
+            "title": "Slot",
+            "type": "string"
+          },
+          "start_time": {
+            "format": "time",
+            "title": "Start Time",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "integer"
+          },
+          "user_name": {
+            "default": "",
+            "title": "User Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "equipment_id",
+          "user_id",
+          "date",
+          "start_time",
+          "end_time",
+          "status"
+        ],
+        "title": "ReservationOut",
+        "type": "object"
+      },
+      "RetryNotificationRequest": {
+        "additionalProperties": false,
+        "description": "重发失败的通知。``ids`` 为空 = **全部**失败的那些。\n\n为什么是手动而不是自动重试，见 :func:`lagent.notify.requeue` 的说明 ——\n一封迟到的「预约成功」比没有更糟。",
+        "properties": {
+          "ids": {
+            "items": {
+              "type": "integer"
+            },
+            "maxItems": 200,
+            "title": "Ids",
+            "type": "array"
+          }
+        },
+        "title": "RetryNotificationRequest",
+        "type": "object"
+      },
+      "ReviewRequest": {
+        "additionalProperties": false,
+        "description": "审批意见。**驳回时写清楚原因** —— 用户要能知道下一步该做什么。",
+        "properties": {
+          "reason": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "title": "ReviewRequest",
+        "type": "object"
+      },
+      "TokenResponse": {
+        "properties": {
+          "access_token": {
+            "title": "Access Token",
+            "type": "string"
+          },
+          "expires_in": {
+            "title": "Expires In",
+            "type": "integer"
+          },
+          "token_type": {
+            "default": "bearer",
+            "title": "Token Type",
+            "type": "string"
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserOut"
+          }
+        },
+        "required": [
+          "access_token",
+          "expires_in",
+          "user"
+        ],
+        "title": "TokenResponse",
+        "type": "object"
+      },
+      "TraceStep": {
+        "description": "一步可观测记录。控制台直接渲染这个，不靠日志里翻。",
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "elapsed_ms": {
+            "default": 0.0,
+            "title": "Elapsed Ms",
+            "type": "number"
+          },
+          "node": {
+            "title": "Node",
+            "type": "string"
+          }
+        },
+        "required": [
+          "node",
+          "detail"
+        ],
+        "title": "TraceStep",
+        "type": "object"
+      },
+      "UserCreate": {
+        "additionalProperties": false,
+        "description": "新建账号。初始口令必填 —— 不填就是\"账号存在但没人能登\"，\n而创建者会以为已经建好了。",
+        "properties": {
+          "certs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Certs",
+            "type": "array"
+          },
+          "email": {
+            "maxLength": 128,
+            "minLength": 3,
+            "title": "Email",
+            "type": "string"
+          },
+          "password": {
+            "maxLength": 128,
+            "minLength": 8,
+            "title": "Password",
+            "type": "string"
+          },
+          "role": {
+            "default": "user",
+            "enum": [
+              "user",
+              "admin",
+              "sysadmin"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "username": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "email",
+          "password"
+        ],
+        "title": "UserCreate",
+        "type": "object"
+      },
+      "UserOut": {
+        "description": "对外暴露的用户视图。\n\n**刻意不含 password_hash / email**：身份信息按需最小化，\n列表接口没有任何理由返回口令哈希（哪怕它不可逆）。",
+        "properties": {
+          "certs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Certs",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "username",
+          "role"
+        ],
+        "title": "UserOut",
+        "type": "object"
+      },
+      "UserUpdate": {
+        "additionalProperties": false,
+        "description": "改账号。``password`` 非空即为**重置口令**（管理员重置是常态操作）。\n\n``certs`` 一并传即表示\"以这份为准\"：新增的类别会被授予授权记录，\n移除的类别会被**撤销而不是删除**（谁在什么时候被取消了什么资格，\n必须查得到）。详见 :func:`lagent.domain.catalog.sync_certs`。",
+        "properties": {
+          "certs": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Certs"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 3,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "password": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 8,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Password"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "enum": [
+                  "user",
+                  "admin",
+                  "sysadmin"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          }
+        },
+        "title": "UserUpdate",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "带真实约束协商能力的智能实验室预约 Agent（JWT + RBAC + 审计）",
+    "title": "lab-booking-agent",
+    "version": "1.3.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/": {
+      "get": {
+        "operationId": "index__get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Index"
+      }
+    },
+    "/api/access/inside": {
+      "get": {
+        "description": "当前在馆名单。管理员专用 —— 名单本身就是敏感信息。\n\n它回答的是安全场景里最要紧的一个问题：**\"现在楼里都有谁\"**。\n火灾、事故、清场时没有这张名单，就只能靠喊。",
+        "operationId": "access_inside_api_access_inside_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "lab_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Lab Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Access Inside Api Access Inside Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Access Inside"
+      }
+    },
+    "/api/access/issue": {
+      "post": {
+        "description": "管理员手工签发凭证（访客、临时人员、预约系统之外的补救）。\n\n有两个刻意的约束：\n\n1. **只允许管理员**。能绕过预约流程的人越少越好；\n2. **必须写理由**，并写进审计。这不是形式主义 —— \"谁在什么时候给谁开了后门\"\n   是这类系统最该被追问的一件事。",
+        "operationId": "access_issue_api_access_issue_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccessIssueRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessIssueResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Access Issue"
+      }
+    },
+    "/api/access/verify": {
+      "post": {
+        "description": "核验一次进门/出门。门禁机在几百毫秒内要拿到是/否。\n\n``precheck=true`` 用于门禁屏预显示：只判定、不核销、不占座 ——\n否则\"屏幕上看一眼能不能进\"就把凭证消耗掉了。\n\n``override_reason`` 是**非开放时段**的显式放行（夜间取样这类真实需求）。\n三条约束缺一不可：只有管理员能传（门禁设备传了直接 403）、必须写明理由、\n每次都进审计。不设这个口子的话，唯一的办法是把凭证窗口开到 23:59 ——\n那等于用一个隐式动作绕过开放时间，事后没人说得清谁批的。",
+        "operationId": "access_verify_api_access_verify_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccessVerifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessVerifyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Access Verify"
+      }
+    },
+    "/api/agent/chat": {
+      "post": {
+        "operationId": "chat_api_agent_chat_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Chat"
+      }
+    },
+    "/api/audit": {
+      "get": {
+        "description": "审计流水（管理员专用）。只读：没有任何接口能改或删审计记录。",
+        "operationId": "audit_logs_api_audit_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "action",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 48,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Action"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AuditLogOut"
+                  },
+                  "title": "Response Audit Logs Api Audit Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Audit Logs"
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "description": "用用户名 + 口令换访问令牌。\n\n三条安全细节：\n\n* **账号不存在与口令错误返回完全相同的 401。**\n  分开回「用户不存在」等于免费提供一个账号枚举接口。\n* **口令校验放到线程池里跑。** scrypt 是故意慢的 CPU 密集操作，\n  直接在事件循环里跑会把整个进程卡住（单 worker 下就是全站卡住）。\n* **失败的登录也进审计。** 「某个账号被连续试了 200 次」这个模式\n  只有把失败记下来才看得见。\n* **连续失败到阈值就锁**（P1-7）。被锁期间连正确口令也进不去 ——\n  否则限流只是让爆破变慢，而不是让它停下来。",
+        "operationId": "login_api_auth_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Login"
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "description": "回显当前令牌对应的身份，供控制台启动时校验 token 是否还有效。",
+        "operationId": "me_api_auth_me_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Me"
+      }
+    },
+    "/api/equipment": {
+      "post": {
+        "description": "新增设备。``code``（资产编号）全库唯一，重复 → 409。",
+        "operationId": "equipment_create_api_equipment_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EquipmentCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Equipment Create Api Equipment Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Equipment Create"
+      }
+    },
+    "/api/equipment/{equipment_id}": {
+      "patch": {
+        "description": "改设备。``status`` 置为非 normal 时，返回里会带上仍占着时段的预约数。\n\n★ 这个数字是**必须**给的：设备下线了，已有的预约不会自己消失。\n不给的话，现场就是\"学生按预约到了实验室，发现设备在维修，\n而系统里他还约着\" —— 且没有任何一处提示过管理员。",
+        "operationId": "equipment_update_api_equipment__equipment_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "equipment_id",
+            "required": true,
+            "schema": {
+              "title": "Equipment Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EquipmentUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Equipment Update Api Equipment  Equipment Id  Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Equipment Update"
+      }
+    },
+    "/api/health": {
+      "get": {
+        "description": "存活探针（liveness）：只证明「进程还能响应」。\n\n**刻意不碰数据库、不碰任何下游。** 原因见本段开头的注释。",
+        "operationId": "health_api_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Health Api Health Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health"
+      }
+    },
+    "/api/health/details": {
+      "get": {
+        "description": "业务统计与控制台需要的运行信息。**需要登录。**\n\nP1-4 把它从公开的 ``/api/health`` 上搬过来并挂了认证：原来任何人不需要凭据\n就能读到\"库里有多少用户、多少条预约\"。单看不致命，但那是免费的容量情报，\n而这类\"顺手公开\"的信息一旦被别人依赖上就很难再收回去。",
+        "operationId": "health_details_api_health_details_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Health Details Api Health Details Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Health Details"
+      }
+    },
+    "/api/health/ready": {
+      "get": {
+        "description": "就绪探针（readiness）：逐项报告依赖，**任一致命项失败就回 503**。\n\n公开是刻意的：编排系统的探针默认不带凭据，要凭据的探针等于没探针。\n所以这里只回「哪些检查通过/失败」，**不回任何计数与业务量** ——\n那些在 ``/api/health/details`` 里，需要登录。\n\n后两项（notifications / backup）是试运行之后补的：它们都不是\"服务能不能用\"，\n而是\"有没有人在悄悄坏掉\" —— 通知在库里堆积、备份从来没成功过。\n两者都非致命（不会 503），但**必须被看见**，否则只会在真需要它们的那天暴露。",
+        "operationId": "ready_api_health_ready_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Ready Api Health Ready Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Ready"
+      }
+    },
+    "/api/labs": {
+      "get": {
+        "description": "实验室与设备目录。需登录（目录本身不敏感，但按\"默认拒绝\"统一处理）。\n\n**刻意不分页**：一个院系的实验室是十来间、设备几十台，一屏装得下；\n而这个响应里设备是**嵌套**在实验室下的，分页只能切外层，\n切出来的\"第 2 页\"含义还随排序漂移 —— 为一个不会撞上的上限付出\n语义复杂度，不划算。真到了几百间的规模再改成\"先列房间、再按房间取设备\"。\n\n``equipment_status`` 只过滤**嵌套的设备**，不过滤实验室本身：\n想「只看还能约的设备」时用 ``?equipment_status=normal``\n（取值非法直接 422，由类型声明保证，不必在代码里再判一次）。",
+        "operationId": "labs_api_labs_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "equipment_status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "normal",
+                    "maintenance",
+                    "scrapped"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Equipment Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Labs Api Labs Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Labs"
+      },
+      "post": {
+        "description": "新建实验室。",
+        "operationId": "labs_create_api_labs_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LabCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Labs Create Api Labs Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Labs Create"
+      }
+    },
+    "/api/labs/{lab_id}": {
+      "patch": {
+        "description": "改实验室（PATCH 语义：没传的字段不动，传 null 也表示不改）。",
+        "operationId": "labs_update_api_labs__lab_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "lab_id",
+            "required": true,
+            "schema": {
+              "title": "Lab Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LabUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Labs Update Api Labs  Lab Id  Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Labs Update"
+      }
+    },
+    "/api/notifications": {
+      "get": {
+        "description": "我的通知（管理员可指定 ``user_id`` 看别人的）。\n\n为什么要有这个接口：通知最常见的问题是\"用户说没收到\"。\n有了它，管理员能当场看到\"这条通知生成了没有、发出去没有、为什么没发出去\" ——\n不需要去翻库。\n\n三种视角：\n* 默认 —— 本人的通知；\n* 管理员带 ``user_id`` —— 指定某个人的（\"他说没收到\"时用这个）；\n* 管理员带 ``all_users=true`` —— **全系统**（\"到底有没有卡住的\"用这个）。\n  第二条视角单独存在时是不够的：回答\"有没有积压\"不该需要先知道去查谁。\n\n总数走 ``X-Total-Count`` 响应头（与 ``/api/reservations`` 同一约定），\n响应形状仍是数组 —— 不为了分页把所有调用方一起改一遍。",
+        "operationId": "notifications_api_notifications_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "user_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "User Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "pending",
+                    "sent",
+                    "failed"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "all_users",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "All Users",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Notifications Api Notifications Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Notifications"
+      }
+    },
+    "/api/notifications/retry": {
+      "post": {
+        "description": "把失败的通知放回待发队列。\n\n⚠️ 这是**手动**入口，不是自动重试 —— 模块里那条取舍是真的：\n一封迟到的「预约成功」比没有更糟（用户照着它去了实验室，而预约已被取消）。\n但原设计只写了\"重发要由人确认后手动触发\"，**入口一直没建**，\n于是网络抖动导致的失败会永久卡住。补的是这个洞。",
+        "operationId": "retry_notifications_api_notifications_retry_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetryNotificationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Retry Notifications Api Notifications Retry Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Retry Notifications"
+      }
+    },
+    "/api/reservations": {
+      "get": {
+        "description": "查询预约记录。\n\n**非管理员只能看到自己的**：查询串里传 ``user_id=别人`` 会被无视并改写为\n令牌里的身份，而不是报错 —— 这样前端不需要知道权限细节，\n而越权读取在服务端就断了（不依赖前端自觉）。\n管理员传 ``user_id`` 可看指定用户，不传则看全量。\n\n分页（P2）是**可选**的：``limit`` 不传即不限，返回形状仍是数组。\n刻意没改成 ``{\"items\": [...], \"total\": N}`` 那种信封 —— 那会让所有\n既有调用方（含控制台）一起改一遍，而分页在「明确可延后」那一组里。\n总数用 ``X-Total-Count`` 响应头给出：想分页的调用方拿得到，\n不想分页的不受影响。等真到了必须信封的时候再一次性换掉。",
+        "operationId": "reservations_api_reservations_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "user_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "User Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 500,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Reservations Api Reservations Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Reservations"
+      },
+      "post": {
+        "description": "**表单式**下单 —— 不经过模型（P0-3）。\n\n与对话入口共用 ``domain.booking.create_reservation``，\n所以资质、开放时间、粒度对齐、唯一索引兜底这些不变式**一个都不少**；\n差别只在于\"谁把需求翻译成槽位\"：这里由调用方直接给结构化字段。\n\n失败时按 ``reason`` 选状态码，而不是一律 409：\nP1-4 给下单结果加了七种机器可读的分类，如果 HTTP 层把它们又压成一个码，\n那层分类就白做了。映射只覆盖 HTTP 本来就表达得了的粗粒度（没找到 / 参数不对 /\n没权限 / 冲突），更细的方向由指标与审计承接。",
+        "operationId": "create_api_reservations_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReservationCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Api Reservations Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create"
+      }
+    },
+    "/api/reservations/batch-review": {
+      "post": {
+        "description": "一次审批多条。\n\n为什么要有它：待办一多，逐条点是最典型的\"机械重复\"——\n而每一项都走同一个 `_review`，所以审计、通知、状态机全都不用改。\n\n⚠️ **失败项逐条返回原因，不做整批回滚**：\n批量审批里的失败通常不是\"环境坏了\"，而是\"这一条恰好在别人手里\"，\n把已经成功的一起回滚反而更糟 —— 管理员会以为一条都没批。\n这和下单是两种语义：下单要全有全无，审批是\"能批几条批几条 + 说清哪几条没批\"。",
+        "operationId": "batch_review_api_reservations_batch_review_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchReviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Batch Review Api Reservations Batch Review Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Batch Review"
+      }
+    },
+    "/api/reservations/cancel": {
+      "post": {
+        "description": "取消预约。取消者身份取自令牌，请求体里没有 ``user_id`` 可填。\n\n管理员可用 ``as_user_id`` 代他人取消；普通用户传该字段直接 403\n（显式拒绝而不是静默忽略 —— 静默忽略会让调用方以为操作生效了）。",
+        "operationId": "cancel_api_reservations_cancel_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CancelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Cancel Api Reservations Cancel Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Cancel"
+      }
+    },
+    "/api/reservations/pending": {
+      "get": {
+        "description": "待审批列表。**管理员专用**。\n\n分页与其它列表同一套约定。这一条是试运行之后加的：待审批会随\n\"开了审批的设备越多\"而增长，是几个列表里最可能先撞上上限的一个。",
+        "operationId": "reservations_pending_api_reservations_pending_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 500,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Reservations Pending Api Reservations Pending Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Reservations Pending"
+      }
+    },
+    "/api/reservations/{reservation_id}": {
+      "patch": {
+        "description": "改期：把预约挪到同一天、同一台设备的另一个时段。\n\n★ 这是「换时间」，不是「取消再重约」。后者会让用户在新旧时段之间\n被别人抢走，两头落空；所以领域层把换坑做成**一个事务**：\n要么整体成功，要么原样保留（详见 ``reschedule_reservation`` 的说明）。\n\n身份规则与取消一致：默认改自己的；管理员要代他人改期用 ``as_user_id``，\n非管理员传了会 403 —— 显式拒绝，而不是静默当成改自己。",
+        "operationId": "reschedule_api_reservations__reservation_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "reservation_id",
+            "required": true,
+            "schema": {
+              "title": "Reservation Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RescheduleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Reschedule Api Reservations  Reservation Id  Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Reschedule"
+      }
+    },
+    "/api/reservations/{reservation_id}/approve": {
+      "post": {
+        "description": "通过一条待审批申请。",
+        "operationId": "approve_api_reservations__reservation_id__approve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "reservation_id",
+            "required": true,
+            "schema": {
+              "title": "Reservation Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Approve Api Reservations  Reservation Id  Approve Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Approve"
+      }
+    },
+    "/api/reservations/{reservation_id}/pardon": {
+      "post": {
+        "description": "豁免一条违约（管理员核实后推翻判定）。\n\n**不删 ``no_show_at``**：系统确实判过，是人推翻了。抹掉它等于说\n\"系统从没这么认为过\"，那么下一次排查\"门禁有没有误判\"时就永远查不到。",
+        "operationId": "pardon_violation_api_reservations__reservation_id__pardon_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "reservation_id",
+            "required": true,
+            "schema": {
+              "title": "Reservation Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Pardon Violation Api Reservations  Reservation Id  Pardon Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Pardon Violation"
+      }
+    },
+    "/api/reservations/{reservation_id}/reject": {
+      "post": {
+        "description": "驳回一条待审批申请，并**释放它占着的时段**。",
+        "operationId": "reject_api_reservations__reservation_id__reject_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "reservation_id",
+            "required": true,
+            "schema": {
+              "title": "Reservation Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ReviewRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Reject Api Reservations  Reservation Id  Reject Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Reject"
+      }
+    },
+    "/api/retrieve": {
+      "get": {
+        "operationId": "retrieve_api_retrieve_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "k",
+            "required": false,
+            "schema": {
+              "default": 4,
+              "title": "K",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Retrieve Api Retrieve Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Retrieve"
+      }
+    },
+    "/api/today": {
+      "get": {
+        "operationId": "today_api_today_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Today Api Today Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Today"
+      }
+    },
+    "/api/tools": {
+      "get": {
+        "description": "已注册的工具规格（控制台用来展示 Agent 的能力面）。",
+        "operationId": "tools_spec_api_tools_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Tools Spec Api Tools Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Tools Spec"
+      }
+    },
+    "/api/users": {
+      "get": {
+        "description": "列出全部用户。**管理员专用**：普通用户没有任何业务理由拿到花名册。\n\n分页与其它列表同一套约定：可选 ``limit``/``offset``，总数走 ``X-Total-Count``，\n响应形状仍是数组。",
+        "operationId": "users_api_users_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 500,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/UserOut"
+                  },
+                  "title": "Response Users Api Users Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Users"
+      },
+      "post": {
+        "description": "新建账号。初始口令必填 —— 否则\"建好了但谁也登不上\"。\n\n``certs`` 里给的类别会同时写进授权记录（``cert_grants``），\n否则会出现\"能约设备却进不了门\"（详见 ``domain/catalog.sync_certs``）。",
+        "operationId": "users_create_api_users_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Users Create"
+      }
+    },
+    "/api/users/{user_id}": {
+      "patch": {
+        "description": "改账号。传 ``password`` 即重设口令（重设口令同时等于\"恢复登录\"）。\n\n改自己的角色是**故意禁止**的：否则管理员能把自己降成普通用户，\n而系统里可能只剩他一个管理员 —— 那就没人能改回来了。",
+        "operationId": "users_update_api_users__user_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "title": "User Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Users Update"
+      }
+    },
+    "/api/users/{user_id}/deactivate": {
+      "post": {
+        "description": "停用账号：清空口令哈希（空哈希 → 不可登录，fail-closed）。\n\n唯一的保护是「不能停用自己」。\n\n看起来还应该挡一道「不能停用最后一个管理员」，但那道锁**够不到**：\n停用不删行、也不改角色，被停用的管理员在\"管理员人数\"里仍然算一个，\n所以人数永远不会降到 0；而真正会把系统锁死的路径只有一条 ——\n把自己停用掉，那已经被上面这一句挡住了。\n（留一道永远进不去的分支比不留更糟：它测试不到，却让人以为已经防住了。）",
+        "operationId": "users_deactivate_api_users__user_id__deactivate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "title": "User Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Users Deactivate Api Users  User Id  Deactivate Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Users Deactivate"
+      }
+    },
+    "/api/users/{user_id}/violations": {
+      "get": {
+        "description": "违约记录与当前限制状态。\n\n**本人与管理员可读，别人不可读。** 与预约列表同一条规矩：\n传别人的 id 不会报错，而是被改写成自己 —— 越权读取在服务端就断了。",
+        "operationId": "user_violations_api_users__user_id__violations_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "title": "User Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response User Violations Api Users  User Id  Violations Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "User Violations"
+      }
+    }
+  }
+}

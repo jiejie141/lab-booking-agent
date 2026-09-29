@@ -964,38 +964,69 @@ react ──模型故障 / 步数耗尽 / 不按格式回──▶ deterministic
 | CI 上 `26b6d50` **绿的**，两小时后 `5dc4aa0` **红了**，而两次之间只改了一行文档 | 红的是 `main.py eval`：三条用例用 `date_offset: 1`（明天），而**周末的开放时间比工作日短**（生物楼 205 周末 10:00-16:00、分析楼 301 周末 09:00-18:00）。绿的那次 UTC 15:42 = 北京时间 23:42（明天仍是周五）；红的那次 UTC 17:49 = 北京时间次日 01:49（明天变成周六）。**它伪装成代码回归**，而人翻 diff 只会更困惑 | 三条用例的时段移到「工作日 ∩ 周末」的交集（安全窗口 10:00-16:00）；新增 `tests/test_eval_cases.py` 做机械守卫，凡用 `date_offset` 的用例都要过这道窗口检查。**评测集的日历依赖要当正确性问题治，不能靠"下周一再跑一次"** |
 | 同一份代码、同一份 mypy 配置，**py3.13 报错而 py3.10 全绿** | `requirements.txt` 只写了 `>=` 下限。SQLAlchemy 2.1 抬高了 `requires_python`，于是 py3.10 被解析到 2.0、py3.13 拿到 2.1 —— **两个 job 静默地在测两套不同的栈**。而 mypy 的输出本来就依赖「装了哪些带类型标注的包」：`sweep._archive` 里 `select(model)` 的 `model` 是 `Any`，未绑定泛型在 2.0 的桩下没报、在 2.1 的桩下报了 `var-annotated` | 显式标注 `rows: Sequence[Any]`（标 `list[Any]` 会换来下一个错：`Sequence[Never]` 不能赋给 `list[Any]`）；CI 每个 job 打印实际依赖版本。**未钉版本的依赖会让矩阵悄悄测两套栈，而第一个发现它的永远是类型检查** |
 | 推送时 `fatal: ... github.com ... CONNECT tunnel failed, response 502`（连试十余次） | 沙箱注入的 HTTPS 代理对 `github.com` 返回 502，而同一时刻 `api.github.com` / `raw.githubusercontent.com` / `codeload.github.com` 全是 200 —— **是单域名而非整网不通** | 重试直到通过（本次第 12 次成功）。判断"网络抖动还是配置错"要看**同域之外还能不能通**，只测一个域名会得出错误结论 |
+| 26 项测试**一夜之间全红**，而我只改了"文件怎么摆" | 控制台从单文件拆成 `index.html` + `app.css` + `app.js` 之后，`tests/test_console.py` 那批静态断言还在**只读 index.html** —— JS 已经不在里面了，26 项一起红 | 不让断言跟着重写（重写就有漏的风险），而是**改 fixture**：新增 `console_html()` 把外链内联回去，返回"浏览器真正看到的东西"。这些断言守的是**行为**不是文件布局，拆不拆文件是实现细节。顺带 `test_the_inline_script_parses` 从此是真的在 `node --check` 校验 app.js |
+
+---
+
+## 2026-09-29 新增能力（"让人用得舒服"那一层）
+
+| 能力 | 用法 | 为什么这么设计 |
+|---|---|---|
+| **数据自动刷新** | 控制台每 30 秒自己拉一次 | `document.hidden` 时跳过 —— 页面在后台还轮询是白烧连接 |
+| **最后更新时间** | 面板标题右侧「更新于 19:52:31」 | 自动刷新最怕的是"不知道这数据是多新的"，所以更新时间必须露出来 |
+| **批量审批** | 勾几条 → 「批量通过」，或 `POST /api/reservations/batch-review` | 失败项**逐条报原因**，不是整批回滚 —— 整批回滚意味着 9 条成功被 1 条失败连坐。上限 50，仅管理员 |
+| **导出 CSV** | 预约面板「导出 CSV」 | **权限口径与列表一致**（非管理员只导自己的）。另：带 UTF-8 BOM，Excel 直接打开不乱码 |
+| **移动端断点** | 把窗口拉窄 | 补了 860 / 640 两档，表格横向滚动而不是压成竖排 |
+| **对话流式** | `POST /api/agent/chat/stream`（SSE） | 逐节点推「意图识别 → 检索 → 下单 → 回复」，前端有「停止生成」。**流式与不流式必须给出同一个结果**，这条由测试钉住（否则流式就是另一个实现，两份行为迟早分叉） |
+| **手动重发通知** | `python main.py notify --retry-failed` 或 `POST /api/notifications/retry` | 失败的通知**刻意不自动重发** —— 通知发错人比不发更糟，重发要由人确认后手动触发 |
+| **OpenAPI 契约检查** | `python scripts/check_openapi.py --check` | 生成 `docs/openapi.json` 并与当前代码比对，漂移就退出码 1（CI 里也跑）。**接口形状是契约，不该靠"碰巧有人用到"来发现变更** |
+
+**一个连带修正**：控制台拆成三份后，`/static/{name}` 走**白名单**而不是 `StaticFiles` 目录挂载
+（挂载会引入路径穿越面）。想要单文件时跑 `python build_web.py`，产出 `dist/console.html`。
+
+**演示脚本**：`docs/DEMO-SCRIPT.md` 第 6 节给了这八项的演法与台词。
 
 ---
 
 ## 验证
 
 ```bash
-pytest                          # 803 passed
+pytest                          # 964 passed
 python main.py eval             # 14/14（mock 模型）
-python main.py loadtest -c 40 -r 3
-python main.py access-demo      # 8/8（人员准入：未预约拦截 / 单次核销 / 容量）
-python main.py migrate          # 0001 → 0005，结构校验与代码一致
+python main.py loadtest --concurrency 40 --rounds 3
+python main.py access-demo      # 8/8，但**只在实验室开放时段内**才全绿
+                                #   （脚本用 now_local() 取当天，未钉时钟；
+                                #    闭馆时段跑会以 lab_closed 失败 —— 见下方说明）
+python main.py migrate          # 0001 → 0006，结构校验与代码一致
 python main.py sweep            # 5/5 项完成
 python main.py notify           # 投递待发通知（没配 SMTP 会如实报告"跳过 N 条"）
+python main.py notify --retry-failed   # 把失败的通知重新入队（不自动重发，要人确认）
 python main.py backup           # SQLite 走 VACUUM INTO / PostgreSQL 走 pg_dump
 python scripts/overlap_race.py  # 3/3
 python scripts/sweep_demo.py    # 18/18（真实 SQLite 文件上的清扫端到端）
-python scripts/smoke_http.py    # 83/83（真实 uvicorn 进程，含 react 模式与降级链）
+python scripts/smoke_http.py    # 84/84（真实 uvicorn 进程，含 react 模式与降级链）
 python scripts/accept_deploy.py  # 25/25（真 compose 栈：真 PG + 真容器 + 真下单）
+python scripts/check_openapi.py --check   # OpenAPI 契约未漂移则静默通过
+python build_web.py             # 打包单文件控制台 → dist/console.html
 ```
 
 ```
-pytest:            803 passed
+pytest:            964 passed（32 个测试文件，`pytest --collect-only -q`）
 评测报告:           意图准确率 100.0% · 槽位准确率 100.0% · 端到端通过率 100.0%（14/14）
-并发压测:           3 轮 × 40 并发，每轮恰好 1 成功
+并发压测:           3 轮 × 40 并发，每轮恰好 1 成功、39 明确冲突、0 异常
 区间重叠竞态:        3/3 未超卖
 人员准入:           8/8（含 2 人并发抢容量 1 的房间，恰好 1 人放行）
+                    ⚠️ 只在**实验室开放时段内**全绿：脚本用 now_local() 取当天，
+                       没有像 smoke_http.py 那样把「现在」钉在 12:00，
+                       所以闭馆时段跑会以 lab_closed / no_permit 失败。
+                       这不是功能问题，是脚本的时钟依赖 —— 但半夜跑一次很容易
+                       被误读成「准入坏了」。要么闭上馆时别跑，要么给它钉时钟。
 后台清扫:           18/18（忘刷出场被解开 / 过期预约释放占用格 / 归档先落盘后删除）
 日志与请求关联:      75 项（JSON 单行 / id 跨审计与门禁贯穿 / 注入被丢弃 / 413 也带 id / 身份不串味）
-指标与健康检查:      72 项（文本格式逐行校验 / 路由模板而非真实 path / 基数上限与丢弃计数 / p95 误差实测 / 三档健康检查）
-数据库迁移:         23 项（产物 vs 模型 diff 为空 / 部分索引 WHERE 未丢 / 回滚可往返 / 老库接管 / **给有数据的表加列**）
-HTTP 越权清单:       83/83（含 deterministic / react / degraded / 端点不可达四种启动配置）
-compose 实机验收:     25/25（PostgreSQL 上 revision=0005 / 容器 healthy / 真下单 201 / 重约 409）
+指标与健康检查:      76 项（文本格式逐行校验 / 路由模板而非真实 path / 基数上限与丢弃计数 / p95 误差实测 / 三档健康检查）
+数据库迁移:         27 项（产物 vs 模型 diff 为空 / 部分索引 WHERE 未丢 / 回滚可往返 / 老库接管 / **给有数据的表加列**）
+HTTP 越权清单:       84/84（含 deterministic / react / degraded / 端点不可达四种启动配置）
+compose 实机验收:     25/25（PostgreSQL 上 revision=0006 / 容器 healthy / 真下单 201 / 重约 409）
 
 真实栈上的**试用报告**（走完预约→审批→门禁→违约→清扫→备份恢复六个环节，
 含摩擦点清单与已修项）见 [`docs/TRIAL-RUN.md`](docs/TRIAL-RUN.md)。
@@ -1004,13 +1035,14 @@ compose 实机验收:     25/25（PostgreSQL 上 revision=0005 / 容器 healthy 
 
 **现场演示怎么做**（五分钟主线 / 六十秒版 / 被追问时的深挖点 / 翻车预案）
 见 [`docs/DEMO-SCRIPT.md`](docs/DEMO-SCRIPT.md)。
-后台维护 CRUD:      38 项（新增/改字段/显式 null 不动 / 停用即失效 / **没有删除路由** / 冲突与越权）
-设备级审批:         11 项（申请即占坑 / 驳回释放时段 / 重复处理 409 / 非管理员拿不到待办）
+后台维护 CRUD:      34 项（新增/改字段/显式 null 不动 / 停用即失效 / **没有删除路由** / 冲突与越权）
+设备级审批:         9 项（申请即占坑 / 驳回释放时段 / 重复处理 409 / 非管理员拿不到待办）
 通知:               22 项（四类业务事件都留痕 / 没配 SMTP 不假装成功 / 失败留原因不重发 / **通知崩了不影响下单**）
 登录锁定:           18 项（按来源地址+用户名计数 / 锁定期间正确口令也进不去 / 过期锁丢掉旧记录 / 锁定不写审计）
-违约判定:           37 项（**无门禁流水就不判** / 迟到在宽限内不算 / 被门口拦下不算到场 / 默认只记不罚 / 豁免留痕）
+违约判定:           39 项（**无门禁流水就不判** / 迟到在宽限内不算 / 被门口拦下不算到场 / 默认只记不罚 / 豁免留痕）
 预约分页:           5 项（不传 limit 行为不变 / 总数走 X-Total-Count / 越界 422 / 不放大可见范围）
 备份与恢复:         含恢复演练（没演练过的备份不算备份）
+下单幂等键:         3 项（同键重试只回放首次结果 / 换时段重试也不重复落单 / 键按用户隔离）
 ```
 
 静态检查（与 CI 同一套 —— 注意是 `ruff check .`，不是只在 `src tests` 上跑）：
