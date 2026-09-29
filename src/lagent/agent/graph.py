@@ -391,15 +391,20 @@ class LabBookingAgent:
     # 对外入口
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
-    def _initial_state(self, req: ChatRequest) -> AgentState:
+    def _initial_state(self, req: ChatRequest, user_id: int) -> AgentState:
         """`ainvoke` 与 `astream` 共用的起始状态。
 
         抽出来是因为**两边必须逐字一致** —— 差一个字段就会出现
         "流式走通了、但拿不到方案"这种只在一条路径上复现的怪事。
+
+        `user_id` 单独成参而不是从 `req` 里取：``ChatRequest.user_id`` 声明成
+        ``int | None``（允许调用方暂时拿不到身份），而 ``AgentState.user_id`` 是
+        ``int``。把已校验的身份**显式传进来**，等于让类型系统替我们记住
+        "调用方已经证明过身份了" —— 否则这条不变量只在注释里，改代码的人看不见。
         """
         return {
             "message": req.message,
-            "user_id": req.user_id,
+            "user_id": user_id,
             "session_id": req.session_id,
             "accept_equipment_id": req.accept_equipment_id,
             "accept_date": req.accept_date,
@@ -432,7 +437,7 @@ class LabBookingAgent:
 
         final: dict[str, Any] | None = None
         seen = 0
-        async for state in self.graph.astream(self._initial_state(req),
+        async for state in self.graph.astream(self._initial_state(req, req.user_id),
                                               stream_mode="values"):
             final = state
             trace = state.get("trace") or []
@@ -471,7 +476,7 @@ class LabBookingAgent:
                 trace=[TraceStep(node="degrade", detail="模型未配置或已关闭，走引导式表单")],
             )
 
-        final = await self.graph.ainvoke(self._initial_state(req))
+        final = await self.graph.ainvoke(self._initial_state(req, req.user_id))
 
         intent = final.get("intent")
         return ChatResponse(

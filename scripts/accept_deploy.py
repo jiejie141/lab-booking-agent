@@ -229,10 +229,26 @@ def main(argv: list[str] | None = None) -> int:
     rep.section("[7] 控制台")
     status, html = api("GET", "/")
     rep.check("控制台页面可访问", status == 200, f"HTTP {status}")
+
+    # 2026-09-29：控制台从单文件拆成了 index.html + app.css + app.js。
+    # 拆分后 `/` 返回的只是 HTML 骨架，逻辑全在 app.js 里 ——
+    # 于是「页面含对话入口」这条断言在容器里直接红了（24/25），
+    # 而后端的 /api/agent/chat 一直是好的，看接口完全发现不了。
+    #
+    # 所以这里检查的是**交付到用户手上的整个控制台**：HTML + JS + CSS。
+    # 顺带把"资源取得到"也钉住 —— 这正是「打包/镜像漏文件」那类问题，
+    # 它在源码目录里跑得好好的，只有装完才炸。
+    console_src = html if isinstance(html, str) else ""
+    for asset in ("app.js", "app.css"):
+        astatus, abody = api("GET", f"/static/{asset}")
+        rep.check(f"/static/{asset} 可访问", astatus == 200, f"HTTP {astatus}")
+        if isinstance(abody, str):
+            console_src += "\n" + abody
+
     if isinstance(html, str):
         # 这条验的是"P0-3 真的交付到了用户手上"：后端有接口不等于用户点得到。
         rep.check("页面含「直接预约」面板（不走模型的那条路）", 'id="pane-book"' in html)
-        rep.check("页面含对话入口（两条路并存）", "/api/agent/chat" in html)
+        rep.check("页面含对话入口（两条路并存）", "/api/agent/chat" in console_src)
 
     # ---- 8. 收尾 --------------------------------------------------------
     rep.section("[8] 收尾")

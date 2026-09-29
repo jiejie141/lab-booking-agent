@@ -637,8 +637,8 @@ class TestChatStreaming:
         # 没有这个头，反代会把流缓冲起来 —— 界面表现是"最后一次性全出来"
         assert r.headers.get("x-accel-buffering") == "no"
 
-        frames = [json.loads(l[6:]) for l in r.text.splitlines()
-                  if l.startswith("data: ")]
+        frames = [json.loads(line[6:]) for line in r.text.splitlines()
+                  if line.startswith("data: ")]
         assert frames, r.text[:300]
         kinds = [f["type"] for f in frames]
         assert kinds[-1] == "done", kinds
@@ -666,8 +666,8 @@ class TestChatStreaming:
 
         r = await http.post("/api/agent/chat/stream",
                             json={**body, "session_id": "t-cmp"}, headers=headers)
-        frames = [json.loads(l[6:]) for l in r.text.splitlines()
-                  if l.startswith("data: ")]
+        frames = [json.loads(line[6:]) for line in r.text.splitlines()
+                  if line.startswith("data: ")]
         streamed = frames[-1]["data"]
 
         assert streamed["reply"] == plain["reply"]

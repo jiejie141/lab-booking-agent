@@ -502,4 +502,5 @@ class TestManualRequeue:
         await requeue(None)
         async with session_scope() as s:
             row = await s.get(Notification, sent_id)
+        assert row is not None, "刚写的通知读不回来，这条断言就没在验它想验的事"
         assert row.status == "sent", "已发送的通知被重发队列改动了"

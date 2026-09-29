@@ -857,7 +857,7 @@ class TestBatchReview:
         bogus = 999999
 
         r = await http.post("/api/reservations/batch-review",
-                            json={"ids": ids + [bogus], "approve": True},
+                            json={"ids": [*ids, bogus], "approve": True},
                             headers=admin)
         assert r.status_code == 200, r.text
         body = r.json()

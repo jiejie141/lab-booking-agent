@@ -69,3 +69,14 @@ exclude = ["src/lagent/web/"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+# 控制台属于包的一部分（`lagent.api` 直接读它）。
+#
+# ⚠️ 2026-09-29：前端拆成 index.html + app.css + app.js 之后，这里如果什么都不写，
+# `pip install` 出来的包会**缺 CSS 与 JS** —— 源码目录里跑得好好的，
+# 只有装完才炸。browser 项目同一轮踩到过，所以两边一起补。
+#
+# 注意：本项目的 Dockerfile 走 `COPY . .` 而不是 pip install，所以容器里不缺 ——
+# 也就是说**Docker CI 绿了不代表这条没问题**。缺了它，坏的是"别人 pip 装你的包"这条路。
+lagent = ["web/*.html", "web/*.css", "web/*.js"]
