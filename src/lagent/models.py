@@ -90,6 +90,79 @@ EQUIPMENT_STATUSES: tuple[str, ...] = (
 USER_ROLES: tuple[str, ...] = (ROLE_USER, ROLE_ADMIN, ROLE_SYSADMIN)
 
 # ---------------------------------------------------------------------------
+# 角色等级与能力点
+#
+# 为什么要有这一层：``User.role`` 是个裸字符串，而所有鉴权都在做
+# ``role in (admin, sysadmin)`` 这种**字符串集合比较**。它有两个后果：
+#
+# 1. 角色清单散落多处（models / security / 前端各写一份），加一个角色要手改三处，
+#    漏改的那处**不报错** —— 前端漏改的表现是标签页永远不出现；
+# 2. 权限是二元的（要么全部、要么仅自己），**数据结构上就装不下**
+#    "设备管理员只管一栋楼"这类真实存在的中间态。
+#
+# 于是把"角色"翻译成一个**等级**（用于比较大小，堵提权面）和一组**能力点**
+# （用于判定，不再比字符串）。角色可以加，判定代码不用动。
+#
+# ⚠️ 等级不是"权力大小"的审美排序，它唯一的作用比较：
+#    「能不能把别人设成/改成这个角色」必须要求 actor 的等级**严格更高**。
+ROLE_RANK: dict[str, int] = {
+    ROLE_USER: 0,
+    ROLE_ADMIN: 1,
+    ROLE_SYSADMIN: 2,
+}
+
+# 能力点词汇表。命名刻意用 ``域.动作.范围``，是为了让"这个能力管到哪一层"
+# 从名字上就能看出来，而不是去读实现。
+CAP_USER_READ_ALL = "user.read.all"          # 看全量用户（花名册）
+CAP_USER_MANAGE = "user.manage"              # 建号 / 改号（不含改角色）
+CAP_ROLE_MANAGE = "role.manage"              # 改别人的角色 —— sysadmin 独有
+CAP_RESERVATION_APPROVE = "reservation.approve"
+CAP_RESERVATION_EXPORT = "reservation.export"
+CAP_AUDIT_READ = "audit.read"
+CAP_NOTIFY_RETRY = "notify.retry"
+
+# 角色 → 能力点。
+#
+# 关键在最后一行：``CAP_ROLE_MANAGE`` 只有 sysadmin 有。
+# 这一条就是「sysadmin 与 admin 的真实差异」—— 在此之前两个角色在
+# ``Principal.is_admin`` 里完全等价，所谓三级角色只存在于类型标注里。
+ROLE_CAPS: dict[str, tuple[str, ...]] = {
+    ROLE_USER: (),
+    ROLE_ADMIN: (
+        CAP_USER_READ_ALL,
+        CAP_USER_MANAGE,
+        CAP_RESERVATION_APPROVE,
+        CAP_RESERVATION_EXPORT,
+        CAP_AUDIT_READ,
+        CAP_NOTIFY_RETRY,
+    ),
+    ROLE_SYSADMIN: (
+        CAP_USER_READ_ALL,
+        CAP_USER_MANAGE,
+        CAP_ROLE_MANAGE,
+        CAP_RESERVATION_APPROVE,
+        CAP_RESERVATION_EXPORT,
+        CAP_AUDIT_READ,
+        CAP_NOTIFY_RETRY,
+    ),
+}
+
+
+def role_rank(role: str) -> int:
+    """未知角色一律按最低等级处理（fail-closed）。
+
+    不抛异常是刻意的：``role`` 在数据库里是 ``String(16)`` 没有约束，
+    历史数据里可能有我们没见过的取值。把它当成等级最低，
+    至少不会让一条脏数据获得管理员权限。
+    """
+    return ROLE_RANK.get(role, 0)
+
+
+def role_capabilities(role: str) -> tuple[str, ...]:
+    """未知角色没有任何能力点（同样是 fail-closed）。"""
+    return ROLE_CAPS.get(role, ())
+
+# ---------------------------------------------------------------------------
 # 人员准入（门禁）：让「进实验室」这件事从"没人管"变成可判定、可追溯
 #
 # 与设备预约的关系：设备预约回答「这台仪器这个时段归谁」，

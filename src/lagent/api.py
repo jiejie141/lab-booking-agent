@@ -113,16 +113,23 @@ from .metrics import (
 )
 from .models import (
     ACTIVE_STATUSES,
+    CAP_ROLE_MANAGE,
     DENY_IDENTITY_MISMATCH,
     EQUIPMENT_NORMAL,
     PERMIT_CHECKED_IN,
+    ROLE_ADMIN,
+    ROLE_CAPS,
+    ROLE_RANK,
     STATUS_PENDING,
+    USER_ROLES,
     EntryPermit,
     Equipment,
     Laboratory,
     Notification,
     Reservation,
     User,
+    role_capabilities,
+    role_rank,
 )
 from .obs import (
     REQUEST_ID_HEADER,
@@ -152,6 +159,7 @@ from .schemas import (
     LabCreate,
     LabUpdate,
     LoginRequest,
+    MeOut,
     RescheduleRequest,
     ReservationCreate,
     RetryNotificationRequest,
@@ -639,6 +647,91 @@ async def require_admin(user: Principal = Depends(current_user)) -> Principal:
     return user
 
 
+def _assert_can_grant_role(actor: Principal, role: str) -> None:
+    """★ 提权不变量：不能把别人设成 / 改成不低于自己的角色。
+
+    **角色一旦可配，"谁能把谁设成什么"就成了一条提权路径。**
+    这是给角色体系加层级时后果最重、也最容易漏的一条：漏掉它，
+    任何 admin 都能把自己提权成 sysadmin，于是新加的层级被一句话绕过
+    —— 而现在因为 admin 与 sysadmin 完全同权，漏了也看不出来。
+
+    为什么用**等级**而不是角色名比较：新加角色只要登记进 ``ROLE_RANK``，
+    这条规则自动生效，不用回来改判定。写成 ``role in ("admin","sysadmin")``
+    就是又一份散落的清单。
+
+    第二道锁是给"授予管理类角色"加的：把任何人设成 admin 及以上，
+    额外需要 ``role.manage``（sysadmin 独有）。
+    这一条就是 **sysadmin 与 admin 的真实差异** —— 在此之前两者在
+    ``Principal.is_admin`` 里完全等价，所谓三级角色只存在于类型标注里。
+    """
+    if role not in USER_ROLES:
+        raise DomainError(
+            status_code=422,
+            detail=f"未知角色 {role}（合法取值：{', '.join(USER_ROLES)}）",
+            reason="unknown_role",
+        )
+    if role_rank(role) >= actor.rank:
+        raise DomainError(
+            status_code=403,
+            detail=(
+                f"不能把角色设成 {role}：目标角色等级 {role_rank(role)} "
+                f"必须低于你自己的等级 {actor.rank}（{actor.role}）"
+            ),
+            reason="role_escalation",
+        )
+    if role_rank(role) >= ROLE_RANK[ROLE_ADMIN] and not actor.can(CAP_ROLE_MANAGE):
+        raise DomainError(
+            status_code=403,
+            detail=f"授予管理类角色（{role}）需要 sysadmin：只有它能决定谁是管理员",
+            reason="role_manage_required",
+        )
+
+
+def _assert_can_modify_user(
+    actor: Principal,
+    target_role: str,
+    *,
+    target_is_self: bool = False,
+) -> None:
+    """不能修改等级不低于自己的账号 —— 否则 admin 能改掉 sysadmin 的口令。
+
+    ★ ``target_is_self`` 是**刻意**留的口子：改自己的资料（比如给自己补一条
+    资质）是正常操作，不该被"等级不低于自己"挡住 ——
+    自己的等级当然等于自己。
+
+    真正危险的"改自己"只有改角色那一件（把自己降成普通用户就没人能改回来），
+    那条在调用处单独用 **400** 挡着（见 users_update 开头），
+    并且留在那里而不是并进这里：两者的语义不同，
+    一个是"越权"（403），一个是"会把自己锁死"（400）。
+    """
+    if target_is_self:
+        return
+    if role_rank(target_role) >= actor.rank:
+        raise DomainError(
+            status_code=403,
+            detail=(
+                f"不能修改该账号：它的角色等级 {role_rank(target_role)} "
+                f"不低于你的等级 {actor.rank}（{actor.role}）"
+            ),
+            reason="role_escalation",
+        )
+
+
+# ---------------------------------------------------------------------------
+# 角色清单自检：让 USER_ROLES 真的成为"单一来源"
+#
+# 在此之前 ``USER_ROLES`` 全仓**没有任何一处消费它** —— 它看起来是单一来源，
+# 实际上加角色时漏登记也不会有人报错。后果是那个角色的账号
+# 一个能力点都没有：**不报错，只是安静地什么都做不了**，
+# 表现和"权限配置错了"一模一样，只能靠人去猜。
+# ---------------------------------------------------------------------------
+_INCOMPLETE_ROLES = [r for r in USER_ROLES if r not in ROLE_RANK or r not in ROLE_CAPS]
+if _INCOMPLETE_ROLES:  # pragma: no cover - 配置错误，不该在正常路径上出现
+    raise RuntimeError(
+        f"角色 {_INCOMPLETE_ROLES} 只加进了 USER_ROLES，却没在 ROLE_RANK / ROLE_CAPS 里登记。"
+    )
+
+
 async def chat_quota(
     request: Request, user: Principal = Depends(current_user)
 ) -> Principal:
@@ -745,18 +838,34 @@ async def login(body: LoginRequest, request: Request) -> TokenResponse:
     return TokenResponse(
         access_token=token,
         expires_in=settings.jwt_ttl_minutes * 60,
-        user=UserOut.model_validate(row),
+        user=_me_out(row),
     )
 
 
-@router.get("/api/auth/me", response_model=UserOut)
-async def me(user: Principal = Depends(current_user)) -> UserOut:
+def _me_out(row: User) -> MeOut:
+    """本人视图：在 ``UserOut`` 之外补上 ``rank`` 与 ``capabilities``。
+
+    这两个字段由 ``models.ROLE_RANK`` / ``ROLE_CAPS`` 推导，而不是在这里
+    再写一份角色清单 —— 否则就是第四次把清单抄一遍，加角色时又要改一处。
+    """
+    return MeOut(
+        id=row.id,
+        username=row.username,
+        role=row.role,
+        certs=list(row.certs or []),
+        rank=role_rank(row.role),
+        capabilities=list(role_capabilities(row.role)),
+    )
+
+
+@router.get("/api/auth/me", response_model=MeOut)
+async def me(user: Principal = Depends(current_user)) -> MeOut:
     """回显当前令牌对应的身份，供控制台启动时校验 token 是否还有效。"""
     async with session_scope() as session:
         row = await session.get(User, user.user_id)
     if row is None:
         raise HTTPException(status_code=401, detail="令牌对应的用户已不存在")
-    return UserOut.model_validate(row)
+    return _me_out(row)
 
 
 # ==========================================================================
@@ -1419,6 +1528,9 @@ async def users_create(
     ``certs`` 里给的类别会同时写进授权记录（``cert_grants``），
     否则会出现"能约设备却进不了门"（详见 ``domain/catalog.sync_certs``）。
     """
+    # ★ 角色可配 = 提权面。建号这一步必须过不变量，否则"造一个管理员"
+    # 就成了一条绕过角色层级的一行命令（详见 _assert_can_grant_role）。
+    _assert_can_grant_role(admin, body.role)
     try:
         async with session_scope() as session:
             user = await create_user(session, body)
@@ -1451,6 +1563,13 @@ async def users_update(
         user = await session.get(User, user_id)
         if user is None:
             raise HTTPException(status_code=404, detail=f"用户 {user_id} 不存在")
+        # ★ 两道锁，缺一不可：
+        # ① 不能改等级不低于自己的账号（否则 admin 能改掉 sysadmin 的口令）
+        # ② 不能把人改成不低于自己的角色（否则 admin 能把自己提权）
+        # 顺序有讲究：先查"能不能碰这个账号"，再查"想改成什么"。
+        _assert_can_modify_user(admin, user.role, target_is_self=user_id == admin.user_id)
+        if body.role is not None:
+            _assert_can_grant_role(admin, body.role)
         try:
             await update_user(session, user, body)
         except CatalogError as exc:
@@ -1484,6 +1603,9 @@ async def users_deactivate(
         user = await session.get(User, user_id)
         if user is None:
             raise HTTPException(status_code=404, detail=f"用户 {user_id} 不存在")
+        # ★ 与"改账号"同一条规则：不能动等级不低于自己的账号。
+        # 否则 admin 之间可以互相停用，而"谁才是管理员"会取决于谁手快。
+        _assert_can_modify_user(admin, user.role)
         await deactivate_user(session, user)
         name = user.username
 

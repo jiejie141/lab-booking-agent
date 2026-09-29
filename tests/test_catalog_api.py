@@ -541,19 +541,55 @@ class TestUserMaintenance:
         真正会把系统锁死的只有"把自己停用掉"，那条单独有保护。
         而"停用不改角色、也不删行"，所以停用第二个管理员之后
         仍然统计得到 1 个管理员，不会降到 0。
+
+        ★ 操作者必须是 sysadmin：造第二个管理员属于**提权**，
+        admin 无权造出与自己同级（rank 都是 1）的账号；
+        同理 admin 也无权停用同级账号 —— 这两条都由
+        ``_assert_can_grant_role`` / ``_assert_can_modify_user`` 守着，
+        见 tests/test_roles.py。所以这里换 sysadmin 上场。
         """
-        admin = await as_user("管理员")
+        sysadmin = await as_user("系统管理员")
         second = await http.post(
             "/api/users",
             json={"username": "副管理员", "email": "v@example.com", "role": ROLE_ADMIN,
                   "password": "long-enough"},
-            headers=admin,
+            headers=sysadmin,
         )
         assert second.status_code == 201, second.text
         resp = await http.post(
-            f"/api/users/{second.json()['id']}/deactivate", headers=admin
+            f"/api/users/{second.json()['id']}/deactivate", headers=sysadmin
         )
         assert resp.status_code == 200, resp.text
+
+        # 停用不改角色：他仍然是 admin，只是登不进去了
+        assert (
+            await http.post(
+                "/api/auth/login",
+                json={"username": "副管理员", "password": "long-enough"},
+            )
+        ).status_code == 401
+
+    async def test_an_admin_cannot_deactivate_a_peer_admin(self, http, as_user):
+        """同级不相管：admin 停用不了另一个 admin（403 role_escalation）。
+
+        这不是"忘了放行"，而是有意的 —— 否则两个管理员可以互相把对方
+        停掉，撞成 0 管理员。要停用同级账号，得找 sysadmin。
+        """
+        sysadmin = await as_user("系统管理员")
+        second = await http.post(
+            "/api/users",
+            json={"username": "同僚", "email": "p@example.com", "role": ROLE_ADMIN,
+                  "password": "long-enough"},
+            headers=sysadmin,
+        )
+        assert second.status_code == 201, second.text
+
+        admin = await as_user("管理员")
+        resp = await http.post(
+            f"/api/users/{second.json()['id']}/deactivate", headers=admin
+        )
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["reason"] == "role_escalation"
 
     async def test_cannot_change_your_own_role(self, http, as_user):
         """不能改自己的角色：降成普通用户之后就没人能改回来了。"""

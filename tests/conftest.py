@@ -25,8 +25,12 @@ if str(SRC) not in sys.path:
 # 所以测试里降低它不损失覆盖面，只省时间。
 TEST_KDF_N = "1024"
 
-# 演示账号（与 seed.USERS 同一份，README 也列了）
-DEMO_PASSWORD = {"张伟": "zhangwei@123", "李娜": "lina@123", "管理员": "admin@123"}
+# 演示账号口令。**从 seed.DEMO_ACCOUNTS 派生，不在这里再抄一份** ——
+# 抄一份的后果是加演示账号时两边不同步：seed 里建了号，测试里却没有口令，
+# 于是"新账号登录"这条用例会以 401 失败，而人只会去查登录接口。
+from lagent.seed import DEMO_ACCOUNTS  # noqa: E402  （必须在 sys.path 调整之后）
+
+DEMO_PASSWORD: dict[str, str] = dict(DEMO_ACCOUNTS)
 
 
 @pytest.fixture

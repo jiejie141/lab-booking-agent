@@ -41,7 +41,7 @@ function toast(msg,kind){
   $("#toasts").appendChild(el);
   setTimeout(()=>{el.style.opacity="0";setTimeout(()=>el.remove(),240);},3200);
 }
-async function api(path,opts){
+async function apiFull(path,opts){
   const o=Object.assign({},opts||{});
   o.headers=Object.assign({"Content-Type":"application/json"},o.headers||{});
   const t=tokenApi.get();
@@ -58,14 +58,26 @@ async function api(path,opts){
     const detail=(body&&(body.detail||body.message))||("HTTP "+r.status);
     const err=new Error(detail); err.status=r.status; throw err;
   }
-  return body;
+  return {body, headers:r.headers};
 }
+async function api(path,opts){ return (await apiFull(path,opts)).body; }
 const SKEL = {card:'<div class="skel sk-card"></div>',row:'<div class="skel sk-row"></div>'};
 const skel=(n,t)=>SKEL[t||"row"].repeat(n);
 
 /* ---------- 状态 ---------- */
 const state={ users:[], equipment:new Map(), session:"web-"+Math.random().toString(36).slice(2,8), busy:false, me:null };
-const isAdmin = ()=> !!state.me && (state.me.role==="admin"||state.me.role==="sysadmin");
+/* 权限判定：问"我有没有这个能力"，而不是问"我的角色叫什么"。
+ *
+ * 在此之前这里写的是 role==="admin"||role==="sysadmin" ——
+ * 等于把角色清单抄了一份到前端。加一个角色要改三处（models / security / 前端），
+ * 而**前端这处漏改不报错**：表现是管理员的标签页永远不出现，谁也说不清为什么。
+ *
+ * 现在 /api/auth/me 与登录响应都会下发 capabilities / rank，
+ * 前端只需要查自己有没有某个能力点 —— 它不需要知道世界上有哪些角色名。
+ */
+const can = (cap)=> !!state.me && (state.me.capabilities||[]).includes(cap);
+const isAdmin = ()=> can("user.read.all");
+const isSysadmin = ()=> can("role.manage");
 
 /* ---------- 登录闸门 ---------- */
 function gateError(msg){ const el=$("#lg-err"); el.textContent=msg||""; el.classList.toggle("on",!!msg); }
@@ -184,6 +196,8 @@ async function loadHealth(){
 }
 
 /* ---------- 用户目录（管理员） ---------- */
+/* 一次最多渲染多少人。种子可以灌到几百个账号，全表渲染会把页面拖死。 */
+const DIRECTORY_LIMIT = 200;
 async function loadUserDirectory(){
   const box=$("#users-box"), filter=$("#flt-user");
   if(!isAdmin()){
@@ -197,10 +211,25 @@ async function loadUserDirectory(){
   filter.hidden=false;
   box.innerHTML=skel(3,"row");
   try{
-    state.users=await api("/api/users");
+    // ★ 必须带 limit：种子可以批量灌几百个账号（seed_demo_users），
+    // 不带 limit 就是一次把全表拉下来再渲染成几百行 —— 页面直接卡死。
+    // 总数走 X-Total-Count，所以"只看到一部分"这件事要**写在界面上**，
+    // 否则管理员会以为库里就这些人。
+    const {body, headers}=await apiFull(`/api/users?limit=${DIRECTORY_LIMIT}`);
+    state.users=body||[];
+    state.userTotal=Number(headers.get("X-Total-Count")||state.users.length);
     filter.innerHTML='<option value="">全部用户</option>'
       + state.users.map(u=>`<option value="${u.id}">${esc(u.username)}</option>`).join("");
-    box.innerHTML='<table><thead><tr><th>ID</th><th>用户</th><th>角色</th><th>准入资质</th></tr></thead><tbody>'
+    const scope = state.userTotal>state.users.length
+      ? `<div class="empty">共 ${state.userTotal} 个账号，此处展示前 ${state.users.length} 个（用上方筛选器按人查看）</div>`
+      : "";
+    // 把权限层级**显示出来**：不然 sysadmin 登录后界面和 admin 一模一样，
+    // 第三级角色就只在代码里存在。
+    const tier = isSysadmin()
+      ? "当前身份：系统管理员 —— 可以决定谁是管理员"
+      : "当前身份：管理员 —— 不能调整角色，也不能碰同级/更高级的账号";
+    box.innerHTML=`<div class="empty">${esc(tier)}</div>${scope}`
+      + '<table><thead><tr><th>ID</th><th>用户</th><th>角色</th><th>准入资质</th></tr></thead><tbody>'
       + state.users.map(u=>{
           const roleTag = u.role==="user" ? '<span class="tag">user</span>'
             : '<span class="tag warn">'+esc(u.role)+'</span>';

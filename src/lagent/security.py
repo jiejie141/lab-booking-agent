@@ -35,7 +35,12 @@ import time
 from pydantic import BaseModel
 
 from .config import get_settings
-from .models import ROLE_ADMIN, ROLE_SYSADMIN, ROLE_USER
+from .models import (
+    CAP_USER_READ_ALL,
+    ROLE_USER,
+    role_capabilities,
+    role_rank,
+)
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -231,8 +236,32 @@ class Principal(BaseModel):
     expires_at: int = 0
 
     @property
+    def rank(self) -> int:
+        """角色等级。用于「能不能把别人设成/改成某角色」这类**比较**判断。"""
+        return role_rank(self.role)
+
+    @property
+    def capabilities(self) -> tuple[str, ...]:
+        return role_capabilities(self.role)
+
+    def can(self, capability: str) -> bool:
+        """**新增鉴权一律用它**，不要再写 ``role in (...)``。
+
+        理由见 models.py 的 ROLE_RANK 注释：字符串集合比较会把角色清单
+        散落到每一处判定里，加一个角色要改 N 处，漏改还不报错。
+        """
+        return capability in self.capabilities
+
+    @property
     def is_admin(self) -> bool:
-        return self.role in (ROLE_ADMIN, ROLE_SYSADMIN)
+        """保留下来兼容既有调用（全仓 12 处）。
+
+        ⚠️ 语义是「至少是管理员」而不是「role == admin」——
+        sysadmin 也会命中。这是**有意的**：现有 12 处判定的是
+        "能不能看全量/能不能批"，sysadmin 当然也该能。
+        新增判定请用 :meth:`can`，它才有真正的区分度。
+        """
+        return self.can(CAP_USER_READ_ALL)
 
 
 def principal_from_token(token: str, *, now_ts: int | None = None) -> Principal:

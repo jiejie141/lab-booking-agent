@@ -12,6 +12,8 @@ from typing import ClassVar
 
 import pytest
 
+from lagent.seed import DEMO_ACCOUNTS
+
 TOMORROW = dt.date.today() + dt.timedelta(days=1)
 
 
@@ -242,7 +244,9 @@ class TestUserDirectory:
 
     async def test_admin_lists_users(self, http, as_user):
         users = (await http.get("/api/users", headers=await as_user("管理员"))).json()
-        assert len(users) == 3
+        # 不写 3：演示账号的数量由 seed.DEMO_ACCOUNTS 一处定义，
+        # 加一个演示账号就改一处，测试不该跟着改（它以前就是这么红的）。
+        assert len(users) == len(DEMO_ACCOUNTS)
         zhang = next(u for u in users if u["username"] == "张伟")
         assert zhang["certs"] == ["光谱"]
 

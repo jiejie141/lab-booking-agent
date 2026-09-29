@@ -733,6 +733,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     seed_parser = sub.add_parser("seed", help="灌入种子数据")
     seed_parser.add_argument("--force", action="store_true", help="清空并重建")
+    seed_parser.add_argument(
+        "--extra-users", type=int, default=None, metavar="N",
+        help="额外生成 N 个合成账号（追加在演示账号之后，演示真实规模用）",
+    )
+    seed_parser.add_argument(
+        "--pending", type=int, default=None, metavar="N",
+        help="额外造 N 条待审批预约（让管理员的审批面板有东西可批）",
+    )
 
     chat_parser = sub.add_parser("chat", help="用一句话和 Agent 对话")
     chat_parser.add_argument("message")
@@ -819,7 +827,11 @@ async def _run(args: argparse.Namespace) -> int:
         # seed() 内部先走 ensure_schema(rebuild=force)：
         # --force 是「删表重建」而不是「只删行」—— 只删行修不了「缺列」，
         # 这也正是 README 那句「要重建请加 --force」曾经失效的原因。
-        info = await seed(force=args.force)
+        info = await seed(
+            force=args.force,
+            extra_users=args.extra_users,
+            pending=args.pending,
+        )
         print(json.dumps(info, ensure_ascii=False, indent=2))
         return 0
     if args.command == "chat":

@@ -329,11 +329,34 @@ class UserOut(BaseModel):
     certs: list[str] = Field(default_factory=list)
 
 
+class MeOut(UserOut):
+    """/api/auth/me 与登录响应里的**本人**视图。
+
+    比 ``UserOut`` 多两个字段，是为了**让前端不再比较角色字符串**：
+
+    * ``rank`` —— 角色等级，用于"能不能碰这个账号"这类比较；
+    * ``capabilities`` —— 能力点清单，用于"有没有这个权限"这类判定。
+
+    在此之前前端写的是 ``role === "admin" || role === "sysadmin"``，
+    也就是把角色清单抄了一份到 JS 里。加一个角色要改三处（models / security / 前端），
+    而**前端那处漏改不报错** —— 表现是管理员的标签页永远不出现。
+
+    下发能力点之后，前端只需要问"我有没有这个能力"，
+    它压根不需要知道世界上有哪些角色名。
+
+    ⚠️ 这两个字段**只出现在本人视图里**，用户目录（``/api/users``）仍用
+    ``UserOut``：花名册没有理由把每个人的能力点摊给看的人。
+    """
+
+    rank: int = 0
+    capabilities: list[str] = Field(default_factory=list)
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     expires_in: int
-    user: UserOut
+    user: MeOut
 
 
 class AuditLogOut(BaseModel):

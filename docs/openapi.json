@@ -989,6 +989,49 @@
         "title": "LoginRequest",
         "type": "object"
       },
+      "MeOut": {
+        "description": "/api/auth/me 与登录响应里的**本人**视图。\n\n比 ``UserOut`` 多两个字段，是为了**让前端不再比较角色字符串**：\n\n* ``rank`` —— 角色等级，用于\"能不能碰这个账号\"这类比较；\n* ``capabilities`` —— 能力点清单，用于\"有没有这个权限\"这类判定。\n\n在此之前前端写的是 ``role === \"admin\" || role === \"sysadmin\"``，\n也就是把角色清单抄了一份到 JS 里。加一个角色要改三处（models / security / 前端），\n而**前端那处漏改不报错** —— 表现是管理员的标签页永远不出现。\n\n下发能力点之后，前端只需要问\"我有没有这个能力\"，\n它压根不需要知道世界上有哪些角色名。\n\n⚠️ 这两个字段**只出现在本人视图里**，用户目录（``/api/users``）仍用\n``UserOut``：花名册没有理由把每个人的能力点摊给看的人。",
+        "properties": {
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "certs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Certs",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "rank": {
+            "default": 0,
+            "title": "Rank",
+            "type": "integer"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "username",
+          "role"
+        ],
+        "title": "MeOut",
+        "type": "object"
+      },
       "Proposal": {
         "description": "一个可用方案。``relaxations`` 是相对原始诉求放宽了哪些约束。",
         "properties": {
@@ -1303,7 +1346,7 @@
             "type": "string"
           },
           "user": {
-            "$ref": "#/components/schemas/UserOut"
+            "$ref": "#/components/schemas/MeOut"
           }
         },
         "required": [
@@ -1854,7 +1897,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/UserOut"
+                  "$ref": "#/components/schemas/MeOut"
                 }
               }
             },

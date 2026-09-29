@@ -10,7 +10,8 @@
 
 | 项 | 命令 / 动作 | 通过标准 |
 |---|---|---|
-| 依赖与库 | `python main.py seed --force` | 输出 JSON：3 labs / 6 equipment / 3 users / demo_date |
+| 依赖与库 | `python main.py seed --force` | 输出 JSON：3 labs / 6 equipment / **4** users / demo_date |
+| 要演"真实规模" | `python main.py seed --force --extra-users 200 --pending 8` | users 变 204、pending_reservations 8、approval_equipment ≥ 1 |
 | 密钥 | `.env` 里 `LAB_JWT_SECRET=`（随机串） | 服务起得来（缺它会 fail-closed 拒绝启动） |
 | 起服务 | `python main.py serve` | 控制台 `http://127.0.0.1:8200` 能开 |
 | 自检 | `python main.py doctor` | 各项 ✓ |
@@ -159,6 +160,11 @@ python main.py loadtest
 
 ### ① 批量审批：N 次点击压成 1 次
 
+⚠️ **前提**：种子默认**一条待审批都不造**（`seed_pending_reservations=0`），
+审批面板打开是空的。要演这条，建库时带 `--pending 8`（或环境变量
+`LAB_SEED_PENDING_RESERVATIONS=8`）—— 它会自动开一台"需审批"的设备，
+否则"要 8 条待办却没有需审批设备"是配置矛盾，会静默产出 0 条。
+
 管理员窗口 → 审批面板 → 勾几条 → 「批量通过」。
 
 > "待办一多，逐条点是最典型的机械重复。
@@ -200,6 +206,47 @@ python main.py loadtest
 > 用户照着它去了实验室，而预约早被取消了。所以只有手动入口：
 > `python main.py notify --retry-failed`。
 > 老实说这个入口原设计里写了、但一直没建，是这轮才补上的。"
+
+### ⑤ 用户规模与角色层级（被问"就这么几个人？"时）
+
+这是**最容易被问到**的一条，主动讲反而加分。默认只灌 4 个演示账号，
+但那不是"系统里只有 4 个人"：
+
+```bash
+python main.py seed --force --extra-users 200 --pending 8
+```
+
+> "演示账号刻意只有 4 个 —— 每个都证明一条不同边界：张伟证明资质约束、
+> 李娜证明能约到他约不到的、管理员证明越权边界、系统管理员证明**角色层级**。
+> 真正要看规模，数量是配置项：`--extra-users 200` 就有了 204 个账号。
+> 合成账号共用口令 `demo@123` 且按固定种子生成 —— scrypt 一次 140ms，
+> 500 个不同口令要 70 秒，共用口令只需算一次。
+>
+> 而且它们不是一堆同质账号：约 5% 没有基础安全资质（进不了任何房间）、
+> 5% 资质过期（提示'该复训'）、5% 资质被撤销（提示'被停权'）——
+> **三种失败是三句不同的话**，这才是演示价值。"
+
+**角色层级这句一定要说**（它回答了"sysadmin 和 admin 有什么区别"）：
+
+> "原先代码里声明了三个角色，但 `is_admin` 把 admin 和 sysadmin
+> 折成了同一个布尔值 —— 三级角色只存在于类型标注里。
+> 现在角色有**等级**（用于比较）和**能力点**（用于判定），
+> sysadmin 独有一项 `role.manage`：只有它能决定谁是管理员。
+> 相应地加了一条提权不变量：**不能把别人设成不低于自己的角色**。
+> 这条漏掉的后果最重 —— 任何 admin 都能把自己提权成 sysadmin；
+> 而因为两者原本同权，**漏了也看不出来**。
+> 我专门写了一个测试钉它：sysadmin 必须至少有一项 admin 没有的能力，
+> 它要是红了就说明层级又被拍平了。"
+
+现场可验证（不用讲，直接敲）：
+
+```bash
+# admin 想把人设成 admin → 403 role_escalation
+curl -X POST localhost:8200/api/users -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"越权","email":"e@example.com","role":"admin","password":"long-enough"}'
+# 换成 sysadmin 的令牌 → 201
+```
 
 ---
 
