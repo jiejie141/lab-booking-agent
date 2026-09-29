@@ -436,3 +436,70 @@ class TestNotificationNeverBreaksTheBusiness:
             await http.post("/api/reservations", json=booking_body(UV), headers=headers)
         assert any("通知入队失败" in record.message % record.args
                    for record in caplog.records)
+
+
+class TestManualRequeue:
+    """失败通知的**手动**重发（2026-09-29 加）。
+
+    模块开头那条取舍（"刻意不自动重发"）依然成立，而且理由很硬：
+    一封迟到的「预约成功」比没有更糟 —— 用户照着它去了实验室，而预约已被取消。
+    所以这里**不是**加自动指数退避（那是错的），而是补上原设计里写了、
+    却一直没建的"由人确认后手动触发"那个入口。
+    """
+
+    async def _make_failed(self, isolated_db, n: int = 2) -> list[int]:
+        from lagent.db import session_scope
+        from lagent.models import Notification
+
+        ids = []
+        async with session_scope() as s:
+            for i in range(n):
+                row = Notification(user_id=2, kind="reservation.created",
+                                   title=f"t{i}", body="b", status="failed",
+                                   error="连接超时")
+                s.add(row)
+                await s.flush()
+                ids.append(row.id)
+        return ids
+
+    async def test_requeue_moves_failed_back_to_pending(self, isolated_db):
+        from lagent.db import session_scope
+        from lagent.models import Notification
+        from lagent.notify import backlog, requeue
+
+        ids = await self._make_failed(isolated_db, 2)
+        assert (await backlog())["failed"] >= 2
+
+        moved = await requeue(ids)
+        assert moved == 2
+        after = await backlog()
+        assert after["failed"] == 0
+        assert after["pending"] >= 2
+
+        # 失败原因必须被清掉：留着它会让下一次成功之后，
+        # 记录里同时有"已发送"和一条陈旧的报错，查起来自相矛盾。
+        async with session_scope() as s:
+            rows = (await s.execute(
+                select(Notification).where(Notification.id.in_(ids))
+            )).scalars().all()
+        assert len(rows) == 2
+        assert all(r.error == "" for r in rows)
+        assert all(r.status == "pending" for r in rows)
+
+    async def test_requeue_only_touches_failed(self, isolated_db):
+        """待发与已发送的不能被"重发"顺手改掉。"""
+        from lagent.db import session_scope
+        from lagent.models import Notification
+        from lagent.notify import requeue
+
+        async with session_scope() as s:
+            sent = Notification(user_id=2, kind="k", title="已发", body="b",
+                                status="sent", error="")
+            s.add(sent)
+            await s.flush()
+            sent_id = sent.id
+
+        await requeue(None)
+        async with session_scope() as s:
+            row = await s.get(Notification, sent_id)
+        assert row.status == "sent", "已发送的通知被重发队列改动了"

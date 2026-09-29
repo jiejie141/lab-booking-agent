@@ -671,6 +671,32 @@ class ReviewRequest(BaseModel):
     reason: str = Field(default="", max_length=200)
 
 
+class BatchReviewRequest(BaseModel):
+    """批量审批一群预约。
+
+    上限 50：再多就该走导出 + 线下处理，而不是在页面上点 ——
+    批量接口把"机械重复"省掉，但它不该变成"一次性改一大片"的工具。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ids: list[int] = Field(..., min_length=1, max_length=50)
+    approve: bool
+    reason: str = Field(default="", max_length=200)
+
+
+class RetryNotificationRequest(BaseModel):
+    """重发失败的通知。``ids`` 为空 = **全部**失败的那些。
+
+    为什么是手动而不是自动重试，见 :func:`lagent.notify.requeue` 的说明 ——
+    一封迟到的「预约成功」比没有更糟。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ids: list[int] = Field(default_factory=list, max_length=200)
+
+
 class UserUpdate(BaseModel):
     """改账号。``password`` 非空即为**重置口令**（管理员重置是常态操作）。
 

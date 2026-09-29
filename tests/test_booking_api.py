@@ -804,3 +804,127 @@ class TestIdempotencyKey:
             "/api/reservations", headers=zhang, json={**base, "start": "16:00", "end": "18:00"}
         )
         assert second.status_code == 201, second.text
+
+
+class TestBatchReview:
+    """批量审批（2026-09-29 加）。
+
+    待办一多，逐条点是最典型的机械重复。这个接口把 N 次点击压成 1 次，
+    但它**不是事务**：能批几条批几条，失败项逐条报原因 ——
+    批量审批里的失败通常不是"环境坏了"而是"这条恰好在别人手里"，
+    整批回滚反而让管理员以为一条都没批。
+    """
+
+    async def _make_pending(self, http, as_user, admin, n: int = 3) -> list[int]:
+        """把 UV 切成需审批，然后造 n 条待审（每条用不同日期避开时段冲突）。"""
+        await http.patch(f"/api/equipment/{UV}",
+                         json={"requires_approval": True}, headers=admin)
+        lina = await as_user("李娜")
+        ids = []
+        for i in range(n):
+            body = dict(payload(UV))
+            body["date"] = (dt.date.today() + dt.timedelta(days=20 + i)).isoformat()
+            r = await http.post("/api/reservations", json=body, headers=lina)
+            assert r.status_code == 201, r.text
+            ids.append(r.json()["reservation"]["id"])
+        return ids
+
+    async def test_batch_approve_all(self, http, as_user):
+        admin = await as_user("管理员")
+        ids = await self._make_pending(http, as_user, admin)
+
+        r = await http.post("/api/reservations/batch-review",
+                            json={"ids": ids, "approve": True}, headers=admin)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["approved"] == len(ids), body
+        assert body["failed"] == []
+
+        # 逐条复核状态真的变了（不能只看接口自己报的数）
+        rows = (await http.get("/api/reservations", headers=admin)).json()
+        by_id = {r["id"]: r for r in rows}
+        for rid in ids:
+            assert by_id[rid]["status"] == "confirmed", (rid, by_id.get(rid))
+
+    async def test_batch_review_reports_failures_per_item(self, http, as_user):
+        """**失败项逐条报原因**，而不是整批失败。
+
+        用一个不存在的 id 混进去：它必须只让那一条失败，
+        其余照常通过 —— 否则管理员会遇到"批了 5 条，回来一条都没动"。
+        """
+        admin = await as_user("管理员")
+        ids = await self._make_pending(http, as_user, admin, n=2)
+        bogus = 999999
+
+        r = await http.post("/api/reservations/batch-review",
+                            json={"ids": ids + [bogus], "approve": True},
+                            headers=admin)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["approved"] == 2
+        assert len(body["failed"]) == 1
+        assert body["failed"][0]["id"] == bogus
+        assert body["failed"][0]["reason"], "失败必须给出机器可读的 reason"
+        assert body["ok"] is False
+
+    async def test_batch_review_requires_admin(self, http, as_user):
+        """非管理员一律 403 —— 批量接口不该成为越权的方便入口。"""
+        headers = await as_user("李娜")
+        r = await http.post("/api/reservations/batch-review",
+                            json={"ids": [1], "approve": True}, headers=headers)
+        assert r.status_code == 403
+
+    async def test_batch_review_rejects_empty_and_oversized(self, http, as_user):
+        admin = await as_user("管理员")
+        assert (await http.post("/api/reservations/batch-review",
+                                json={"ids": [], "approve": True},
+                                headers=admin)).status_code == 422
+        assert (await http.post("/api/reservations/batch-review",
+                                json={"ids": list(range(1, 60)), "approve": True},
+                                headers=admin)).status_code == 422
+
+
+class TestReservationExport:
+    """预约导出 CSV（2026-09-29 加）。"""
+
+    async def test_export_has_bom_and_scopes_to_self(self, http, as_user):
+        lina = await as_user("李娜")
+        await http.post("/api/reservations", json=payload(UV), headers=lina)
+
+        r = await http.get("/api/reservations/export.csv", headers=lina)
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/csv")
+        # BOM：不带的话 Excel 打开中文全是乱码，而"导给 Excel"正是它的用途
+        assert r.content.startswith(b"\xef\xbb\xbf"), "缺 UTF-8 BOM"
+        text = r.content.decode("utf-8-sig")
+        assert "id" in text.splitlines()[0]
+
+    async def test_export_is_scoped_like_the_list(self, http, as_user):
+        """★ 导出的权限口径必须与列表一致。
+
+        导出是最容易漏掉权限的一类接口 —— 另写一份 scope 逻辑迟早会走偏，
+        所以它复用了列表那段判断。这条测试就是钉住"别哪天改成全量"。
+
+        ⚠️ 判据是"**别人的那条在不在**"，不是"行数等于几" ——
+        种子里本来就有预约，按行数断言会随种子变化而假失败（第一版就这么写的）。
+        """
+        lina = await as_user("李娜")
+        zhangwei = await as_user("张伟")
+        mine = await http.post("/api/reservations", json=payload(UV), headers=lina)
+        assert mine.status_code == 201, mine.text
+        my_id = mine.json()["reservation"]["id"]
+
+        other = dict(payload(UV))
+        other["date"] = (dt.date.today() + dt.timedelta(days=33)).isoformat()
+        theirs = await http.post("/api/reservations", json=other, headers=zhangwei)
+        assert theirs.status_code == 201, theirs.text
+        their_id = theirs.json()["reservation"]["id"]
+
+        text = (await http.get("/api/reservations/export.csv", headers=lina)).content.decode("utf-8-sig")
+        body_ids = {line.split(",")[0] for line in text.strip().splitlines()[1:]}
+        assert str(my_id) in body_ids, "自己的预约必须在导出里"
+        assert str(their_id) not in body_ids, "别人的预约绝不能出现在导出里"
+
+    async def test_export_requires_login(self, http):
+        """没令牌不给导 —— 导出不能成为绕过鉴权的侧门。"""
+        assert (await http.get("/api/reservations/export.csv")).status_code == 401

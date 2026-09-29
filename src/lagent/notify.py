@@ -240,3 +240,34 @@ async def backlog() -> dict[str, int]:
     for status, total in rows:
         counts[status] = int(total)
     return counts
+
+
+async def requeue(ids: list[int] | None = None) -> int:
+    """把失败的通知**重新放回待发队列**，返回改动条数。
+
+    ## 为什么是手动而不是自动重试
+
+    模块开头那条取舍（"刻意不自动重发"）依然成立，而且理由很硬：
+    **一封迟到的「预约成功」比没有更糟** —— 用户照着它去了实验室，
+    而那条预约早被取消了。所以自动指数退避是不该做的
+    （我一开始的计划里就有这一条，是被这段注释挡住的）。
+
+    但那条注释同时写着「重发要由**人确认后手动触发**」——
+    而这个入口**一直没建**。结果是一封因网络抖动没发出去的通知，
+    永久卡在 failed：既不会自己好，也没有任何办法让它重发。
+    补的是这个洞，不是推翻那条取舍。
+
+    `ids` 为空表示"全部失败的"。重放之后状态回到 pending，
+    下一次 `drain()` 就会带着新内容去投递 —— 投递逻辑一行都不用改。
+    """
+    async with session_scope() as session:
+        stmt = select(Notification).where(Notification.status == STATUS_FAILED)
+        if ids:
+            stmt = stmt.where(Notification.id.in_(ids))
+        rows = (await session.execute(stmt)).scalars().all()
+        for row in rows:
+            row.status = STATUS_PENDING
+            # 清掉上一次的失败原因：留着它会让下一次成功之后
+            # 记录里同时存在"已发送"和一条陈旧的报错，查起来自相矛盾。
+            row.error = ""
+        return len(rows)

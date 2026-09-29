@@ -37,3 +37,6 @@ Thumbs.db
 # CI 调查用的临时文件（curl 输出 / job 日志），不该进仓库 —— f98502f 误提交过一次
 /_*.json
 /_l*.txt
+
+# 控制台单文件打包产物（build_web.py 生成，可一条命令重建）
+dist/

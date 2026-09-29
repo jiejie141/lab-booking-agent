@@ -390,6 +390,72 @@ class LabBookingAgent:
     # ------------------------------------------------------------------
     # 对外入口
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    def _initial_state(self, req: ChatRequest) -> AgentState:
+        """`ainvoke` 与 `astream` 共用的起始状态。
+
+        抽出来是因为**两边必须逐字一致** —— 差一个字段就会出现
+        "流式走通了、但拿不到方案"这种只在一条路径上复现的怪事。
+        """
+        return {
+            "message": req.message,
+            "user_id": req.user_id,
+            "session_id": req.session_id,
+            "accept_equipment_id": req.accept_equipment_id,
+            "accept_date": req.accept_date,
+            "accept_start": req.accept_start,
+            "accept_end": req.accept_end,
+            "trace": [],
+        }
+
+    async def astream(self, req: ChatRequest):
+        """逐节点产出进度，最后产出终态。
+
+        产出 ``("node", {...})`` 若干次，再产出一次 ``("done", ChatResponse)``。
+
+        为什么用 ``stream_mode="values"`` 而不是 ``updates``：后者每帧只给**增量**，
+        要把 7 个节点的增量拼回完整状态得自己处理 ``operator.add`` 的累加语义
+        （trace 字段就是累加的），很容易拼错。``values`` 每帧直接给**累积后的完整状态**，
+        最后一帧就是 ``ainvoke`` 的返回值 —— 与现有路径天然等价。
+
+        节点名从 ``trace[-1].node`` 取：trace 本来就是每个节点自己写的。
+        """
+        if req.user_id is None:
+            raise ValueError("ChatRequest.user_id 缺失：身份必须由调用方显式提供")
+        if self.client is None:
+            # 降级路径没有节点可走，直接给终态（与 ainvoke 逐字一致）
+            yield ("done", ChatResponse(
+                reply=DEGRADED_REPLY, intent=None, stage="degraded", degraded=True,
+                trace=[TraceStep(node="degrade", detail="模型未配置或已关闭，走引导式表单")],
+            ))
+            return
+
+        final: dict[str, Any] | None = None
+        seen = 0
+        async for state in self.graph.astream(self._initial_state(req),
+                                              stream_mode="values"):
+            final = state
+            trace = state.get("trace") or []
+            # 一帧可能对应 0 个新节点（入口帧），按已发过的条数去重
+            while seen < len(trace):
+                step = trace[seen]
+                seen += 1
+                yield ("node", {"node": step.node, "detail": step.detail,
+                                "elapsed_ms": step.elapsed_ms,
+                                "stage": state.get("stage", "")})
+
+        final = final or {}
+        yield ("done", ChatResponse(
+            reply=final.get("reply", ""),
+            intent=final.get("intent"),
+            stage=final.get("stage", ""),
+            missing=list(final.get("missing") or []),
+            proposals=final.get("proposals") or [],
+            citations=final.get("citations") or [],
+            booking=final.get("booking"),
+            trace=final.get("trace") or [],
+        ))
+
     async def ainvoke(self, req: ChatRequest) -> ChatResponse:
         # 身份是硬前提：缺了就没法判资质、也没法归属预约。
         # 这里 fail-closed 而不是回退到某个默认用户 —— P0-2 之前
@@ -405,17 +471,7 @@ class LabBookingAgent:
                 trace=[TraceStep(node="degrade", detail="模型未配置或已关闭，走引导式表单")],
             )
 
-        initial: AgentState = {
-            "message": req.message,
-            "user_id": req.user_id,
-            "session_id": req.session_id,
-            "accept_equipment_id": req.accept_equipment_id,
-            "accept_date": req.accept_date,
-            "accept_start": req.accept_start,
-            "accept_end": req.accept_end,
-            "trace": [],
-        }
-        final = await self.graph.ainvoke(initial)
+        final = await self.graph.ainvoke(self._initial_state(req))
 
         intent = final.get("intent")
         return ChatResponse(

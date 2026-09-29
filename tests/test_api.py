@@ -7,6 +7,7 @@ P0-2 之后这里多了一层前提：**除存活探针与登录外，所有端�
 from __future__ import annotations
 
 import datetime as dt
+import json
 from typing import ClassVar
 
 import pytest
@@ -146,6 +147,42 @@ class TestPublicEndpoints:
         resp = await http.get("/")
         assert resp.status_code == 200
         assert "text/html" in resp.headers["content-type"]
+
+    async def test_console_assets_are_served(self, http):
+        """控制台的 CSS / JS 必须能取到，且**带 no-cache**。
+
+        2026-09-29 前端从"单文件内联"拆成了 index.html + app.css + app.js。
+        这条测试守两件事：
+
+        ① **拆分不能只做一半**。页面里引用的每个 /static/ 资源都必须真的存在 ——
+           少一个就是"样式全丢"或"按钮全没反应"。
+        ② **资源必须和 HTML 一样 no-cache**。原来 JS 内联在 HTML 里，HTML 带
+           no-cache 就覆盖了它；拆开后若资源被启发式缓存，就会出现
+           "HTML 是新的、JS 是旧的" —— 正是上面 index() 注释里 2026-09-27
+           踩过的那类"强刷一次才好"的灵异问题。
+        """
+        import re
+
+        page = (await http.get("/")).text
+        refs = re.findall(r'(?:href|src)="(/static/[^"]+)"', page)
+        assert refs, "控制台没有引用任何 /static/ 资源，拆分可能没生效"
+        assert set(refs) == {"/static/app.css", "/static/app.js"}, refs
+
+        for ref in sorted(set(refs)):
+            resp = await http.get(ref)
+            assert resp.status_code == 200, f"{ref} 取不到 -> {resp.status_code}"
+            assert resp.headers.get("cache-control") == "no-cache", ref
+            assert len(resp.content) > 200, f"{ref} 内容太短，像是空文件"
+
+        css = (await http.get("/static/app.css")).text
+        js = (await http.get("/static/app.js")).text
+        assert ":root" in css and "--" in css, "CSS 里没有设计令牌"
+        assert "function" in js, "JS 内容不对"
+
+    async def test_console_asset_whitelist(self, http):
+        """白名单之外一律 404 —— 不做目录挂载就不会有路径穿越。"""
+        for bad in ("../api.py", "index.html", "nonexistent.js"):
+            assert (await http.get(f"/static/{bad}")).status_code == 404, bad
 
 
 class TestAuthRequired:
@@ -579,3 +616,67 @@ class TestTrialRunGates:
         assert set(body["notifications"]) >= {"pending", "sent", "failed"}
         assert isinstance(body["backup"], dict)
         assert "files" in body["backup"] and "latest_age_seconds" in body["backup"]
+
+
+class TestChatStreaming:
+    """对话 SSE 流（2026-09-29 加）。
+
+    原对话是"等整段返回"，一次要走 parse → negotiate → book → compose 好几个节点，
+    前面几秒界面上只有转圈。流式之后每走完一个节点就多一行进度 ——
+    **总耗时没变，但等待变成可见的**。
+    """
+
+    async def test_stream_emits_nodes_then_done(self, http, as_user):
+        headers = await as_user("李娜")
+        r = await http.post("/api/agent/chat/stream",
+                            json={"message": "明天下午两点想用荧光光谱仪两小时",
+                                  "session_id": "t-stream"},
+                            headers=headers)
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/event-stream")
+        # 没有这个头，反代会把流缓冲起来 —— 界面表现是"最后一次性全出来"
+        assert r.headers.get("x-accel-buffering") == "no"
+
+        frames = [json.loads(l[6:]) for l in r.text.splitlines()
+                  if l.startswith("data: ")]
+        assert frames, r.text[:300]
+        kinds = [f["type"] for f in frames]
+        assert kinds[-1] == "done", kinds
+        assert "node" in kinds, "至少要有一个节点进度帧，否则流式没有意义"
+        # 节点帧要带得出"在做什么"
+        first = next(f for f in frames if f["type"] == "node")
+        assert first["node"], first
+        # 终态帧必须与 /api/agent/chat 的形状一致（两条路走同一个 Agent）
+        done = frames[-1]["data"]
+        for key in ("reply", "trace", "stage", "proposals", "citations", "degraded"):
+            assert key in done, key
+
+    async def test_stream_matches_non_streaming_result(self, http, as_user):
+        """★ 流式与非流式必须给出**同一个**回复。
+
+        两条路径走的是同一个 Agent，只在传输方式上不同。
+        真出现差异，说明 `astream` 漏了 `ainvoke` 的某一步 ——
+        而这正是最容易发生、又最难被发现的一类分叉。
+        """
+        headers = await as_user("李娜")
+        body = {"message": "明天下午两点想用荧光光谱仪两小时",
+                "session_id": "t-cmp"}
+
+        plain = (await http.post("/api/agent/chat", json=body, headers=headers)).json()
+
+        r = await http.post("/api/agent/chat/stream",
+                            json={**body, "session_id": "t-cmp"}, headers=headers)
+        frames = [json.loads(l[6:]) for l in r.text.splitlines()
+                  if l.startswith("data: ")]
+        streamed = frames[-1]["data"]
+
+        assert streamed["reply"] == plain["reply"]
+        assert streamed["stage"] == plain["stage"]
+        assert streamed["intent"] == plain["intent"]
+        assert len(streamed["proposals"]) == len(plain["proposals"])
+        assert len(streamed["trace"]) == len(plain["trace"])
+
+    async def test_stream_requires_token(self, http):
+        """流式不能成为绕过鉴权的侧门。"""
+        r = await http.post("/api/agent/chat/stream", json={"message": "hi"})
+        assert r.status_code in (401, 403)

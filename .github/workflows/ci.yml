@@ -78,6 +78,13 @@ jobs:
       - name: mypy（类型检查，配置见 pyproject.toml）
         run: mypy
 
+      # 前后端契约目前是手写的：schemas.py 由人维护、前端按它拼请求。
+      # 字段改名/必填改可选这类改动编译期没有任何提示，前端只会拿到 422
+      # 或者一个静默取不到的字段。把 schema 落盘 + 在这里比对，
+      # 它就从"上线后才发现"变成一次明确的红灯。
+      - name: OpenAPI 契约未漂移
+        run: python scripts/check_openapi.py --check
+
       - name: pytest（单元 + 集成 + 并发）
         # 经 ci_run.py 包装：失败时把 FAILED/ERROR 行抬成注解 ——
         # 原始日志要鉴权才能读，注解不用（见 scripts/ci_run.py 的说明）。

@@ -600,14 +600,18 @@ async def _restore(source: str, *, yes: bool = False) -> int:
     return 0
 
 
-async def _notify(limit: int = 100) -> int:
+async def _notify(limit: int = 100, *, retry_failed: bool = False) -> int:
     """投递待发通知（P1-6）。
 
     **SMTP 没配时也要如实说清楚**：这条命令最常见的用法恰恰是
     "先看看有没有待发的" —— 如果它在这种情况下打印"发出 0 条"，
     运维会以为一切正常，而实际上是一封都没配好。
+
+    ``--retry-failed``：把失败的那些**放回待发队列**再投递一次。
+    这是手动入口而不是自动重试 —— 一封迟到的「预约成功」比没有更糟，
+    所以重发必须由人确认（见 ``notify.requeue`` 的说明）。
     """
-    from .notify import backlog, drain, smtp_problem
+    from .notify import backlog, drain, requeue, smtp_problem
 
     problem = smtp_problem()
     pending = await backlog()
@@ -615,6 +619,12 @@ async def _notify(limit: int = 100) -> int:
     print("lab-booking-agent · 通知投递")
     print("=" * 70)
     print(f"  待发 {pending['pending']} · 已发 {pending['sent']} · 失败 {pending['failed']}")
+    if retry_failed:
+        if not pending["failed"]:
+            print("  （没有失败的通知，--retry-failed 无需动作）")
+        else:
+            n = await requeue(None)
+            print(f"  ↻ 已把 {n} 条失败通知放回待发队列")
     if problem is not None:
         print(f"  ⚠ {problem}")
         print("  通知仍会照常写入库里，配好 SMTP 后这一批可以补发。")
@@ -784,6 +794,10 @@ def build_parser() -> argparse.ArgumentParser:
     notify_parser.add_argument(
         "--limit", type=int, default=100, help="本次最多处理多少条（默认 100）"
     )
+    notify_parser.add_argument(
+        "--retry-failed", action="store_true",
+        help="把失败的通知放回待发队列再投一次（手动重发，不是自动重试）",
+    )
 
     sub.add_parser("serve", help="启动 FastAPI 服务（等同 python main.py）")
     return parser
@@ -822,7 +836,7 @@ async def _run(args: argparse.Namespace) -> int:
         return await _restore(args.file, yes=args.yes)
     if args.command == "notify":
         await seed()
-        return await _notify(args.limit)
+        return await _notify(args.limit, retry_failed=args.retry_failed)
     if args.command == "sweep":
         # 先走一遍 seed()：它会 ensure_schema（迁移到 head + 校验结构），
         # 于是「库过期」这种情况在这里就报出可照做的提示，而不是等清扫 SQL 崩。

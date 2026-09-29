@@ -39,8 +39,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import csv
 import datetime as dt
 import hmac
+import io
 import json
 import time
 from collections.abc import AsyncIterator, MutableMapping
@@ -49,7 +51,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import selectinload
@@ -139,7 +141,9 @@ from .schemas import (
     AccessVerifyRequest,
     AccessVerifyResponse,
     AuditLogOut,
+    BatchReviewRequest,
     CancelRequest,
+    RetryNotificationRequest,
     ChatRequest,
     ChatResponse,
     EquipmentCreate,
@@ -1792,6 +1796,77 @@ async def reject(
     )
 
 
+@router.post("/api/reservations/batch-review")
+async def batch_review(
+    body: BatchReviewRequest,
+    request: Request,
+    admin: Principal = Depends(require_admin),
+) -> dict:
+    """一次审批多条。
+
+    为什么要有它：待办一多，逐条点是最典型的"机械重复"——
+    而每一项都走同一个 `_review`，所以审计、通知、状态机全都不用改。
+
+    ⚠️ **失败项逐条返回原因，不做整批回滚**：
+    批量审批里的失败通常不是"环境坏了"，而是"这一条恰好在别人手里"，
+    把已经成功的一起回滚反而更糟 —— 管理员会以为一条都没批。
+    这和下单是两种语义：下单要全有全无，审批是"能批几条批几条 + 说清哪几条没批"。
+    """
+    ok_ids: list[int] = []
+    failed: list[dict] = []
+    for rid in body.ids:
+        try:
+            await _review(rid, approve=body.approve, reason=body.reason,
+                          request=request, admin=admin)
+            ok_ids.append(rid)
+        except DomainError as exc:
+            failed.append({"id": rid, "reason": exc.reason or str(exc.detail),
+                           "message": exc.detail})
+        except Exception as exc:  # noqa: BLE001
+            failed.append({"id": rid, "reason": type(exc).__name__,
+                           "message": str(exc)})
+    return {"ok": not failed, "approved": len(ok_ids), "failed": failed,
+            "succeeded_ids": ok_ids}
+
+
+@router.get("/api/reservations/export.csv", include_in_schema=False)
+async def export_reservations_csv(
+    user_id: int | None = Query(default=None),
+    user: Principal = Depends(current_user),
+) -> Response:
+    """把当前身份能看到的预约导成 CSV。
+
+    "数据能带走"这一条对管理员尤其重要：做月度统计不该靠手抄。
+    权限口径与列表接口**完全一致**（非管理员只能导自己的）——
+    导出是最容易漏掉权限的一类接口，所以它复用同一段 scope 逻辑而不是另写一份。
+
+    `utf-8-sig` 是给 Excel 的：不带 BOM 打开中文就是乱码，
+    而"导给 Excel"正是这个端点的全部用途。
+    """
+    scope = user_id if user.is_admin else user.user_id
+    async with session_scope() as session:
+        rows = await list_reservations(session, user_id=scope, limit=500, offset=0)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["id", "用户", "设备", "实验室", "日期", "开始", "结束",
+                "状态", "用途", "创建时间"])
+    for r in rows:
+        d = r.model_dump(mode="json")
+        w.writerow([
+            d.get("id"), d.get("user_name") or d.get("user_id"),
+            d.get("equipment_name") or d.get("equipment_id"),
+            d.get("lab_name") or "", d.get("date"),
+            str(d.get("start") or "")[:5], str(d.get("end") or "")[:5],
+            d.get("status"), (d.get("purpose") or "").replace("\n", " "),
+            d.get("created_at") or "",
+        ])
+    return Response(
+        content=buf.getvalue().encode("utf-8-sig"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="reservations.csv"'},
+    )
+
+
 async def _review(
     reservation_id: int,
     *,
@@ -2031,6 +2106,87 @@ async def chat(
     return response
 
 
+# X-Accel-Buffering: no —— 没有它 nginx 会把整条流缓冲起来，
+# 表现是"进度一直不动，最后一次性全出来"，比不加流式还糟。
+_SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+
+def _sse(payload: dict) -> str:
+    return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+
+
+@router.post("/api/agent/chat/stream", include_in_schema=False)
+async def chat_stream(
+    req: ChatRequest,
+    request: Request,
+    user: Principal = Depends(chat_quota),
+) -> StreamingResponse:
+    """对话的 SSE 流：**逐节点**推进度，最后一帧给完整响应。
+
+    为什么需要它：原来的 `/api/agent/chat` 是"等整段返回"，一次对话要走过
+    parse → ask/negotiate → book → compose 好几个节点，前面几秒界面上只有转圈。
+    流式之后每走完一个节点前端就多一行「正在查可用时段…」，
+    **总耗时没变，但等待变成了可见的进展**。
+
+    ⚠️ 为什么用 POST + fetch 而不是浏览器的 EventSource：
+    EventSource 只支持 GET，把用户那句话塞进查询串既受长度限制（中文还要编码）、
+    又会进访问日志。前端改成 `fetch` + `ReadableStream` 逐块读，
+    效果一样而消息体仍然走 body。
+
+    身份覆写与审计**与 `/api/agent/chat` 逐字一致** —— 两条路走同一个 Agent，
+    只在传输方式上不同，不能一条留痕一条不留。
+    """
+    agent = getattr(request.app.state, "agent", None)
+    if agent is None:
+        raise HTTPException(status_code=503, detail="Agent 尚未初始化")
+    req = req.model_copy(update={"user_id": user.user_id})
+
+    async def _gen() -> AsyncIterator[str]:
+        try:
+            async for kind, payload in agent.astream(req):
+                if kind == "node":
+                    yield _sse({"type": "node", **payload})
+                    continue
+                if payload.booking is not None:
+                    await audit.record(
+                        action=audit.ACTION_BOOK,
+                        outcome=(audit.OUTCOME_OK if payload.booking.ok
+                                 else audit.OUTCOME_FAILED),
+                        actor_id=user.user_id,
+                        actor_name=user.username,
+                        target_type="reservation",
+                        target_id=(payload.booking.reservation.id
+                                   if payload.booking.reservation else ""),
+                        detail=payload.booking.message,
+                        client_host=_client_host(request),
+                    )
+                yield _sse({"type": "done", "data": payload.model_dump(mode="json")})
+        except Exception as exc:  # noqa: BLE001
+            # 流里的错误不能用 HTTP 状态码表达（头已经发出去了），
+            # 所以包成一帧 error 让前端切到表单路径 —— 它必须知道"这次没成"
+            yield _sse({"type": "error", "detail": f"Agent 执行失败：{exc}"})
+
+    return StreamingResponse(_gen(), media_type="text/event-stream",
+                             headers=_SSE_HEADERS)
+
+
+@router.post("/api/notifications/retry")
+async def retry_notifications(
+    body: RetryNotificationRequest,
+    admin: Principal = Depends(require_admin),
+) -> dict:
+    """把失败的通知放回待发队列。
+
+    ⚠️ 这是**手动**入口，不是自动重试 —— 模块里那条取舍是真的：
+    一封迟到的「预约成功」比没有更糟（用户照着它去了实验室，而预约已被取消）。
+    但原设计只写了"重发要由人确认后手动触发"，**入口一直没建**，
+    于是网络抖动导致的失败会永久卡住。补的是这个洞。
+    """
+    count = await notify.requeue(body.ids or None)
+    return {"ok": True, "requeued": count,
+            "note": "已放回待发队列，下次投递（main.py notify 或后台清扫）会带上它们"}
+
+
 # ==========================================================================
 # 规范检索（控制台可直接试）
 # ==========================================================================
@@ -2075,6 +2231,35 @@ async def index() -> Response:
     # 一次 cache 强刷才能治好的那种灵异问题（2026-09-27 实际撞过）。
     # no-cache（而不是 no-store）：每次仍会协商，304 时省的是传输不是验证。
     return FileResponse(target, media_type="text/html", headers={
+        "Cache-Control": "no-cache",
+    })
+
+
+# --------------------------------------------------------------------------
+# 控制台的样式与脚本（白名单）
+#
+# 2026-09-29：前端由"单文件内联"拆成 index.html + app.css + app.js。
+# 仍然不挂 StaticFiles —— 只有两个资源，显式白名单比给整个目录配路由更少间接层，
+# 也天然没有路径穿越面。
+#
+# ⚠️ 资源必须和 index.html 一样带 no-cache。原来 JS 内联在 HTML 里，
+# HTML 带 no-cache 就覆盖了 JS；拆开之后若资源被启发式缓存，就会出现
+# 「HTML 是新的、JS 是旧的」——正是上面那段注释里 2026-09-27 踩过的灵异问题。
+# no-cache ≠ no-store：每次仍协商，未变时走 304。
+# --------------------------------------------------------------------------
+_WEB_ASSETS = {
+    "app.css": "text/css; charset=utf-8",
+    "app.js": "application/javascript; charset=utf-8",
+}
+
+
+@router.get("/static/{name}", include_in_schema=False)
+async def console_asset(name: str) -> Response:
+    media = _WEB_ASSETS.get(name)
+    target = WEB_DIR / name
+    if media is None or not target.exists():
+        return JSONResponse({"detail": f"资源不存在: {name}"}, status_code=404)
+    return FileResponse(target, media_type=media, headers={
         "Cache-Control": "no-cache",
     })
 

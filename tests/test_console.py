@@ -13,7 +13,82 @@ import pytest
 
 from lagent.console import enable_utf8_output
 
-WEB_INDEX = pathlib.Path(__file__).resolve().parents[1] / "src" / "lagent" / "web" / "index.html"
+WEB_DIR = pathlib.Path(__file__).resolve().parents[1] / "src" / "lagent" / "web"
+WEB_INDEX = WEB_DIR / "index.html"
+WEB_APP_JS = WEB_DIR / "app.js"
+WEB_APP_CSS = WEB_DIR / "app.css"
+
+_CSS_TAG = '<link rel="stylesheet" href="/static/app.css">'
+_JS_TAG = '<script src="/static/app.js" defer></script>'
+
+
+def console_html() -> str:
+    """返回「生效后的控制台」——把外链的 css / js 内联回 index.html。
+
+    2026-09-29：控制台从单文件拆成了 index.html + app.css + app.js 三份，
+    本文件里那批静态断言（它们守的是"前端有没有又自己去指定身份"这类回归）
+    却全在读 index.html —— 于是 26 项一起红。
+
+    这里不去做「逐个改断言」，而是让 fixture 返回**浏览器真正看到的东西**：
+    外链内联回去，断言一行不动。理由是这些断言守的是行为不是文件布局，
+    拆不拆文件是实现细节，不该让守门测试跟着重写一遍（重写就有漏的风险）。
+
+    顺带一个好处：``test_the_inline_script_parses`` 现在是真的在
+    ``node --check`` 校验 app.js，而不是校验一个空字符串。
+    """
+    html = WEB_INDEX.read_text(encoding="utf-8")
+    for tag in (_CSS_TAG, _JS_TAG):
+        assert tag in html, f"index.html 里找不到外链标签：{tag}（拆分后标签改了要同步这里）"
+    return (
+        html.replace(_CSS_TAG, "<style>\n" + WEB_APP_CSS.read_text(encoding="utf-8") + "\n</style>")
+        .replace(_JS_TAG, "<script>\n" + WEB_APP_JS.read_text(encoding="utf-8") + "\n</script>")
+    )
+
+
+class TestWebSplitContract:
+    """拆成三份之后的契约：文件都在、都被引到、服务也认。
+
+    拆分的收益是能 diff、能单独看；代价是多了「文件在但没被引」这种
+    新的失败模式 —— 它**不会报错**，页面只是静悄悄少一半。
+    所以这里单独守一层。
+    """
+
+    def test_all_three_files_exist(self):
+        for path in (WEB_INDEX, WEB_APP_JS, WEB_APP_CSS):
+            assert path.is_file(), f"缺文件：{path}"
+
+    def test_index_links_both_assets(self):
+        html = WEB_INDEX.read_text(encoding="utf-8")
+        assert _CSS_TAG in html
+        assert _JS_TAG in html
+
+    def test_no_leftover_inline_block(self):
+        """index.html 里不该再有大段内联的 css/js —— 否则拆分就白拆了。"""
+        html = WEB_INDEX.read_text(encoding="utf-8")
+        assert "<style>" not in html
+        assert "<script>" not in html
+
+    def test_assets_are_in_the_static_whitelist(self):
+        """服务端只认白名单里的名字；拆出的文件名不在名单里就是 404。"""
+        from lagent import api as api_mod
+
+        source = pathlib.Path(api_mod.__file__).read_text(encoding="utf-8")
+        for name in ("app.js", "app.css"):
+            assert f'"{name}"' in source, f"/static/{name} 不在服务端白名单里"
+
+    def test_packaged_single_file_still_builds(self):
+        """dist/console.html 由 build_web.py 生成，是全量内联的版本。
+
+        这里不重新打包（那是 build_web.py 的事），只确认它如果存在就是完整的。
+        """
+        packed = pathlib.Path(__file__).resolve().parents[1] / "dist" / "console.html"
+        if not packed.is_file():
+            pytest.skip("还没打包过 dist/console.html")
+        text = packed.read_text(encoding="utf-8")
+        # 打包版里不该再出现外链，否则离线打开就是白页
+        assert "/static/app.js" not in text
+        assert "/static/app.css" not in text
+        assert "<script>" in text and "<style>" in text
 
 
 class TestEnableUtf8Output:
@@ -71,7 +146,7 @@ class TestConsoleAuthWiring:
 
     @pytest.fixture(scope="class")
     def html(self) -> str:
-        return WEB_INDEX.read_text(encoding="utf-8")
+        return console_html()
 
     def test_has_login_gate(self, html):
         assert 'id="gate"' in html
@@ -145,7 +220,7 @@ class TestDirectBookingForm:
 
     @pytest.fixture(scope="class")
     def html(self) -> str:
-        return WEB_INDEX.read_text(encoding="utf-8")
+        return console_html()
 
     def test_the_form_exists_as_its_own_pane(self, html):
         assert 'id="pane-book"' in html
@@ -194,7 +269,7 @@ class TestAdminPanelsWiring:
 
     @pytest.fixture(scope="class")
     def html(self) -> str:
-        return WEB_INDEX.read_text(encoding="utf-8")
+        return console_html()
 
     @pytest.mark.parametrize(
         "tab",
@@ -344,7 +419,7 @@ class TestConsoleJavaScript:
         if node is None:
             pytest.skip("环境里没有 node，跳过 JS 语法检查")
 
-        html = WEB_INDEX.read_text(encoding="utf-8")
+        html = console_html()
         blocks = re.findall(r"<script>(.*?)</script>", html, re.S)
         assert blocks, "控制台里一个 <script> 都没有"
         script = tmp_path / "console.js"
@@ -366,7 +441,7 @@ class TestRescheduleWiring:
 
     @pytest.fixture(scope="class")
     def html(self) -> str:
-        return WEB_INDEX.read_text(encoding="utf-8")
+        return console_html()
 
     def test_the_reschedule_button_exists(self, html):
         assert 'data-move=' in html, "预约记录里没有「改期」按钮"
@@ -393,7 +468,7 @@ class TestRescheduleWiring:
 class TestHealthBadgeSemantics:
     @pytest.fixture(scope="class")
     def html(self) -> str:
-        return WEB_INDEX.read_text(encoding="utf-8")
+        return console_html()
 
     def test_health_details_is_not_fetched_through_api(self, html):
         """健康详情必须用裸 fetch：api() 在 401 时会清会话 + 抛错，
