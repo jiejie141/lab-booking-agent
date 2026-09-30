@@ -446,7 +446,7 @@ HMAC 常数时间比较），普通用户令牌一律 401 —— 否则任何一
 #### 实证
 
 ```
-$ python main.py access-demo      # 跑在一次性沙箱库上；pytest tests/test_access.py 另有 49 项
+$ python main.py access-demo      # 跑在一次性沙箱库上；pytest tests/test_access.py 另有 61 项
   场景 1  张伟没有预约，直接到门口刷卡        → 拒绝 · no_permit
   场景 2  给李娜签发凭证后刷卡入场            → 放行（生物楼205 当前格在馆 1 人）
   场景 3  李娜已经在馆内，再刷同一张凭证      → 拒绝 · already_inside
@@ -1043,7 +1043,7 @@ react ──模型故障 / 步数耗尽 / 不按格式回──▶ deterministic
 ## 验证
 
 ```bash
-pytest                          # 964 passed
+pytest                          # 982 passed, 17 skipped（跳过 = 需真实 PostgreSQL 的用例，CI 的 postgres job 会执行）
 python main.py eval             # 14/14（mock 模型）
 python main.py loadtest --concurrency 40 --rounds 3
 python main.py access-demo      # 8/8，但**只在实验室开放时段内**才全绿
@@ -1056,14 +1056,14 @@ python main.py notify --retry-failed   # 把失败的通知重新入队（不自
 python main.py backup           # SQLite 走 VACUUM INTO / PostgreSQL 走 pg_dump
 python scripts/overlap_race.py  # 3/3
 python scripts/sweep_demo.py    # 18/18（真实 SQLite 文件上的清扫端到端）
-python scripts/smoke_http.py    # 84/84（真实 uvicorn 进程，含 react 模式与降级链）
+python scripts/smoke_http.py    # 83/83（真实 uvicorn 进程，含 react 模式与降级链）
 python scripts/accept_deploy.py  # 25/25（真 compose 栈：真 PG + 真容器 + 真下单）
 python scripts/check_openapi.py --check   # OpenAPI 契约未漂移则静默通过
 python build_web.py             # 打包单文件控制台 → dist/console.html
 ```
 
 ```
-pytest:            964 passed（32 个测试文件，`pytest --collect-only -q`）
+pytest:            999 collected = 982 passed + 17 skipped（33 个测试文件，`pytest --collect-only -q`；跳过项为需真实 PostgreSQL 的用例，由 CI 执行）
 评测报告:           意图准确率 100.0% · 槽位准确率 100.0% · 端到端通过率 100.0%（14/14）
 并发压测:           3 轮 × 40 并发，每轮恰好 1 成功、39 明确冲突、0 异常
 区间重叠竞态:        3/3 未超卖
@@ -1077,7 +1077,7 @@ pytest:            964 passed（32 个测试文件，`pytest --collect-only -q`�
 日志与请求关联:      75 项（JSON 单行 / id 跨审计与门禁贯穿 / 注入被丢弃 / 413 也带 id / 身份不串味）
 指标与健康检查:      76 项（文本格式逐行校验 / 路由模板而非真实 path / 基数上限与丢弃计数 / p95 误差实测 / 三档健康检查）
 数据库迁移:         27 项（产物 vs 模型 diff 为空 / 部分索引 WHERE 未丢 / 回滚可往返 / 老库接管 / **给有数据的表加列**）
-HTTP 越权清单:       84/84（含 deterministic / react / degraded / 端点不可达四种启动配置）
+HTTP 越权清单:       83/83（含 deterministic / react / degraded / 端点不可达四种启动配置）
 compose 实机验收:     25/25（PostgreSQL 上 revision=0006 / 容器 healthy / 真下单 201 / 重约 409）
 
 真实栈上的**试用报告**（走完预约→审批→门禁→违约→清扫→备份恢复六个环节，
@@ -1087,9 +1087,9 @@ compose 实机验收:     25/25（PostgreSQL 上 revision=0006 / 容器 healthy 
 
 **现场演示怎么做**（五分钟主线 / 六十秒版 / 被追问时的深挖点 / 翻车预案）
 见 [`docs/DEMO-SCRIPT.md`](docs/DEMO-SCRIPT.md)。
-后台维护 CRUD:      34 项（新增/改字段/显式 null 不动 / 停用即失效 / **没有删除路由** / 冲突与越权）
+后台维护 CRUD:      35 项（新增/改字段/显式 null 不动 / 停用即失效 / **没有删除路由** / 冲突与越权）
 设备级审批:         9 项（申请即占坑 / 驳回释放时段 / 重复处理 409 / 非管理员拿不到待办）
-通知:               22 项（四类业务事件都留痕 / 没配 SMTP 不假装成功 / 失败留原因不重发 / **通知崩了不影响下单**）
+通知:               24 项（四类业务事件都留痕 / 没配 SMTP 不假装成功 / 失败留原因不重发 / **通知崩了不影响下单**）
 登录锁定:           18 项（按来源地址+用户名计数 / 锁定期间正确口令也进不去 / 过期锁丢掉旧记录 / 锁定不写审计）
 违约判定:           39 项（**无门禁流水就不判** / 迟到在宽限内不算 / 被门口拦下不算到场 / 默认只记不罚 / 豁免留痕）
 预约分页:           5 项（不传 limit 行为不变 / 总数走 X-Total-Count / 越界 422 / 不放大可见范围）
