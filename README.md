@@ -1,7 +1,7 @@
 # lab-booking-agent
 
-一个**带真实约束协商能力**的智能实验室预约 Agent。FastAPI + LangGraph + SQLAlchemy 2.0(async)，
-带 JWT 认证、RBAC、审计日志与边界加固。
+一个**带真实约束协商能力**的智能实验室预约 Agent。FastAPI + LangGraph + SQLAlchemy 2.0(async)
++ DeepSeek，带 JWT 认证、RBAC、审计日志与边界加固。
 
 它不是「表单 + 让大模型抽几个字段」那种教学项目。差别只有一个，但很关键：
 

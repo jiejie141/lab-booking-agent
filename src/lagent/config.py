@@ -42,9 +42,11 @@ class Settings(BaseSettings):
     #            用来回答「大模型挂了业务还能不能跑」这个问题。
     app_mode: AppMode = "mock"
 
-    llm_base_url: str = "https://api.openai.com/v1"
+    # 默认给 DeepSeek：它是 OpenAI 兼容端点，国内直连即可，不需要额外代理。
+    # 换成别的供应商只改这三个变量，代码里没有任何供应商相关的分支。
+    llm_base_url: str = "https://api.deepseek.com/v1"
     llm_api_key: str = ""
-    llm_model: str = "gpt-4o-mini"
+    llm_model: str = "deepseek-chat"
     llm_timeout: float = 30.0
     llm_max_retry: int = 2
 
