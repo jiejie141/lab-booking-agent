@@ -60,6 +60,7 @@ async def _doctor() -> int:
     print(f"  app_mode          : {settings.app_mode}")
     print(f"  timezone          : {settings.timezone}  (now={now_local().isoformat(timespec='seconds')})")
     print(f"  database_url      : {settings.database_url}")
+    print(f"  state_backend     : {settings.state_backend} ({settings.state_db_path})")
     print(f"  retrieval_backend : {settings.retrieval_backend}")
 
     await init_db()

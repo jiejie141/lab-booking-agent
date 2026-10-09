@@ -258,7 +258,7 @@ Agent：这个需求不是换个时间能解决的：缺少「离心」准入资
 
 | 端点 | 要求 |
 |---|---|
-| `GET /api/health`、`GET /api/health/ready`、`POST /api/auth/login`、`GET /`（登录页） | 公开（存活探针 / 就绪探针 / 拿令牌 / 页面本身）。**业务数字（`/api/health/details`）与 `/metrics` 都要凭据** |
+| `GET /api/health`、`GET /api/health/ready`、`POST /api/auth/login`、`POST /api/auth/register`、`GET /`（登录页） | 公开（存活探针 / 就绪探针 / 拿令牌 / 自助注册 / 页面本身）。**业务数字（`/api/health/details`）与 `/metrics` 都要凭据**。注册接口有独立约束：角色强制最低级、按 IP 限流（`LAB_REGISTER_PER_HOUR`）、进审计，可用 `LAB_REGISTRATION_ENABLED=false` 整体关闭 |
 | 其余全部业务端点 | 需要 `Authorization: Bearer <token>` |
 | `GET /api/users`、`GET /api/audit` | 额外要求管理员（`ROLE_ADMIN`/`ROLE_SYSADMIN`） |
 
@@ -1017,6 +1017,19 @@ react ──模型故障 / 步数耗尽 / 不按格式回──▶ deterministic
 | 同一份代码、同一份 mypy 配置，**py3.13 报错而 py3.10 全绿** | `requirements.txt` 只写了 `>=` 下限。SQLAlchemy 2.1 抬高了 `requires_python`，于是 py3.10 被解析到 2.0、py3.13 拿到 2.1 —— **两个 job 静默地在测两套不同的栈**。而 mypy 的输出本来就依赖「装了哪些带类型标注的包」：`sweep._archive` 里 `select(model)` 的 `model` 是 `Any`，未绑定泛型在 2.0 的桩下没报、在 2.1 的桩下报了 `var-annotated` | 显式标注 `rows: Sequence[Any]`（标 `list[Any]` 会换来下一个错：`Sequence[Never]` 不能赋给 `list[Any]`）；CI 每个 job 打印实际依赖版本。**未钉版本的依赖会让矩阵悄悄测两套栈，而第一个发现它的永远是类型检查** |
 | 推送时 `fatal: ... github.com ... CONNECT tunnel failed, response 502`（连试十余次） | 沙箱注入的 HTTPS 代理对 `github.com` 返回 502，而同一时刻 `api.github.com` / `raw.githubusercontent.com` / `codeload.github.com` 全是 200 —— **是单域名而非整网不通** | 重试直到通过（本次第 12 次成功）。判断"网络抖动还是配置错"要看**同域之外还能不能通**，只测一个域名会得出错误结论 |
 | 26 项测试**一夜之间全红**，而我只改了"文件怎么摆" | 控制台从单文件拆成 `index.html` + `app.css` + `app.js` 之后，`tests/test_console.py` 那批静态断言还在**只读 index.html** —— JS 已经不在里面了，26 项一起红 | 不让断言跟着重写（重写就有漏的风险），而是**改 fixture**：新增 `console_html()` 把外链内联回去，返回"浏览器真正看到的东西"。这些断言守的是**行为**不是文件布局，拆不拆文件是实现细节。顺带 `test_the_inline_script_parses` 从此是真的在 `node --check` 校验 app.js |
+| 把本地 `.env` 的 `LAB_STATE_BACKEND` 从 `memory` 改成 `sqlite` 之后，**4 条用例红了，而且红得完全不像状态后端的问题**：报的是"注册重复邮箱没返回 409""聊天第一条就 429" | sqlite 后端把限流计数**持久化到 `LAB_STATE_DB_PATH`** 指向的文件里。conftest 的 `isolated_db` 每例换一个库文件 —— 换的是业务库（`LAB_DATABASE_URL`），而计数走的是**另一条路径**，于是计数跨用例累积：上一个用例打满的窗口，下一个用例一进来就是 429 | conftest 里 `monkeypatch.setenv("LAB_STATE_BACKEND", "memory")` 固定住（`monkeypatch` 优先级高于 `.env`，所以本地配置改不动测试）。要测 sqlite 后端本身的用例自己显式覆盖。**"每例换一个库"只隔离了被换的那条路径 —— 一个系统里有几条状态路径，就要有几条隔离** |
+
+### P2（进程外状态与自助注册）期间新踩的
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| 双击 `start-lab-booking-agent.cmd` 报 `...python.exe" -c "import' 不是内部或外部命令`，密钥生成失败 | `for /f ('...')` 里的**嵌套引号**被 cmd.exe 的解析截断 —— 内层引号把命令提前结束，实际执行的是 `python.exe" -c "import` 这半个命令 | 不和 cmd 的引号规则搏斗：Python 把密钥写进 `%TEMP%` 临时文件，`set /p` 读回来，用完即删。**引号地狱绕过去比穿过去便宜** |
+| 新写的 SQLite 限流器一跑就 `OperationalError`（表不存在） | `SessionStore` 的构造函数里会自建表，限流器的构造里**忘了做同一件事** —— 依赖"服务启动时反正会调 init_state_db"这种隐式时序 | 两个存储组件的构造函数都自建表（幂等 DDL）。**依赖时序的约定，一定会在某个新的调用点上断** |
+| 注册接口若在事件循环里直接算 scrypt，未认证入口每次被卡 140ms | scrypt 是故意慢的 CPU 密集操作（抗爆破），同步调用会卡住整个事件循环 | 与 login 同一条修法：`asyncio.to_thread(hash_password, ...)`。**慢的原语放到未认证入口上，必须进线程池** |
+| 本地新建的 `.env` 让两条 fail-closed 安全测试**红了**（`公开默认密钥` 文案对不上） | pydantic-settings 会把 `.env` 读进 Settings：里面一行**空的** `LAB_JWT_SECRET=` 把"内置默认密钥"顶成了"空密钥"，`secret_problem()` 走进了另一个判定分支，断言的报错文案自然对不上。**开发者的本地配置会静默改变测试行为** | `.env` 里 JWT 行保持注释态（空值没有信息量，只会偷换判定分支）。**这条与上面那条是同一个根因的两次发作**（一次是密钥、一次是状态后端），所以第二次不再只治症状：conftest 统一 `setenv` 住会改变测试语义的那几个变量，让本地 `.env` 只影响本地跑服务，不影响跑测试 |
+| 换 Moonshot 的 kimi-k2.6，doctor 连挂三次，报错一个比一个意外 | 三个互相独立的供应商边界：① 只接受 `temperature=1`（项目发 0/0.2）→ 加 `LAB_LLM_TEMPERATURE` 模型级覆盖；② 无视 `response_format` 把 JSON 包在 ```` ```json ```` 围栏里 → 解析前剥围栏（`_strip_json_fence`）；③ 显式输出 `"purpose": null`，而清洗只滤字符串 `"null"` 不滤 JSON 的 `None` → 过滤条件补 None。**换一家模型供应商 = 一次真实的多供应商兼容性测试，四个坑全在输出协议与参数约束上，没有一个在"智能"上** |
+| `check_openapi.py --check` 报"契约已漂移"，但**一条 diff 都看不到**，只看到 `UnicodeEncodeError: 'gbk' codec can't encode character` | 脚本输出里有 ✓/✗，而 Windows 控制台默认 GBK —— **崩在 print 上的是「报告」这一步**，真正的漂移信息一个字没打出来。CI 跑 Linux（UTF-8），所以这条路径在 CI 里永远是绿的，只有本地 Windows 会踩 | 脚本启动时显式 `sys.stdout.reconfigure(encoding="utf-8")`。**「检查工具自己坏了」比「检查不通过」更危险**：它把一种失败伪装成另一种失败，让人去查错方向 |
+| 单副本跑 `LAB_STATE_BACKEND=sqlite`，`/metrics` 里 **session 同时报出 memory 与 sqlite 两条序列** —— `LagentStateBackendSplitBrain`（`count by (component) > 1`）会据此断定"已扩容、状态分裂"，而进程只有一个 | `SqliteSessionStore` 继承 `SessionStore`，基类构造函数先 `record_state_backend("session", "memory")`，子类构造里再补一条 `"sqlite"`。Gauge 的 `set` 是**按标签新增序列**，两条于是并存。`SqliteSlidingWindowLimiter` 没这个毛病 —— 它是独立类、不继承内存版 | 后端改由**类属性** `_BACKEND` 决定，构造期只报一次（子类覆盖即可）。另外模块级兜底单例 `STORE` 加 `report_backend=False` —— 它在 import 期就构造，此刻还不知道进程用哪个后端，照报 memory 会凭空多一条。**`record_state_backend` 这类"组件自报"的埋点，要保证"一个组件一个进程只报一条"，否则它亲手制造出自己要检测的那个信号** |
 
 ---
 
@@ -1038,12 +1051,89 @@ react ──模型故障 / 步数耗尽 / 不按格式回──▶ deterministic
 
 **演示脚本**：`docs/DEMO-SCRIPT.md` 第 6 节给了这八项的演法与台词。
 
+### 2026-10-09 界面改版：从"能用的表单"到"能读的仪表"
+
+原界面是功能正确的深色面板，但**把最重要的东西埋掉了**：冲突时给出的备选方案
+以纯文字列在气泡里，而"这几条各自放宽了什么"正是用户要横向比的信息。
+
+改版只动表现层（`index.html` + `app.css`，`app.js` 只同步了几处类名），
+**没有引入任何依赖，仍然是零构建的三文件结构**。几处值得记的判断：
+
+| 改动 | 为什么这么做 |
+|---|---|
+| 登录页改成**左右分栏**：左边说清"这个系统与普通表单的不同"，右边才是表单 | 决定要不要登录是在看到表单**之前**做的。三个差异点（约束协商 / 资质准入 / 全链路留痕）原来藏在 README 里，登录前看不到 |
+| 备选方案从文字改为**卡片**：设备 → 时段（等宽）→ 放宽了什么（标签）→ 选这个 | 用户的动作是**比较**，不是阅读。横向对齐的字段才能比较，一段 5 行的文字不能 |
+| mock 的回复**不再逐条复述方案**，只给结论、原因与编号 | 同一件事说两遍：卡片已经说了结构，文字再说一遍只会把卡片挤下去。编号保留，因为用户的"第 2 个"要能对上号（`test_graph.py` 钉住了这一点） |
+| 配色从"科技感深色"改为**纸感浅色为默认**（深色保留为可选） | 使用者看的是"时段有没有冲突""谁在等审批"，发光和渐变会把注意力从数字上挪走 |
+| `--text-faint` 在两套主题里都调深/调亮 | 它承载表头、字段标签、时间戳这些**小号文字**。原值对底色只有 3.1:1（浅）/ 3.9:1（深），而 AA 要求 4.5:1 —— 低对比的小字"看起来更精致"，但投影仪上直接读不到 |
+| 窄屏下标签栏右侧加渐隐 | 管理员有 9 个标签，1024px 下有 4 个在视口外，而滚动条被藏掉了 —— 界面上**看不出右边还有东西** |
+
+改版后的验证方式值得单记一句：视觉评审这次用不了，于是写了个 CDP 脚本做**几何体检**
+（`getBoundingClientRect` 找溢出/重叠/出界，按 WCAG 公式算对比度），
+在 10 组「宽度 × 主题 × 面板」组合上跑。它抓到的三个真问题
+（检索面板那一行超出 76px、两套主题各有一处对比度不足）都是肉眼看截图**不一定**会注意到的。
+截图能看出"别扭"，几何断言能指出"哪个元素超出了几像素"。
+
+#### 手机宽度下的横向溢出（一次几何体检才抓到的真 bug）
+
+同一套几何断言在 **390px** 上复跑时发现：文档 `scrollWidth` 是 479px，
+而视口只有 375px —— 整个页面能横向拖动。两个叠加的原因：
+
+1. **`.cols` 的窄屏断点写的是 `1fr`**。`1fr` 等价于 `minmax(auto, 1fr)`，
+   而 `auto` 的下限是内容的 `min-content` —— 轨道因此**拒绝**缩到内容宽度以下。
+   改成 `minmax(0, 1fr)` 才真正允许收缩。这是 grid 的经典陷阱：
+   "能收缩"的前提是下限写死为 0。
+2. **网格子项默认 `min-width: auto`**，会反过来把轨道撑开。
+   补一条 `.cols > * { min-width: 0 }`。
+
+还有一处是**漏列**：窄屏的横向滚动规则原来写的是
+`#res-box,#appr-box,#users-box,#audit-box` —— 只有 4 个。
+后来陆续加的 `labs / kb / viol / notif / reg` 五个面板没跟上，
+于是它们内部的表格（`min-width:440px`，**有意为之**：时段列折断就读不出来）
+把整个文档撑宽。改成属性选择器 `[id$="-box"]`：新增面板自动被覆盖，不会再漏。
+
+> 这条 bug 的价值在于它**只在最窄的那一档出现**：1280 / 1024 / 860 / 640 全部正常，
+> 唯独 390px 溢出。多档位跑断言不是"更保险"，是**唯一**能发现它的方式。
+
+### 字体：为什么内嵌，以及为什么"生成物"必须可复现
+
+界面的身份支点是**衬线体读数**（仪表数字用 Newsreader，正文用 Geist）。
+这两款字体以 woff2 子集 **base64 内嵌在 `app.css` 顶部**，不走 CDN ——
+因为 `dist/console.html` 有一条硬约束：**双击就能打开，不依赖服务、不依赖网络**。
+外链字体一断，页面就退回系统默认字体，"读数像印刷品"这件事立刻消失。
+
+三条字体共约 53 KB（base64 后），只保留拉丁子集：汉字由系统字体承担
+（`--font-display` 的回退链里必须留着中文那一档）。把 CJK 塞进 webfont
+会让体积从 53 KB 涨到 1 MB 以上，而收益只是"字形统一"——对内部工具不划算。
+
+生成脚本是 `scripts/embed_fonts.py`：
+
+```bash
+python scripts/embed_fonts.py          # 用已下载的 woff2 重新生成
+python scripts/embed_fonts.py --fetch  # 先下载再生成
+```
+
+**这里踩过一个坑，值得单独记**：内嵌的 base64 是**生成物**，而生成物
+如果不能稳定复现，"它和脚本是否一致"就永远没法验证。最初的脚本每次跑
+产出的字节都不同（实测三次：19316 / 19336 / 19404 B），
+于是每次重跑 `app.css` 都会产生一个**毫无意义的 diff**。
+
+定位过程：先确认子集化本身是确定的（同一输入三次 hash 相同），
+再逐表比对哈希，发现只有 `head` 表在变 —— 那是 `head.modified` 时间戳。
+fontTools 默认 `recalcTimestamp=True`，在 `save()` 时把该字段改写成"当前时间"。
+修法是实例化后显式 `f.recalcTimestamp = False`（`instantiateVariableFont`
+会派生新的 `TTFont`，属性不保证继承，所以要在派生之后设）。
+修完两次生成的字节完全一致，`app.css` 的 diff 从此只反映**真实改动**。
+
+> 顺带一条判据：**"生成物 + 生成脚本"必须成对存在**。只贴一次 base64 而没有脚本，
+> 下一个人就不知道它从哪来、怎么更新；有脚本但不能复现，则连"跑一遍看看"都做不到。
+
 ---
 
 ## 验证
 
 ```bash
-pytest                          # 982 passed, 17 skipped（跳过 = 需真实 PostgreSQL 的用例，CI 的 postgres job 会执行）
+pytest                          # 1010 passed, 16 skipped（跳过 = 需真实 PostgreSQL 的用例，CI 的 postgres job 会执行）
 python main.py eval             # 14/14（mock 模型）
 python main.py loadtest --concurrency 40 --rounds 3
 python main.py access-demo      # 8/8，但**只在实验室开放时段内**才全绿
@@ -1060,10 +1150,11 @@ python scripts/smoke_http.py    # 83/83（真实 uvicorn 进程，含 react 模�
 python scripts/accept_deploy.py  # 25/25（真 compose 栈：真 PG + 真容器 + 真下单）
 python scripts/check_openapi.py --check   # OpenAPI 契约未漂移则静默通过
 python build_web.py             # 打包单文件控制台 → dist/console.html
+python scripts/embed_fonts.py   # 重新生成内嵌字体子集（可复现，见「字体」一节）
 ```
 
 ```
-pytest:            999 collected = 982 passed + 17 skipped（33 个测试文件，`pytest --collect-only -q`；跳过项为需真实 PostgreSQL 的用例，由 CI 执行）
+pytest:            1026 collected = 1010 passed + 16 skipped（33 个测试文件，`pytest --collect-only -q`；跳过项为需真实 PostgreSQL 的用例，由 CI 执行）
 评测报告:           意图准确率 100.0% · 槽位准确率 100.0% · 端到端通过率 100.0%（14/14）
 并发压测:           3 轮 × 40 并发，每轮恰好 1 成功、39 明确冲突、0 异常
 区间重叠竞态:        3/3 未超卖
@@ -1204,13 +1295,15 @@ Docker Desktop → Settings → Docker Engine 里加：
 > 完整的架构评估（技术栈主流性、分层局限、分期升级方案、安全与容量要求）见
 > [`docs/ENTERPRISE-UPGRADE.md`](docs/ENTERPRISE-UPGRADE.md)。P0 三项已全部完成。
 
-- **会话状态在进程内存里**：`SessionStore` 只保存「上一轮列出的备选」，用于对上「第 2 个」。
-  多进程/多副本部署时会话会漂移，生产形态应当换 Redis 或数据库表。
-- **限流是单进程的**：进程内滑动窗口，重启即清零，**多副本下等于把配额乘以副本数**。
-  生产必须换成 Redis 计数器。
+- **进程外状态（P2-1 已落地一半）**：`SessionStore` 与 chat/注册限流的计数默认仍在
+  进程内存里（`LAB_STATE_BACKEND=memory`）；设为 `sqlite` 后**同机多进程**共享一份、
+  重启不丢。跨**机器**的多副本仍然需要 Redis / 共享数据库 —— 那是 P2 未完的半截。
   （补一句实测：随仓库发布的 `docker-compose.yml` 里 **api 只有一个副本**，
   所以这条在默认拓扑下不成立；它只在有人横向扩容时才变成真问题。
   重新评估的触发条件与理由写在 `docs/DELIVERY-READINESS.md` 的 P2-10。）
+- **登录失败锁定仍是进程内的**：`LoginThrottle`（窗口 + 锁定两段状态）没有随
+  P2-1 一起外置 —— 搬进 SQL 的复杂度与它的收益不成比例，跨机部署需求出现时再做。
+  它防的是"单机上拿脚本试口令"，这个边界在它的 docstring 里写明了。
 - **没有 refresh token**：访问令牌 2 小时到期就得重新登录。刻意这么选 ——
   与其签一个 7 天的令牌假装很安全，不如把风险窗口压小。
 - **违约判定只在「门禁真的在跑」时成立，且处罚默认关闭**：判定依据是

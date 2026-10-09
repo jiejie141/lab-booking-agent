@@ -18,6 +18,7 @@ import threading
 import time
 from collections import deque
 
+from .localstate import connect, init_state_db
 from .metrics import record_state_backend
 
 
@@ -187,3 +188,94 @@ class LoginThrottle:
         now = self._clock()
         with self._lock:
             return sum(1 for until in self._locked_until.values() if until > now)
+
+
+class SqliteSlidingWindowLimiter:
+    """:class:`SlidingWindowLimiter` 的 SQLite 版：计数跨进程共享、重启不清零（P2-1）。
+
+    接口与进程内版一致（``hit`` / ``reset`` / ``enabled``），在 api.py 里按
+    配置二选一，调用方无感。把计数放进 SQLite 带来三个**必要**的变化：
+
+    * **时钟换成墙钟**（``time.time()``）：``monotonic`` 的起点是每个进程
+      自己的，跨进程共享的窗口绝不能用。代价是限流器开始依赖系统时钟 ——
+      NTP 回跳会拉长窗口。两害相权：跨进程是真实需求，时钟回跳是罕见事件；
+    * 「查计数 + 记一笔」放进同一条 ``BEGIN IMMEDIATE`` 事务：多进程并发下
+      两个进程同时数出"还剩一个名额"再都写入，就会超发 —— 写锁把这两步
+      变成不可分割的动作（WAL 下写锁串行，代价可接受）；
+    * 清理顺手做：每次 hit 先剪本 key 的过期记录，每 32 次 hit 全局扫一遍 ——
+      与内存版 ``_sweep`` 同一条理由：不清就是慢性泄漏，只是从内存换成磁盘。
+
+    边界照实说：它解决的是**同机多进程**（uvicorn --workers、脚本与服务并存），
+    跨机器的多副本仍需 Redis / 共享数据库（P2）。登录失败锁定（LoginThrottle）
+    维持进程内版本 —— 锁定语义（窗口 + 锁定两段状态）搬进 SQL 的复杂度
+    与它的收益不成比例，等真有跨机部署需求时一起做。
+    """
+
+    def __init__(
+        self,
+        limit: int,
+        window_seconds: float = 60.0,
+        *,
+        path: str,
+    ) -> None:
+        self.limit = limit
+        self.window = window_seconds
+        self._path = path
+        self._prunes = 0
+        init_state_db(path)  # 幂等：与 SessionStore 同一约定，存储自建表
+        # 由组件自己上报后端，与内存版同一条约定。
+        record_state_backend("ratelimit", "sqlite")
+
+    @property
+    def enabled(self) -> bool:
+        return self.limit > 0
+
+    def hit(self, key: str) -> tuple[bool, int]:
+        """记一次访问。返回 ``(是否放行, 建议等待秒数)``。``limit <= 0`` 关闭。"""
+        if not self.enabled:
+            return True, 0
+
+        now = time.time()
+        cutoff = now - self.window
+        conn = connect(self._path)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM rate_hit WHERE key = ? AND ts <= ?", (key, cutoff))
+            rows = conn.execute(
+                "SELECT ts FROM rate_hit WHERE key = ? ORDER BY ts", (key,)
+            ).fetchall()
+            if len(rows) >= self.limit:
+                # 最早那次请求滑出窗口时就能再试
+                oldest = rows[0][0]
+                retry_after = max(1, int(self.window - (now - oldest)) + 1)
+                conn.execute("COMMIT")  # 拒绝也要提交 —— 上面的剪枝是有效操作
+                return False, retry_after
+            conn.execute("INSERT INTO rate_hit (key, ts) VALUES (?, ?)", (key, now))
+            # 全局清扫：低频做，扫掉「再也不会被 hit 到的 key」的陈年记录。
+            self._prunes += 1
+            if self._prunes % 32 == 0:
+                conn.execute("DELETE FROM rate_hit WHERE ts <= ?", (cutoff,))
+            conn.execute("COMMIT")
+            return True, 0
+        finally:
+            conn.close()
+
+    def reset(self, key: str | None = None) -> None:
+        """清空计数。测试与运维用。"""
+        conn = connect(self._path)
+        try:
+            if key is None:
+                conn.execute("DELETE FROM rate_hit")
+            else:
+                conn.execute("DELETE FROM rate_hit WHERE key = ?", (key,))
+        finally:
+            conn.close()
+
+    def tracked_keys(self) -> int:
+        """当前跟踪的 key 数（用于验证不会无界增长）。"""
+        conn = connect(self._path)
+        try:
+            row = conn.execute("SELECT COUNT(DISTINCT key) FROM rate_hit").fetchone()
+            return int(row[0] if row else 0)
+        finally:
+            conn.close()

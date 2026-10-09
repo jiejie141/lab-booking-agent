@@ -51,6 +51,18 @@ async def isolated_db(tmp_path, monkeypatch):
     # 「测试环境允许不安全」由这一行统一声明，而不是散落各处。
     # 真正验证 fail-closed 行为的用例在 tests/test_hardening.py。
     monkeypatch.setenv("LAB_ALLOW_INSECURE_DEFAULTS", "true")
+    # 状态后端固定为 memory（限流计数 / 会话 / 登录锁定）。
+    #
+    # 2026-10-09：把本地 .env 的 LAB_STATE_BACKEND 从 memory 改成 sqlite 之后，
+    # 四条用例开始红 —— 但**红的方式很不像状态后端的问题**：
+    # 报的是「注册重复邮箱没返回 409」「聊天第一次就 429」。
+    # 真因是 sqlite 后端把这些计数**持久化到了同一个文件**，而 monkeypatch.setenv
+    # 的优先级高于 .env，所以这里固定住就能让用例重新互不干扰。
+    #
+    # 为什么不能只靠"每例换一个库文件"：那换的是业务库（LAB_DATABASE_URL），
+    # 而限流计数走的是 LAB_STATE_DB_PATH —— 两条路径，之前只有一条被隔离了。
+    # 要测 sqlite 后端本身，用例自己显式覆盖这一行（见 test_state_store.py）。
+    monkeypatch.setenv("LAB_STATE_BACKEND", "memory")
 
     from lagent import db as db_module
     from lagent.config import reset_settings_cache

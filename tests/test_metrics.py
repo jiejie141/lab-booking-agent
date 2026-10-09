@@ -1083,6 +1083,42 @@ class TestStateBackendIsObservable:
         SessionStore()
         text = render()
         assert 'lagent_state_backend{component="session",backend="memory"} 1' in text
+    def test_one_component_reports_exactly_one_backend(self, tmp_path):
+        """同一个 component 在一个进程里只能有一条序列。
+
+        这条规则是 LagentStateBackendSplitBrain（count by component > 1）的
+        前提：那条告警的意思是「有多个副本各持一份内存态」。一旦单个进程
+        自己就报出两条（memory + sqlite），单副本会被误判成已扩容 ——
+        一个永远在响的告警和没有告警一样糟。
+
+        真实踩到的形状：SqliteSessionStore 继承 SessionStore，基类构造先登记
+        "memory"、子类再登记 "sqlite"，两条同时留下。修法是让后端由类属性
+        决定（构造期只报一次），而不是构造后补一条。
+        """
+        from lagent.agent.state import SqliteSessionStore
+        from lagent.ratelimit import SqliteSlidingWindowLimiter
+
+        reset_metrics()
+        SqliteSessionStore(str(tmp_path / "state.db"))
+        SqliteSlidingWindowLimiter(5, 60.0, path=str(tmp_path / "state.db"))
+        text = render()
+
+        assert 'lagent_state_backend{component="session",backend="sqlite"} 1' in text
+        assert 'lagent_state_backend{component="ratelimit",backend="sqlite"} 1' in text
+        # 关键断言：sqlite 模式下不该再有 memory 的那条。
+        assert 'component="session",backend="memory"' not in text
+        assert 'component="ratelimit",backend="memory"' not in text
+
+    def test_the_import_time_fallback_does_not_claim_a_backend(self):
+        """模块级 STORE 是 import 期产物，此刻还不知道进程用哪个后端。
+
+        它若照报 "memory"，sqlite 模式下就会凭空多出一条 —— 与上一条同源的
+        假分裂。真实后端由 api.py 按配置构造的那个实例上报。
+        """
+        from lagent.agent.state import STORE  # noqa: F401
+
+        reset_metrics()
+        assert 'component="session",backend=' not in render()
 
 
 class TestAlertRulesReferenceRealMetrics:

@@ -59,7 +59,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import __version__, audit, notify
 from .agent.graph import build_agent_from_settings, set_catalog
-from .agent.state import SessionStore
+from .agent.state import SessionStore, SqliteSessionStore
 from .agent.tools import TOOL_SPECS
 from .backup import backup_dir
 from .clock import now_local
@@ -100,6 +100,7 @@ from .domain.catalog import (
 # 加前缀反而会让 API 层的每一行变长；模块名 violations 已经定了性。
 from .domain.violations import list_violations, pardon, state_for
 from .knowledge.retriever import build_retriever, fallback_reason
+from .localstate import init_state_db
 from .metrics import (
     http_in_progress_dec,
     http_in_progress_inc,
@@ -120,6 +121,7 @@ from .models import (
     ROLE_ADMIN,
     ROLE_CAPS,
     ROLE_RANK,
+    ROLE_USER,
     STATUS_PENDING,
     USER_ROLES,
     EntryPermit,
@@ -141,7 +143,7 @@ from .obs import (
     new_request_id,
     sanitize_request_id,
 )
-from .ratelimit import LoginThrottle, SlidingWindowLimiter
+from .ratelimit import LoginThrottle, SlidingWindowLimiter, SqliteSlidingWindowLimiter
 from .schemas import (
     AccessIssueRequest,
     AccessIssueResponse,
@@ -160,6 +162,7 @@ from .schemas import (
     LabUpdate,
     LoginRequest,
     MeOut,
+    RegisterRequest,
     RescheduleRequest,
     ReservationCreate,
     RetryNotificationRequest,
@@ -337,12 +340,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         rows = (await session.execute(select(Equipment))).scalars().all()
         set_catalog([(row.name, row.category) for row in rows])
 
-    app.state.store = SessionStore()
-    app.state.agent = build_agent_from_settings(app.state.store)
+    # 会话与限流的存放后端（P2-1）：memory 是历史默认；sqlite 让同机多进程
+    # 共享一份状态、重启不丢。两者对外接口一致，调用方（端点）无感。
     # 限流器挂在 app.state 上而不是模块级：每个应用实例一份，
     # 测试之间不会互相把配额用光（模块级单例曾让第二个用例莫名 429）。
     settings = get_settings()
-    app.state.chat_limiter = SlidingWindowLimiter(settings.rate_limit_per_minute, 60.0)
+    if settings.state_backend == "sqlite":
+        init_state_db(settings.state_db_path)
+        app.state.store = SqliteSessionStore(
+            settings.state_db_path, ttl_seconds=settings.session_ttl_hours * 3600
+        )
+        app.state.chat_limiter = SqliteSlidingWindowLimiter(
+            settings.rate_limit_per_minute, 60.0, path=settings.state_db_path
+        )
+        app.state.register_limiter = SqliteSlidingWindowLimiter(
+            settings.register_per_hour, 3600.0, path=settings.state_db_path
+        )
+    else:
+        app.state.store = SessionStore()
+        app.state.chat_limiter = SlidingWindowLimiter(settings.rate_limit_per_minute, 60.0)
+        app.state.register_limiter = SlidingWindowLimiter(settings.register_per_hour, 3600.0)
+    app.state.agent = build_agent_from_settings(app.state.store)
     # 登录失败锁定（P1-7）。同样挂在 app.state 上：模块级单例会让
     # 「上一个用例把账号锁了」泄漏到下一个用例里。
     app.state.login_throttle = LoginThrottle(
@@ -855,6 +873,69 @@ def _me_out(row: User) -> MeOut:
         certs=list(row.certs or []),
         rank=role_rank(row.role),
         capabilities=list(role_capabilities(row.role)),
+    )
+
+
+@router.post("/api/auth/register", response_model=TokenResponse)
+async def register(body: RegisterRequest, request: Request) -> TokenResponse:
+    """自助注册（P2-2）：预约人自己拿号，不再人人找管理员开账号。
+
+    三条约束缺一不可（背景见 config.registration_enabled 的注释）：
+
+    * **角色强制为最低级** —— ``RegisterRequest`` 没有 role 字段
+      （extra=forbid，带了直接 422），这里再显式传 ``ROLE_USER`` 做双保险；
+      提权仍然只能走管理员 user.manage 的角色层级。
+    * **按来源 IP 限流** —— 注册是未认证接口，限流对象只能是人所在的地址；
+      按 IP 而不是按用户名限：攻击者会换用户名，不会轻易换出口 IP。
+    * **成功与否都进审计** —— 「同一个 IP 在批量造号」这个模式只有把
+      注册记下来才看得见。
+
+    注册成功直接发令牌：刚证明过自己知道密码的人不需要再登录一次。
+    用户名冲突（409）与邮箱冲突走 CatalogError → 409 的既有翻译，
+    不区分"用户名已存在"和"邮箱已存在" —— 与 login 同一条反枚举思路。
+    """
+    settings = get_settings()
+    if not settings.registration_enabled:
+        raise HTTPException(status_code=403, detail="注册已关闭，请联系管理员开通账号")
+
+    limiter = getattr(request.app.state, "register_limiter", None)
+    if limiter is not None and limiter.enabled:
+        allowed, retry_after = limiter.hit(f"register:{_client_host(request)}")
+        if not allowed:
+            record_rate_limited("register")
+            raise HTTPException(
+                status_code=429,
+                detail=f"注册尝试过于频繁，请 {retry_after} 秒后再试",
+                headers={"Retry-After": str(retry_after)},
+            )
+
+    payload = UserCreate(
+        username=body.username,
+        email=body.email,
+        role=ROLE_USER,
+        certs=[],
+        password=body.password,
+    )
+    try:
+        async with session_scope() as session:
+            user = await create_user(session, payload)
+    except CatalogError as exc:
+        raise _catalog_error(exc) from exc
+
+    token = create_access_token(user_id=user.id, username=user.username, role=user.role)
+    await audit.record(
+        action=audit.ACTION_REGISTER,
+        actor_id=user.id,
+        actor_name=user.username,
+        target_type="user",
+        target_id=user.id,
+        detail="self_register",
+        client_host=_client_host(request),
+    )
+    return TokenResponse(
+        access_token=token,
+        expires_in=settings.jwt_ttl_minutes * 60,
+        user=_me_out(user),
     )
 
 

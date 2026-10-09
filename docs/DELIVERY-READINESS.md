@@ -153,8 +153,11 @@ react → deterministic → 引导式表单三级，且**能说清边界**：它
 
 - **单进程单 worker**（`uvicorn.run`），`/api/agent/chat` 真实模型下是 5–30 秒长请求，
   占着 worker 不放，**无队列化 / 无 202 异步**。
-- **会话状态在进程内存**（`agent/state.py:72` `SessionStore`）：重启即丢、多副本会漂移。
-- **限流是单进程的**：多副本部署等于把配额乘以副本数（`README` 已自述）。
+- **会话状态默认在进程内存**（`agent/state.py` `SessionStore`）：重启即丢。设
+  `LAB_STATE_BACKEND=sqlite` 后同机多进程共享一份、重启不丢；**跨机器**多副本仍会漂移
+  （需要 Redis / 共享库，见 `OPEN-ISSUES.md` #5）。
+- **限流默认是单进程的**：`sqlite` 后端接住同机多进程；**跨机器**多副本仍等于把配额
+  乘以副本数。两条都由 `lagent_state_backend` 指标在扩容时立刻暴露。
 - ~~**`GET /api/reservations` 无分页**：`list_reservations`（`booking.py:506`）不带 limit，
   管理员不传 `user_id` 时返回**全量**。~~
   → **已整改**（`5dc4aa0`）：可选 `limit`/`offset`，总数走 `X-Total-Count` 响应头。

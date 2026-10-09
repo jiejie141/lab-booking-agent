@@ -14,6 +14,7 @@ live 模式下换成 RealLLMClient，其余代码一行不改。
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import re
@@ -40,6 +41,26 @@ from ..schemas import HARD_CONSTRAINTS, IntentKind, IntentResult, Proposal, Requ
 
 class LLMError(RuntimeError):
     """模型调用失败。调用方据此走降级路径，而不是把异常抛给用户。"""
+
+
+def _strip_json_fence(text: str) -> str:
+    """剥掉模型自作主张裹上的 markdown 代码围栏。
+
+    实测（P2-3）：Moonshot 的 kimi-k2.6 即使带了 ``response_format=json_object``
+    也会把输出包成 `` ```json\\n{...}\\n``` `` —— 参数保证了围栏**里面**是合法
+    JSON，但围栏本身让 ``json.loads`` 在第 0 个字符就炸。处理顺序：
+    先剥围栏，剥完直接解析；更花哨的"提取首个 JSON 对象"先不做 ——
+    等真出现围栏之外的花样再加，不为想象中的模型行为写代码。
+    """
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    # 首行是 ```json / ``` 之类的围栏，末行是收尾 ```，中间才是负载
+    body = "\n".join(lines[1:-1]) if len(lines) >= 3 else ""
+    if body.rstrip().endswith("```"):
+        body = body.rstrip()[:-3]
+    return body.strip()
 
 
 class LLMClient(Protocol):
@@ -192,6 +213,16 @@ def parse_duration(text: str) -> float | None:
 # ==========================================================================
 # 离线确定性实现
 # ==========================================================================
+def _temperature(settings, default: float) -> float:
+    """模型级 temperature 覆盖（config.llm_temperature）。
+
+    None = 回落到各调用点的内置值；设了值就是 model 级硬约束 ——
+    某些推理型端点只接受一个固定 temperature，按用途拆配置只会
+    配出自相矛盾的组合（比如抽取要 0、回复要 0.2，而端点只收 1）。
+    """
+    return settings.llm_temperature if settings.llm_temperature is not None else default
+
+
 class MockLLMClient:
     """离线假模型：确定性、可复现、零网络。
 
@@ -407,17 +438,25 @@ class MockLLMClient:
                 head += "原因：" + "；".join(blockers[:3]) + "。"
             return head + "要不要换个日期、缩短时长，或改用同类设备？"
 
-        if satisfied:
-            head = "找到完全满足你要求的时段："
-        else:
-            head = "原条件约不到，下面是可选的备选方案（都标注了放宽了什么）："
-
-        lines = [head]
-        for idx, item in enumerate(proposals, start=1):
-            relax = "；".join(item.relaxations) if item.relaxations else "无放宽"
-            lines.append(f"{idx}. {item.label()} · {item.hours:g} 小时 · 放宽：{relax}")
+        # 这里**只给结论和原因，不再逐条复述方案**。
+        #
+        # 2026-10-09 改：控制台会把 proposals 渲染成结构化的卡片（设备 / 时段 /
+        # 放宽了什么 / 选这个按钮），而这段话同时把它们列一遍 —— 同一件事说了两遍，
+        # 且要横向比较"这几条各自放宽了什么"时，文字版远不如卡片。
+        # 分工变成：**代码给事实与结构，文字只给结论**。
+        # 逐条文字在纯文本通道（CLI / 脚本调接口）仍然有用，见下面 detail 参数。
+        head = (
+            "找到完全满足你要求的时段，请选择一条下单："
+            if satisfied
+            else "原条件约不到。下面是放宽后可行的方案，每条都标注了放宽什么："
+        )
         if not satisfied and blockers:
-            lines.append("原方案不可行的原因：" + "；".join(blockers[:2]))
+            head += "\n原因：" + "；".join(blockers[:2]) + "。"
+        lines = [head]
+        # 编号仍然报出来：用户的"第 2 个"要能对上号，而这段文字是
+        # 会话历史的一部分（模型与状态机都从这里读上一轮给了什么）。
+        for idx, item in enumerate(proposals, start=1):
+            lines.append(f"{idx}. {item.label()}")
         lines.append("回复序号我帮你下单。")
         return "\n".join(lines)
 
@@ -453,7 +492,7 @@ class RealLLMClient:
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                "temperature": 0,
+                "temperature": _temperature(self.settings, 0),
                 "response_format": {"type": "json_object"},
             }
             last: Exception | None = None
@@ -466,8 +505,8 @@ class RealLLMClient:
                             headers={"Authorization": f"Bearer {self.settings.llm_api_key}"},
                         )
                         resp.raise_for_status()
-                        content = resp.json()["choices"][0]["message"]["content"]
-                        return json.loads(content)
+                        raw = resp.json()["choices"][0]["message"]["content"] or ""
+                        return json.loads(_strip_json_fence(raw))
                 except Exception as exc:  # noqa: BLE001
                     last = exc
                     # 记「额外的 HTTP 次数」而不是"失败了的调用"：一个 op 重试两次
@@ -475,6 +514,9 @@ class RealLLMClient:
                     # 上却是同一件事 —— 后者才是要提前看到的信号。
                     if attempt < self.settings.llm_max_retry:
                         record_llm_retry(op)
+                        # 立即重试只是把 429 的配额再撞一次：小步退避，
+                        # 免费档（低 RPM）端点上这一行是成败分界。
+                        await asyncio.sleep(0.5 * (attempt + 1))
             raise LLMError(f"模型调用失败：{last}")
 
     async def _text(self, system: str, user: str, op: str) -> str:
@@ -493,7 +535,7 @@ class RealLLMClient:
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                "temperature": 0.2,
+                "temperature": _temperature(self.settings, 0.2),
             }
             try:
                 async with httpx.AsyncClient(timeout=self.settings.llm_timeout) as client:
@@ -531,7 +573,7 @@ class RealLLMClient:
                 "messages": messages,
                 "tools": tools,
                 "tool_choice": "auto",
-                "temperature": 0,
+                "temperature": _temperature(self.settings, 0),
             }
             last: Exception | None = None
             for attempt in range(self.settings.llm_max_retry + 1):
@@ -555,6 +597,7 @@ class RealLLMClient:
                     last = exc
                     if attempt < self.settings.llm_max_retry:
                         record_llm_retry("chat_tools")
+                        await asyncio.sleep(0.5 * (attempt + 1))
             raise LLMError(f"模型调用失败：{last}")
 
     async def classify_intent(self, message: str) -> IntentResult:
@@ -582,7 +625,11 @@ class RealLLMClient:
             f"今天是 {today}。可选设备目录：{catalog}。\n历史：{history}\n用户现在说：{message}",
             op="extract_requirement",
         )
-        cleaned = {k: v for k, v in data.items() if v not in ("", "null", "未知")}
+        # 三种"没给"都要滤掉：空串、字面量 "null"（文本模型）、JSON null
+        # （None —— kimi-k2.6 会把"不知道"显式输出为 null，而 Requirement.purpose
+        # 是 str，None 直传就是一条 ValidationError。此 bug 在 DeepSeek 上潜伏，
+        # 换一家输出习惯不同的模型立刻现形 —— 模型一换，边界全换）。
+        cleaned = {k: v for k, v in data.items() if v not in ("", "null", "未知", None)}
         try:
             return Requirement(**cleaned).normalized()
         except Exception as exc:
@@ -631,7 +678,15 @@ class RealLLMClient:
             "严禁添加事实里没有的时段、设备或规范条文；"
             "如果是备选方案，务必说明每条放宽了什么；"
             "如果 hard_blockers 非空，说明这是资质或设备状态问题，"
-            "不要建议用户更换时段。",
+            "不要建议用户更换时段。"
+            # 语言约束单独强调，是因为它真的漏过：
+            # 实测拿到过「您 requested 的 2026-10-10 14:00–16:00 荧光光谱仪 已被占用」——
+            # 事实全对、措辞里却夹了一个英文词。payload 里混着英文键名
+            # （kind/satisfied/proposals/hard_blockers），模型会顺着上下文
+            # 把英文带进正文。这类瑕疵不影响判分逻辑，但**一眼就能看出是机器写的**，
+            # 而"回复像是助手说的"恰恰是这个项目对外展示的核心。
+            "**全文必须使用中文**：不得出现英文单词、英文短语或中英混写，"
+            "设备型号（如 F-7000）与时间（如 14:00）除外。",
             json.dumps(payload, ensure_ascii=False),
             op="compose",
         )

@@ -30,6 +30,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 from typing import Any
 
@@ -159,7 +160,10 @@ async def create_user(session: AsyncSession, payload: UserCreate) -> User:
 
     data = payload.model_dump()
     password = data.pop("password")
-    user = User(**data, password_hash=hash_password(password))
+    # scrypt 约 140ms/次，放线程池执行。管理员建号低频所以以前无所谓，
+    # 但自助注册（P2-2）复用这条路径且是**未认证**入口 —— 在事件循环里
+    # 卡 140ms 等于给外部一个免费的卡顿开关（与 login 的处理同一条理由）。
+    user = User(**data, password_hash=await asyncio.to_thread(hash_password, password))
     session.add(user)
     await _flush(session, "用户", hint=f"用户名 {payload.username} 或邮箱已存在")
     await sync_certs(session, user, payload.certs, actor="create")

@@ -52,7 +52,8 @@ src/lagent/
 ├── obs.py                 JSON 单行日志 + request_id 贯穿
 ├── metrics.py             16 指标 + 注册表（零依赖 Prometheus 文本格式）
 ├── audit.py               审计（独立事务）
-├── ratelimit.py           限流 + 登录失败锁定（进程内）
+├── localstate.py          进程外状态（SQLite 短连接 + WAL 三件套）
+├── ratelimit.py           限流（memory / sqlite 双后端）+ 登录失败锁定（进程内）
 ├── sweep.py               4 个后台清扫任务 + 循环
 ├── notify.py              通知（先落库再投递）
 ├── backup.py              备份/恢复（SQLite VACUUM INTO / PG pg_dump）
@@ -205,7 +206,7 @@ main.py → server.serve() → api.create_app()
 | 项 | 性质 | 现状 |
 |---|---|---|
 | **py3.10 job 的 pytest 曾失败过一次** | 间歇性，机制未知 | 本地用 Python 3.10.21 + 同源依赖（SQLAlchemy 2.0.54）复现不出来（848 条 exit=0）；期间无相关代码改动。**已埋伏**：CI 失败时会把 `FAILED` 行抬进**注解**（无需鉴权即可读），下次复现直接能拿到用例名 |
-| **限流与会话在进程内存** | 已评估后接受 | 发布拓扑是单副本，所以"配额 × 副本数"在默认形态下不成立；重新评估的三条触发条件写在 `DELIVERY-READINESS.md` 的 P2-10 |
+| **限流与会话的存放后端** | 同机多进程已解决，跨机待触发 | 默认 `memory`；设 `LAB_STATE_BACKEND=sqlite` 后同机多进程共享一份、重启不丢（`localstate.py` + 两个 SQLite 存储）。发布拓扑是单副本，所以"配额 × 副本数"在默认形态下不成立；**跨机器**多副本仍需 Redis，重新评估的三条触发条件写在 `DELIVERY-READINESS.md` 的 P2-10 |
 
 **环境侧（与代码无关，留个记录）**：国内网络下 `registry-1.docker.io` 不可达，
 `docker pull` 需要配 registry mirror（实测 `docker.m.daocloud.io` / `docker.1ms.run` 可用）。

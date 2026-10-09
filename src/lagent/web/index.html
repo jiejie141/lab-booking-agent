@@ -7,84 +7,165 @@
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-<!-- ============ 登录闸门（P0-2：所有业务数据都要令牌） ============ -->
+
+<!-- ==========================================================================
+     登录闸门（P0-2：所有业务数据都要令牌）
+
+     左侧不是装饰：这个项目真正想让人看见的东西 ——「约不上时告诉你放宽什么」——
+     在登录之后才看得到，但**决定要不要登录**是在这之前做的。
+     所以把三件最能说明它和普通表单系统不同的能力放在闸门左边。
+     ========================================================================== -->
 <div class="gate" id="gate">
-  <div class="box">
-    <div class="logo"><span class="mark">LB</span><b>lab-booking-agent</b></div>
-    <p class="sub">智能实验室预约控制台 · 需登录后使用</p>
+  <div class="gate-card">
 
-    <label class="f">用户名</label>
-    <input id="lg-user" autocomplete="username" placeholder="例如：李娜">
-    <label class="f">密码</label>
-    <input id="lg-pass" type="password" autocomplete="current-password" placeholder="••••••••">
-    <div class="err" id="lg-err"></div>
-    <button class="btn" id="lg-go">登录</button>
+    <aside class="gate-aside">
+      <div class="brand-lg">
+        <span class="mark">LB</span>
+        <div class="brand-lg-txt">
+          <b>lab-booking-agent</b>
+          <small>智能实验室预约</small>
+        </div>
+      </div>
 
-    <div class="demo">
-      <div class="t">演示账号（点击填充）· 资质不同，能约到的设备也不同</div>
-      <div class="pill-row">
-        <button class="btn ghost sm" data-demo="张伟|zhangwei@123">张伟 · 仅光谱</button>
-        <button class="btn ghost sm" data-demo="李娜|lina@123">李娜 · 资质齐全</button>
-        <button class="btn ghost sm" data-demo="管理员|admin@123">管理员 · 可看全量</button>
+      <p class="gate-lede">
+        预约失败时，它不会只回一句「该时段不可预约」，<br>
+        而是告诉你<strong>放宽哪一条约束就能约上</strong>。
+      </p>
+
+      <ul class="gate-points">
+        <li><span class="k">01</span><span><b>约束协商</b>冲突时给出带取舍说明的备选方案，每条都标注放宽了什么</span></li>
+        <li><span class="k">02</span><span><b>资质准入</b>设备要培训资质才放行，这是硬约束，换时段解决不了</span></li>
+        <li><span class="k">03</span><span><b>全链路留痕</b>下单、审批、驳回、豁免，每一步都进审计流水</span></li>
+      </ul>
+
+      <div class="gate-foot">FastAPI · LangGraph · SQLAlchemy 2.0 · DeepSeek</div>
+    </aside>
+
+    <div class="box">
+      <div class="box-h">
+        <h2>登录</h2>
+        <p class="sub">登录后进入控制台 · 身份取自令牌，不由前端指定</p>
+      </div>
+
+      <div class="field">
+        <label class="f" for="lg-user">用户名</label>
+        <input id="lg-user" autocomplete="username" placeholder="例如：李娜">
+      </div>
+      <div class="field">
+        <label class="f" for="lg-pass">密码</label>
+        <input id="lg-pass" type="password" autocomplete="current-password" placeholder="••••••••">
+      </div>
+      <div class="err" id="lg-err"></div>
+      <button class="btn btn-block" id="lg-go">登录</button>
+
+      <!-- 自助注册（P2-2）：预约人自己拿号，角色固定最低级，提权走管理员 -->
+      <div id="reg-box" hidden>
+        <div class="divider"><span>注册新账号</span></div>
+        <div class="field">
+          <label class="f" for="rg-user">用户名（3-32 位字母/数字/下划线）</label>
+          <input id="rg-user" autocomplete="username" placeholder="例如：newstu">
+        </div>
+        <div class="field">
+          <label class="f" for="rg-email">邮箱</label>
+          <input id="rg-email" type="email" autocomplete="email" placeholder="用于找回与通知">
+        </div>
+        <div class="field">
+          <label class="f" for="rg-pass">密码（至少 8 位）</label>
+          <input id="rg-pass" type="password" autocomplete="new-password" placeholder="••••••••">
+        </div>
+        <div class="err" id="rg-err"></div>
+        <button class="btn btn-block" id="rg-go">注册并登录</button>
+      </div>
+
+      <p class="gate-toggle"><a href="#" id="tg-reg">还没有账号？注册一个</a></p>
+
+      <div class="demo">
+        <div class="t">演示账号 · 点击填充</div>
+        <div class="pill-row">
+          <button class="btn ghost sm" data-demo="张伟|zhangwei@123">张伟 · 仅光谱</button>
+          <button class="btn ghost sm" data-demo="李娜|lina@123">李娜 · 资质齐全</button>
+          <button class="btn ghost sm" data-demo="管理员|admin@123">管理员 · 可看全量</button>
+        </div>
+        <div class="hint">资质不同，能约到的设备也不同 —— 用张伟约离心机会被拦下。</div>
       </div>
     </div>
+
   </div>
 </div>
 
+<!-- ========================================================================== -->
 <header class="top">
   <div class="top-in">
     <div class="brand">
       <span class="mark">LB</span>
-      <span>lab-booking-agent<small>智能实验室预约</small></span>
+      <span class="brand-txt">lab-booking-agent<small>智能实验室预约</small></span>
     </div>
     <div class="spacer"></div>
-    <span class="badge" id="badge-user" hidden>
-      <span class="dot"></span><b id="who-name">–</b><span class="who-role" id="who-role"></span>
-    </span>
-    <button class="icon-btn" id="btn-logout" title="退出登录" aria-label="退出登录" hidden></button>
-    <span class="badge" id="badge-mode"><span class="dot" id="dot-health"></span>连接中…</span>
-    <span class="badge">检索 <b id="badge-backend">–</b></span>
-    <span class="badge">时段 <b id="badge-now">–</b></span>
+    <div class="chips">
+      <span class="badge" id="badge-user" hidden>
+        <span class="dot"></span><b id="who-name">–</b><span class="who-role" id="who-role"></span>
+      </span>
+      <span class="badge" id="badge-mode"><span class="dot" id="dot-health"></span>连接中…</span>
+      <span class="badge">检索 <b id="badge-backend">–</b></span>
+      <span class="badge">时段 <b id="badge-now">–</b></span>
+    </div>
+    <button class="icon-btn" id="btn-logout" title="退出登录" aria-label="退出登录" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
+    </button>
     <button class="icon-btn" id="btn-theme" title="切换主题" aria-label="切换主题"></button>
   </div>
 </header>
 
-<div class="wrap">
-  <div class="stats" id="stats">
-    <div class="stat"><div class="k">实验室</div><div class="n" id="st-labs">–</div></div>
-    <div class="stat v2"><div class="k">设备</div><div class="n" id="st-equip">–</div></div>
-    <div class="stat v3"><div class="k">有效预约</div><div class="n" id="st-active">–</div></div>
-    <div class="stat v4"><div class="k">预约总数</div><div class="n" id="st-res">–</div></div>
-  </div>
+<main class="wrap">
+
+  <section class="stats" id="stats" aria-label="概览">
+    <div class="stat">
+      <div class="stat-top"><span class="k">实验室</span><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18"/><path d="M5 21V8l7-5 7 5v13"/><path d="M9.5 21v-5h5v5"/></svg></span></div>
+      <div class="n" id="st-labs">–</div>
+    </div>
+    <div class="stat v2">
+      <div class="stat-top"><span class="k">设备</span><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6"/><path d="M10 3v6.5L5.2 18A2 2 0 0 0 7 21h10a2 2 0 0 0 1.8-3L14 9.5V3"/><path d="M7.5 15h9"/></svg></span></div>
+      <div class="n" id="st-equip">–</div>
+    </div>
+    <div class="stat v3">
+      <div class="stat-top"><span class="k">有效预约</span><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/><path d="m9 15.5 2 2 4-4"/></svg></span></div>
+      <div class="n" id="st-active">–</div>
+    </div>
+    <div class="stat v4">
+      <div class="stat-top"><span class="k">预约总数</span><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/><circle cx="7" cy="6" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="9" cy="18" r="1.6" fill="currentColor" stroke="none"/></svg></span></div>
+      <div class="n" id="st-res">–</div>
+    </div>
+  </section>
 
   <div class="cols">
+
     <!-- ============ 左：对话 ============ -->
-    <section class="card">
+    <section class="card card-chat">
       <div class="card-h">
-        <span class="t">对话协商</span>
-        <div class="spacer"></div>
+        <h2 class="card-t">对话协商</h2>
         <span class="badge" id="badge-agent">–</span>
+        <div class="spacer"></div>
+        <button class="btn ghost sm" id="btn-reset">新会话</button>
       </div>
+
       <div class="card-b">
-        <div class="row" style="margin-bottom:14px;align-items:center">
-          <div id="identity-note" style="flex:1;font-size:12px;color:var(--text-dim);min-width:0"></div>
-          <div style="flex:0 0 auto">
-            <button class="btn ghost sm" id="btn-reset">新会话</button>
+        <div class="identity" id="identity-note"></div>
+
+        <div class="msgs" id="msgs">
+          <div class="msg a">
+            <div class="who">AI</div>
+            <div class="bub">我是实验室预约助手。
+
+直接说需求即可，例如「明天下午两点想用荧光光谱仪两小时」。
+遇到时段冲突我会给出**带取舍说明**的备选方案，而不是只说「约不上」。</div>
           </div>
         </div>
 
-        <div class="msgs" id="msgs">
-          <div class="msg a"><div class="who">AI</div><div class="bub">我是实验室预约助手。
-
-直接说需求即可，例如「明天下午两点想用荧光光谱仪两小时」。
-遇到时段冲突我会给出**带取舍说明**的备选方案，而不是只说「约不上」。</div></div>
-        </div>
-
-        <div style="margin-top:14px">
-          <label class="f">你来说</label>
+        <div class="composer">
+          <label class="f" for="inp-msg">你来说</label>
           <textarea id="inp-msg" placeholder="例如：明天下午两点想用荧光光谱仪两小时"></textarea>
           <div class="hint" id="hint-inline"></div>
-          <div class="row" style="margin-top:10px">
+          <div class="composer-act">
             <button class="btn" id="btn-send">发送</button>
             <!-- 停止生成（2026-09-29 加）：只在请求进行中显示。
                  没有它，一次走神的长对话只能干等或者刷新页面。 -->
@@ -96,9 +177,10 @@
     </section>
 
     <!-- ============ 右：数据 ============ -->
-    <section class="card">
-      <div class="card-h">
-        <div class="tabs" id="tabs">
+    <section class="card card-data">
+      <div class="card-h card-h-tabs">
+        <h2 class="card-t sr-only">数据面板</h2>
+        <div class="tabs" id="tabs" role="tablist">
           <button class="tab" data-tab="book">直接预约</button>
           <button class="tab on" data-tab="labs">实验室与设备</button>
           <button class="tab" data-tab="res">预约记录</button>
@@ -110,36 +192,46 @@
                管理员只能 curl 或者读库，等于这些功能没交付到他手上。
                这与当初"预约只能靠跟模型说话"是同一类问题：
                **后端有接口 ≠ 用户点得到。** -->
-          <button class="tab" data-tab="appr"  id="tab-appr"  hidden>审批待办</button>
-          <button class="tab" data-tab="viol"  id="tab-viol"  hidden>违约</button>
+          <button class="tab" data-tab="appr" id="tab-appr" hidden>审批待办</button>
+          <button class="tab" data-tab="viol" id="tab-viol" hidden>违约</button>
           <button class="tab" data-tab="notif" id="tab-notif" hidden>通知</button>
           <button class="tab" data-tab="audit" id="tab-audit" hidden>审计</button>
         </div>
+        <div class="spacer"></div>
+        <!-- 数据新鲜度落点。原来它被 append 进卡片标题的 <h2> 里，
+             改版后那个 h2 是给读屏用的（视觉隐藏），时间戳会跟着一起消失。 -->
+        <span class="stamp" id="data-stamp"></span>
       </div>
+
       <div class="card-b">
         <!-- 直接预约：**不经过模型**的下单表单。
              对话入口很好用，但它是唯一入口时，"模型不在"= "预约功能停摆"。
              这个表单走的 POST /api/reservations 与对话底层是同一套不变式，
              只是省掉了"把中文解析成参数"这一步。 -->
         <div id="pane-book" hidden>
-          <div class="hint" style="margin-bottom:10px">
-            选设备 → 选日期与时段 → 提交。<b>这条路径不经过模型</b>，
-            Agent 不可用（额度用完 / 断网 / 端点挂了）时照样能约。
+          <div class="note">
+            <span class="note-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg></span>
+            <span>选设备 → 选日期与时段 → 提交。<b>这条路径不经过模型</b>，
+            Agent 不可用（额度用完 / 断网 / 端点挂了）时照样能约。</span>
           </div>
-          <label class="f">设备</label>
-          <select id="bk-equip"></select>
-          <div class="row" style="margin-top:8px">
-            <div style="flex:1"><label class="f">日期</label><input id="bk-date" type="date"></div>
-            <div style="flex:1"><label class="f">开始</label><select id="bk-start"></select></div>
-            <div style="flex:1"><label class="f">结束</label><select id="bk-end"></select></div>
+          <div class="field">
+            <label class="f" for="bk-equip">设备</label>
+            <select id="bk-equip"></select>
           </div>
-          <label class="f" style="margin-top:8px">用途（可选）</label>
-          <input id="bk-purpose" placeholder="例如：课程实验 · 样品测定">
-          <div class="row" style="margin-top:10px">
+          <div class="row">
+            <div class="field"><label class="f" for="bk-date">日期</label><input id="bk-date" type="date"></div>
+            <div class="field"><label class="f" for="bk-start">开始</label><select id="bk-start"></select></div>
+            <div class="field"><label class="f" for="bk-end">结束</label><select id="bk-end"></select></div>
+          </div>
+          <div class="field">
+            <label class="f" for="bk-purpose">用途（可选）</label>
+            <input id="bk-purpose" placeholder="例如：课程实验 · 样品测定">
+          </div>
+          <div class="row row-act">
             <button class="btn" id="bk-go">提交预约</button>
             <button class="btn ghost" id="bk-tmr">明天上午</button>
           </div>
-          <div id="bk-result" style="margin-top:10px"></div>
+          <div id="bk-result"></div>
         </div>
 
         <div id="pane-labs">
@@ -166,26 +258,31 @@
         </div>
 
         <div id="pane-kb" hidden>
-          <div class="row">
+          <div class="row row-act">
             <input id="inp-q" placeholder="例如：离心机 配平 / 准入资质 培训">
-            <button class="btn" id="btn-q" style="flex:0 0 auto">检索</button>
+            <button class="btn" id="btn-q">检索</button>
           </div>
           <div class="hint">检索《实验室准入与设备使用规范》，命中会标注由哪几路召回。</div>
-          <div id="kb-box" style="margin-top:12px"></div>
+          <div id="kb-box"></div>
         </div>
 
         <!-- 管理员专属：普通用户拿到的是 403，该标签页根本不会出现 -->
         <div id="pane-users" hidden>
-          <div class="hint" style="margin-bottom:10px">用户目录为管理员端点（<span class="mono">GET /api/users</span>）。
-            响应中不含邮箱与口令哈希 —— 只回显业务需要的字段。</div>
+          <div class="note">
+            <span class="note-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg></span>
+            <span>用户目录为管理员端点（<span class="mono">GET /api/users</span>）。
+            响应中不含邮箱与口令哈希 —— 只回显业务需要的字段。</span>
+          </div>
           <div id="users-box"><div class="skel sk-row"></div><div class="skel sk-row"></div></div>
         </div>
 
         <!-- 审批待办：标了「需审批」的设备下单后停在 pending，管理员在这里放行或驳回。
              驳回会当场释放时段（坑立刻还能被别人约），所以它是一个安全的动作。 -->
         <div id="pane-appr" hidden>
-          <div class="hint" style="margin-bottom:10px">
-            待确认的申请。驳回会<b>立刻释放时段</b>，别人马上能约；通过则转为已确认。</div>
+          <div class="note">
+            <span class="note-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg></span>
+            <span>待确认的申请。驳回会<b>立刻释放时段</b>，别人马上能约；通过则转为已确认。</span>
+          </div>
           <div id="appr-box"><div class="skel sk-row"></div><div class="skel sk-row"></div></div>
         </div>
 
@@ -213,15 +310,16 @@
         <!-- 审计：只读，没有任何接口能改或删。 -->
         <div id="pane-audit" hidden>
           <div class="filters">
-            <input id="audit-action" placeholder="按动作过滤，例如 reservation.create" style="flex:1">
+            <input id="audit-action" placeholder="按动作过滤，例如 reservation.create">
             <button class="btn ghost sm" id="audit-refresh">刷新</button>
           </div>
           <div id="audit-box"><div class="skel sk-row"></div><div class="skel sk-row"></div></div>
         </div>
       </div>
     </section>
+
   </div>
-</div>
+</main>
 
 <div class="toasts" id="toasts"></div>
 

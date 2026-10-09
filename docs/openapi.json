@@ -1110,6 +1110,38 @@
         "title": "Proposal",
         "type": "object"
       },
+      "RegisterRequest": {
+        "additionalProperties": false,
+        "description": "自助注册请求（P2-2）。\n\n与管理员建号（UserCreate）的差异是三个「不接受」：\n\n* 不接受 ``role``：注册接口绝不能收角色字段 —— 收了就等于\n  「任何人可以给自己造一个管理员」。extra=forbid 让带 role 的\n  请求直接 422，而不是静默忽略后看起来\"注册成功了\"；\n* 不接受 ``certs``：资质是带有效期的授权记录，由管理员按培训\n  情况授予 —— 自授资质等于\"能约不能进\"，不如一开始就不收；\n* 用户名限 ``[A-Za-z0-9_]``：它会进审计明细与日志，\n  自由文本里的空白与控制字符是给下游埋雷。",
+        "properties": {
+          "email": {
+            "maxLength": 128,
+            "minLength": 3,
+            "title": "Email",
+            "type": "string"
+          },
+          "password": {
+            "maxLength": 128,
+            "minLength": 8,
+            "title": "Password",
+            "type": "string"
+          },
+          "username": {
+            "maxLength": 32,
+            "minLength": 3,
+            "pattern": "^[A-Za-z0-9_]+$",
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "email",
+          "password"
+        ],
+        "title": "RegisterRequest",
+        "type": "object"
+      },
       "RescheduleRequest": {
         "additionalProperties": false,
         "description": "改期：把一条预约挪到同一天、同一台设备的另一个时段。\n\n刻意**只接受开始与结束时间**：设备与日期不可变（改期就是\"挪时间\"，\n换设备那是另一件事——那是取消再加新单，因为资质与上限都要重算）。",
@@ -1910,6 +1942,45 @@
           }
         ],
         "summary": "Me"
+      }
+    },
+    "/api/auth/register": {
+      "post": {
+        "description": "自助注册（P2-2）：预约人自己拿号，不再人人找管理员开账号。\n\n三条约束缺一不可（背景见 config.registration_enabled 的注释）：\n\n* **角色强制为最低级** —— ``RegisterRequest`` 没有 role 字段\n  （extra=forbid，带了直接 422），这里再显式传 ``ROLE_USER`` 做双保险；\n  提权仍然只能走管理员 user.manage 的角色层级。\n* **按来源 IP 限流** —— 注册是未认证接口，限流对象只能是人所在的地址；\n  按 IP 而不是按用户名限：攻击者会换用户名，不会轻易换出口 IP。\n* **成功与否都进审计** —— 「同一个 IP 在批量造号」这个模式只有把\n  注册记下来才看得见。\n\n注册成功直接发令牌：刚证明过自己知道密码的人不需要再登录一次。\n用户名冲突（409）与邮箱冲突走 CatalogError → 409 的既有翻译，\n不区分\"用户名已存在\"和\"邮箱已存在\" —— 与 login 同一条反枚举思路。",
+        "operationId": "register_api_auth_register_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Register"
       }
     },
     "/api/equipment": {

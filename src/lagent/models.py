@@ -445,6 +445,9 @@ class ReservationSlot(Base):
 # 取值是否收敛，一个拼错的 "login_fialed" 会让统计口径永远对不上。
 ACTION_LOGIN = "auth.login"
 ACTION_LOGIN_FAILED = "auth.login_failed"
+# 自助注册（P2-2）。与 login 分开命名：审计里「造了一个号」和「登了一次」
+# 是两类事件 —— 批量造号的模式只有单独命名才统计得出来。
+ACTION_REGISTER = "auth.register"
 ACTION_BOOK = "reservation.create"
 ACTION_CANCEL = "reservation.cancel"
 # P1-5：管理员通过/驳回一条申请

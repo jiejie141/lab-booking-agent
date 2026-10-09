@@ -39,7 +39,7 @@ function toast(msg,kind){
   el.className="toast "+(kind||"");
   el.textContent=msg;
   $("#toasts").appendChild(el);
-  setTimeout(()=>{el.style.opacity="0";setTimeout(()=>el.remove(),240);},3200);
+  setTimeout(()=>{el.style.opacity="0";setTimeout(()=>el.remove(),260);},3400);
 }
 async function apiFull(path,opts){
   const o=Object.assign({},opts||{});
@@ -118,6 +118,29 @@ async function doLogin(){
   finally{ btn.disabled=false; btn.textContent="登录"; }
 }
 
+function rgError(msg){ const el=$("#rg-err"); el.textContent=msg||""; el.classList.toggle("on",!!msg); }
+
+async function doRegister(){
+  const username=$("#rg-user").value.trim(), email=$("#rg-email").value.trim(), password=$("#rg-pass").value;
+  if(!username||!email||!password){ rgError("请填写用户名、邮箱与密码"); return; }
+  const btn=$("#rg-go"); btn.disabled=true; btn.textContent="注册中…"; rgError("");
+  try{
+    // 注册同登录：不能用 api()（未认证请求的 401 会把闸门重置掉，错误提示就看不见了）
+    const r=await fetch("/api/auth/register",{
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({username,email,password})});
+    const body=await r.json().catch(()=>null);
+    if(!r.ok){ rgError((body&&body.detail)||("注册失败（HTTP "+r.status+"）")); return; }
+    // 后端返回的令牌直接可用：刚证明过自己知道密码的人不需要再登录一次
+    tokenApi.set(body.access_token);
+    state.me=body.user;
+    $("#gate").hidden=true;
+    await enterApp();
+    toast("注册成功，欢迎："+body.user.username,"ok");
+  }catch(e){ rgError("无法连接后端："+e.message); }
+  finally{ btn.disabled=false; btn.textContent="注册并登录"; }
+}
+
 function renderIdentity(){
   const me=state.me||{};
   const certs=me.certs||[];
@@ -145,7 +168,7 @@ async function enterApp(){
       .forEach(id=>{ $("#"+id).hidden=false; });
   }
   await loadReservations();
-  stamp("#res-box");
+  stamp();
   await loadHealth();
   // 会变的面板开始自动刷新（2026-09-29）—— 后台 sweep 改了数据，
   // 页面不该等着人来点一下才知道。
@@ -265,13 +288,11 @@ function fillUserSelect(sel){
    拉太勤只是徒增请求。真正需要"秒级"的是任务进度那种，那是另一个场景。 */
 const REFRESH_MS = 30000;
 
-function stamp(boxSel){
-  const box = $(boxSel); if(!box) return;
-  const card = box.closest ? box.closest(".card") : null; if(!card) return;
-  const h = card.querySelector("h2"); if(!h) return;
-  let s = h.querySelector(".stamp");
-  if(!s){ s = document.createElement("span"); s.className = "stamp"; h.appendChild(s); }
-  s.textContent = " · 更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
+function stamp(){
+  // 落点从"卡片标题里的 <h2>"改成了数据卡工具栏上的 #data-stamp：
+  // 改版后数据卡的 h2 是给读屏用的（视觉隐藏），时间戳挂上去会一起看不见。
+  const s = $("#data-stamp"); if(!s) return;
+  s.textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
 }
 
 /** 只刷"会变"的面板。登录后由 enterApp 启动。 */
@@ -281,7 +302,7 @@ function startAutoRefresh(){
     if(document.hidden) return;          // 页面在后台就别拉了
     await Promise.allSettled([loadApprovals(), loadReservations()]);
     // 时间戳在加载**之后**打，否则会在数据还没回来时就宣称"已更新"
-    stamp("#appr-box"); stamp("#res-box");
+    stamp();
   }, REFRESH_MS);
 }
 
@@ -292,7 +313,7 @@ async function loadApprovals(){
     // 待办不带"全部预约"——列表里出现的每一条都是要处理的，这是那个接口
     // 刻意不复用 list_reservations 的原因（见 pending_reservations 的注释）。
     const rows=await api("/api/reservations/pending");
-    if(!rows.length){ box.innerHTML='<div class="empty">没有待确认的申请</div>'; stamp("#appr-box"); return; }
+    if(!rows.length){ box.innerHTML='<div class="empty">没有待确认的申请</div>'; stamp(); return; }
     // 批量：勾几条一起批。待办一多，逐条点是最典型的机械重复。
     box.innerHTML='<div class="row batchbar">'
         +'<button class="btn sm" id="b-all">全选</button>'
@@ -322,7 +343,7 @@ async function loadApprovals(){
     $("#b-none", box).addEventListener("click", ()=>{ $$(".b-pick",box).forEach(c=>c.checked=false); syncHint(); });
     $("#b-approve", box).addEventListener("click", ()=>batchReview(true));
     $("#b-reject", box).addEventListener("click", ()=>batchReview(false));
-    stamp("#appr-box");
+    stamp();
   }catch(e){ box.innerHTML='<div class="empty">加载失败：'+esc(e.message)+"</div>"; }
 }
 
@@ -696,7 +717,7 @@ function renderProposals(list){
   return '<div class="props">'+list.map((p,i)=>{
     const relax=(p.relaxations||[]).length
       ? '<div class="relax">'+p.relaxations.map(r=>`<span class="rc">${esc(r)}</span>`).join("")+"</div>"
-      : '<div class="relax"><span class="rc" style="background:color-mix(in srgb,var(--ok) 14%,transparent);color:var(--ok);border-color:color-mix(in srgb,var(--ok) 30%,transparent)">完全满足</span></div>';
+      : '<div class="relax"><span class="rc ok">完全满足</span></div>';
     return `<div class="prop"><span class="idx">${i+1}</span><div class="main">
       <div class="line1">${esc(p.equipment_name)}<span style="color:var(--text-faint);font-weight:400"> · ${esc(p.lab_label)}</span></div>
       <div class="line2">${esc(p.date)} ${esc(p.start)}-${esc(p.end)} · ${p.hours}h</div>
@@ -710,7 +731,7 @@ function renderProposals(list){
 function renderTrace(trace){
   if(!trace||!trace.length) return "";
   const max=Math.max.apply(null,trace.map(t=>t.elapsed_ms||0))||1;
-  return '<div class="trace"><div style="font-size:11px;color:var(--text-faint);margin-bottom:6px">执行轨迹</div><div class="tl">'
+  return '<div class="trace"><div class="trace-h">执行轨迹</div><div class="tl">'
     + trace.map(t=>`<div class="tlrow"><span class="n">${esc(t.node)}</span>
         <span><span class="bar" style="width:${Math.max(2,(t.elapsed_ms/max)*100).toFixed(1)}%;display:inline-block"></span>
         <span class="d" style="margin-left:6px">${esc(t.detail)}</span></span>
@@ -796,7 +817,7 @@ async function send(message,accept){
     const r = await chatStream(payload, ev => {
       // 节点进度直接写进占位气泡里 —— 这是"等待可见"的全部意义
       lastNode = ev.node || lastNode;
-      ph.querySelector(".bub").innerHTML = '<span class="dots"><i></i></span> '
+      ph.querySelector(".bub").innerHTML = '<span class="dots"><i></i><i></i><i></i></span> '
         + "<span class='mono' style='font-size:12px'>"
         + esc(NODE_LABEL[ev.node] || ev.node || "处理中")
         + (ev.elapsed_ms ? " · " + Math.round(ev.elapsed_ms) + "ms" : "")
@@ -885,6 +906,12 @@ $("#inp-q").addEventListener("keydown",e=>{if(e.key==="Enter")runRetrieve();});
 
 /* ---------- 登录闸门交互 ---------- */
 $("#lg-go").addEventListener("click",doLogin);
+$("#rg-go").addEventListener("click",doRegister);
+$("#tg-reg").addEventListener("click",e=>{
+  e.preventDefault();
+  const box=$("#reg-box"); box.hidden=!box.hidden;
+  if(!box.hidden) $("#rg-user").focus();
+});
 $("#lg-pass").addEventListener("keydown",e=>{if(e.key==="Enter")doLogin();});
 $("#lg-user").addEventListener("keydown",e=>{if(e.key==="Enter")$("#lg-pass").focus();});
 $$("[data-demo]").forEach(b=>b.addEventListener("click",()=>{

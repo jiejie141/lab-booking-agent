@@ -20,12 +20,24 @@ diff 出来直接就是前后端要一起改的地方。文件不大，进版本
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+
+# Windows 的默认控制台编码是 GBK，而本脚本的输出里有 ✓ / ✗ ——
+# 于是"契约已漂移"这条路径会**先崩在 print 上**，真正的漂移报告一个字都看不到，
+# 退出码还可能是 1（看起来像检查失败）或 0（看起来像通过），全看崩在哪一步。
+# CI 跑在 Linux 上（UTF-8）所以从来没暴露过，但本地 Windows 上这条命令是坏的。
+# 这里显式把标准输出改成 UTF-8，让报告在任何平台都能打出来。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        # 已重定向到不支持 reconfigure 的对象时静默跳过
+        with contextlib.suppress(ValueError, OSError):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
 
 TARGET = ROOT / "docs" / "openapi.json"
 

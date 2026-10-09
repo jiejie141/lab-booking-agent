@@ -21,7 +21,11 @@ REM default (fail-closed), so a fresh clone would stop right here.
 REM Keep this launcher one-click by generating a random secret per run --
 REM random, never the published value, and never written to a file.
 if not defined LAB_JWT_SECRET (
-  for /f %%S in ('".venv\Scripts\python.exe" -c "import secrets;print(secrets.token_hex(32))"') do set "LAB_JWT_SECRET=%%S"
+  REM for /f with nested quotes gets mangled by cmd.exe parsing (the inner
+  REM quotes terminate the command early), so generate via a temp file instead.
+  ".venv\Scripts\python.exe" -c "import secrets;print(secrets.token_hex(32))" > "%TEMP%\lab_jwt_secret.tmp" 2>nul
+  set /p LAB_JWT_SECRET=<"%TEMP%\lab_jwt_secret.tmp"
+  del "%TEMP%\lab_jwt_secret.tmp" >nul 2>&1
 )
 if not defined LAB_JWT_SECRET (
   echo [fail] could not generate a JWT secret.

@@ -314,6 +314,44 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=128)
 
 
+def _email_shape_ok(value: str) -> str:
+    """邮箱只做「形状」校验，UserCreate 与 RegisterRequest 共用。
+
+    不引 email-validator 这个依赖：这里只需要挡住"把用户名填进了邮箱"
+    这类手误，真正的可达性由发信（P1-6）去验证。抽成模块函数是因为
+    两个入口各写一份校验，迟早会有一边改了另一边没跟上。
+    """
+    if "@" not in value or value.startswith("@") or value.endswith("@"):
+        raise ValueError("邮箱格式不正确")
+    return value
+
+
+class RegisterRequest(BaseModel):
+    """自助注册请求（P2-2）。
+
+    与管理员建号（UserCreate）的差异是三个「不接受」：
+
+    * 不接受 ``role``：注册接口绝不能收角色字段 —— 收了就等于
+      「任何人可以给自己造一个管理员」。extra=forbid 让带 role 的
+      请求直接 422，而不是静默忽略后看起来"注册成功了"；
+    * 不接受 ``certs``：资质是带有效期的授权记录，由管理员按培训
+      情况授予 —— 自授资质等于"能约不能进"，不如一开始就不收；
+    * 用户名限 ``[A-Za-z0-9_]``：它会进审计明细与日志，
+      自由文本里的空白与控制字符是给下游埋雷。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(min_length=3, max_length=32, pattern=r"^[A-Za-z0-9_]+$")
+    email: str = Field(min_length=3, max_length=128)
+    password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def _email_must_look_like_one(cls, value: str) -> str:
+        return _email_shape_ok(value)
+
+
 class UserOut(BaseModel):
     """对外暴露的用户视图。
 
@@ -679,11 +717,7 @@ class UserCreate(BaseModel):
     @field_validator("email")
     @classmethod
     def _email_must_look_like_one(cls, value: str) -> str:
-        # 不引 email-validator 这个依赖：这里只需要挡住"把用户名填进了邮箱"
-        # 这类手误，真正的可达性由发信（P1-6）去验证。
-        if "@" not in value or value.startswith("@") or value.endswith("@"):
-            raise ValueError("邮箱格式不正确")
-        return value
+        return _email_shape_ok(value)
 
 
 class ReviewRequest(BaseModel):

@@ -9,23 +9,28 @@
 > * [`PROJECT-OVERVIEW.md`](PROJECT-OVERVIEW.md) —— 能力完成度矩阵里标 ⚠️/❌ 的行
 >
 > **当前状态：18 条里 14 条已闭合**（每条都带测试，整套 `pytest` 全绿），
-> 剩下 4 条：**1 条有触发条件**（#5）、**1 条缺外部资源**（#16）、**2 条是明确不做的取舍**（#17 / #18）。
+> 剩下 4 条：**1 条有触发条件**（#5 —— 同机多进程已解决，只剩跨机多副本）、
+> **1 条缺外部资源**（#16）、**2 条是明确不做的取舍**（#17 / #18）。
 > 它们列在下面第一节，理由与触发条件都写清楚了 —— 留着不是因为忘了。
+>
+> **本轮新增（P2，已在代码与测试里）**：进程外状态（`localstate.py` + 两个 SQLite 存储）
+> 与自助注册（`POST /api/auth/register`）。两条都在下面的「已闭合」区有登记。
 
 ---
 
 ## 一、仍未闭合（4 条）
 
-### 5. 限流与会话在进程内存 —— **有触发条件，暂不改**
+### 5. 限流与会话 —— **同机多进程已解决，跨机多副本仍未做**
 
 | | |
 |---|---|
-| **模块** | `ratelimit.py`（`SlidingWindowLimiter` 用进程内 dict）· `agent/state.py`（`SessionStore`） |
-| **表现** | 两者都没有共享存储。 |
-| **影响** | **单副本部署下完全不成立**（当前就是单副本）。一旦多副本：登录/对话配额变成「配额 × 副本数」；多轮对话的「上一轮备选」会在副本间漂移。 |
-| **本轮做了什么** | 不改成共享存储（那是扩容时才做的事，现在做是浪费），但把这个**隐形前提变成可观测的**：两个组件构造时各自上报 `lagent_state_backend{component,backend}`（由组件自己报，换实现时指标自动跟着变）。多副本时同一个 component 会出现多条时间序列，`deploy/prometheus-alerts.yml` 里的 `LagentStateBackendSplitBrain` 会响。 |
-| **触发条件** | 出现横向扩容需求时（判据就是上面那条指标）。重新评估的三条条件写在 `DELIVERY-READINESS.md` 的 P2-10。 |
-| **到时怎么做** | 先把限流换成 Redis 计数器、会话外置（或加粘性会话）；这一步做完再谈多副本。 |
+| **模块** | `ratelimit.py` · `agent/state.py` · `localstate.py` |
+| **表现** | 默认仍是进程内存（`LAB_STATE_BACKEND=memory`）；设为 `sqlite` 后会话与 chat/注册限流的计数**同机多进程共享一份**（WAL + busy_timeout），重启不丢。 |
+| **影响** | **单副本部署下不成立**（当前就是单副本）。同机 `--workers`、脚本与服务并存也已经被 `sqlite` 接住。真正的缺口只剩**跨机器**：多副本下配额仍会变成「配额 × 副本数」，多轮会话会在副本间漂移。 |
+| **本轮做了什么** | ① 新增 `localstate.py`（短连接 + WAL/busy_timeout/synchronous 三件套）与两个 SQLite 存储：`SqliteSessionStore`、`SqliteSlidingWindowLimiter`；② 把**隐形前提变成可观测的**：组件构造时自报 `lagent_state_backend{component,backend}`，多副本时同一 component 出现多条序列，`deploy/prometheus-alerts.yml` 的 `LagentStateBackendSplitBrain` 会响；③ **修掉一个会自造假信号的缺陷**：`SqliteSessionStore` 继承基类，基类先报 memory、子类再报 sqlite，单副本就出现两条序列、被那条告警误判成已扩容 —— 改为后端由类属性 `_BACKEND` 决定、构造期只报一次（`tests/test_metrics.py::TestStateBackendIsObservable` 两条用例钉住）。 |
+| **仍未外置的** | `LoginThrottle`（窗口 + 锁定两段状态）刻意留在进程内 —— 搬进 SQL 的复杂度与收益不成比例，边界写在它的 docstring 里。 |
+| **触发条件** | 出现**跨机器**横向扩容需求时（判据就是上面那条指标）。重新评估的三条条件写在 `DELIVERY-READINESS.md` 的 P2-10。 |
+| **到时怎么做** | 限流换 Redis 计数器（Lua 保原子）、会话外置或加粘性会话；这一步做完再谈多副本。 |
 
 ### 16. 真实模型评测尚未做过 —— **缺外部资源，不是代码问题**
 
@@ -90,6 +95,13 @@
 | 8 | 密钥投递仍是环境变量 | 新增 `LAB_JWT_SECRET_FILE` / `LAB_SMTP_PASSWORD_FILE`（Docker secret / K8s Secret 的通用约定），**文件优先**；读不出来或读到空 → **拒绝启动** | `tests/test_secret_delivery.py`（6 条） |
 | 9 | 违约判定准确度没有数据支撑 | 接口加 `total`（判过几次）与 `pardoned`（其中豁免几次），与 `count`（实际计入）分开 | `tests/test_violations.py::TestViolationBreakdown` |
 | 10 | 清扫跑在服务进程内 | CLI 新增 `sweep --loop [--interval N] [--ticks N]`；compose 里给出（默认注释掉的）独立 worker 段。单副本**不必**启用 | `tests/test_sweep.py::TestSweepLoop`（5 条） |
+### P2（本轮新增：进程外状态与自助注册）
+
+| # | 是什么 | 怎么修的 | 在哪能验 |
+|---|---|---|---|
+| P2-1 | 会话与限流计数只在进程内存：同机多 worker / 脚本与服务并存时状态漂移、重启即丢 | 新增 `localstate.py`（短连接 + WAL / busy_timeout / synchronous 三件套）与 `SqliteSessionStore` / `SqliteSlidingWindowLimiter`；由 `LAB_STATE_BACKEND=sqlite` 选，接口与内存版一致、调用方无感。**跨机器多副本仍需要 Redis** —— 不假装 SQLite 解决了分布式 | `tests/test_state_store.py`（跨实例持久化 / TTL / 坏数据自删 / 多实例共享计数） |
+| P2-2 | 「谁能预约」完全由管理员掌控，每个新人都要找管理员开号 | 新增 `POST /api/auth/register`。三条约束**一起**上：角色强制最低级（`extra=forbid`，带 `role` 直接 422）、按来源 IP 限流（`LAB_REGISTER_PER_HOUR`）、成功与否都进审计；`LAB_REGISTRATION_ENABLED=false` 可整体关闭（回退 403） | `tests/test_register.py`（正路径 / 提权 422 / 反枚举 409 / 关闭 403 / 超配额 429 / 审计） |
+| P2-1b | `sqlite` 模式下 `/metrics` 里 session **同时报 memory 与 sqlite 两条序列**，`LagentStateBackendSplitBrain` 在单副本上误报「已扩容、状态分裂」 | `SqliteSessionStore` 继承基类，基类构造先报 memory、子类再报 sqlite。改为后端由**类属性** `_BACKEND` 决定、构造期只报一次；模块级兜底单例 `STORE` 加 `report_backend=False`（import 期还不知道进程用哪个后端） | `tests/test_metrics.py::TestStateBackendIsObservable`（新增 2 条：单组件单序列、import 期单例不认领后端） |
 
 ### P3
 

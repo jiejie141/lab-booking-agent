@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     llm_model: str = "deepseek-chat"
     llm_timeout: float = 30.0
     llm_max_retry: int = 2
+    # 覆盖**所有**模型调用的 temperature。默认 None = 用各调用点的内置值
+    # （结构化/工具调用 0，自由文本 0.2）。
+    # 实测 Moonshot 的推理型模型（kimi-k2.6）只接受 temperature=1，接这类
+    # 端点时在这里设 1。刻意做成"一个开关覆盖全部"而不是按用途拆两个：
+    # 供应商的约束是 model 级的，按用途拆会配出一组自相矛盾的值，
+    # 而且每个新调用点都得记得问一遍配置。
+    llm_temperature: float | None = None
 
     # ---- Agent 运行时（harness）-------------------------------------------
     # 默认仍是 deterministic：它已被 322 条测试与 golden path 覆盖，
@@ -221,6 +228,31 @@ class Settings(BaseSettings):
     login_max_attempts: int = Field(default=5, ge=0, le=100)
     login_window_seconds: int = Field(default=300, ge=1)
     login_lock_seconds: int = Field(default=600, ge=1)
+
+    # ---- 进程外状态（P2-1）-------------------------------------------------
+    # 会话（SessionStore）与限流计数的存放位置。两者的单机内存版有一个共同的
+    # 已知限制：多进程/多副本下状态漂移、重启即清零（README 已知限制有记）。
+    #
+    # memory : 原行为，默认值。单进程下最简单，改成 sqlite 应当有理由。
+    # sqlite : 同机多进程（uvicorn --workers、脚本与服务并存）共享一份状态，
+    #          重启不丢。WAL + busy_timeout 处理并发写，零新依赖。
+    #          跨**机器**的多副本仍然需要 Redis / 共享数据库 —— 那是 P2，
+    #          本项目不假装一个 SQLite 就解决了分布式。
+    state_backend: Literal["memory", "sqlite"] = "memory"
+    state_db_path: str = "./var/state.db"
+    # 会话 TTL（小时）。跨轮记忆只需要活过一次预约对话，24h 足够；
+    # 过期条目在读写时惰性清理，不依赖后台任务 —— 与限流滑动窗口同一条思路。
+    session_ttl_hours: int = Field(default=24, ge=1, le=24 * 30)
+
+    # ---- 自助注册 -----------------------------------------------------------
+    # 「谁能预约」原来完全由管理员掌控（admin 的 user.manage），开放注册后
+    # 滥用面转移到注册接口本身，所以三条约束是**一起**上的：
+    #   ① 角色强制为最低级（user）—— 注册接口不接受 role 字段（extra=forbid）；
+    #   ② 按来源 IP 限流（register_per_hour，0 = 关闭限流）；
+    #   ③ 注册动作进审计 —— 「哪来的 IP 在批量造号」要看得见。
+    # 提权仍走原有路径：管理员用 user.manage 逐级授角色，角色层级不变量不变。
+    registration_enabled: bool = True
+    register_per_hour: int = Field(default=5, ge=0)
 
     # ---- 违约与黑名单（P1-8）----------------------------------------------
     # 「约了不来」的判定与处罚。**惩罚性自动化最危险的失败模式是误伤** ——
