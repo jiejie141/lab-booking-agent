@@ -240,6 +240,16 @@ class User(Base):
     # 准入资质：拥有哪些设备类别的操作资格（如 ["光谱", "细胞培养"]）。
     # 注意这是「代码层判定」的输入，绝不允许让大模型自己决定用户有没有资质。
     certs: Mapped[list] = mapped_column(JSON, default=list)
+    # 令牌世代：签发时写进 payload，鉴权时回查比对（见 api.current_user）。
+    #
+    # 为什么需要它：令牌是自包含的，服务端验签通过就认账 —— 于是「停用账号」
+    # 只能挡住**新登录**，挡不住已经发出去的那张令牌（最长 jwt_ttl 2 小时）。
+    # 实测过：停用后拿旧令牌仍能 200 地看预约、下单。降权同理 ——
+    # 从 admin 降成 user，旧令牌里的 role 仍是 admin。
+    #
+    # 自增这个值（停用、改角色、改口令时）就让该用户所有旧令牌立刻失效，
+    # 代价是每个请求多一次主键查询 —— 而那一次查询审计本来也要做。
+    token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
     reservations: Mapped[list[Reservation]] = relationship(back_populates="user")
 

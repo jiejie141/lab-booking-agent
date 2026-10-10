@@ -515,6 +515,91 @@ class TestUserMaintenance:
             )
         ).status_code == 401
 
+    async def test_deactivation_revokes_already_issued_tokens(self, http, as_user):
+        """★ 停用必须作废**已经发出去**的令牌，不能只挡住新登录。
+
+        这条用例对应一个实测复现过的真实缺陷：令牌是自包含的，验签通过
+        就认账，所以清空口令哈希只挡得住下一次登录 —— 手里那张旧令牌
+        在过期前（默认 2 小时）照样能看预约、能下单。降权同理：从 admin
+        降成 user，旧令牌载荷里的 role 仍是 admin。
+
+        修法是给 users 加 token_version（迁移 0007），签发时写进载荷，
+        鉴权时与库里当前值比对（api.current_user）；停用/改角色/改口令
+        都自增它，于是该用户所有旧令牌立刻失效。
+
+        这里**必须断言旧令牌被拒** —— 只断言"新登录 401"是原先那条
+        用例已经覆盖过的，那样测不出这个洞（它会带着缺陷一起通过）。
+        """
+        admin = await as_user("管理员")
+        created = await http.post(
+            "/api/users",
+            json={"username": "待撤销", "email": "revoke@example.com",
+                  "password": "long-enough"},
+            headers=admin,
+        )
+        assert created.status_code == 201, created.text
+        user_id = created.json()["id"]
+
+        # 拿到一张**停用之前**签发的令牌
+        login = await http.post(
+            "/api/auth/login",
+            json={"username": "待撤销", "password": "long-enough"},
+        )
+        assert login.status_code == 200, login.text
+        old_token = login.json()["access_token"]
+        stale = {"Authorization": f"Bearer {old_token}"}
+
+        # 停用之前，这张令牌是可用的（否则下面的断言无法证伪）
+        assert (await http.get("/api/auth/me", headers=stale)).status_code == 200
+
+        resp = await http.post(f"/api/users/{user_id}/deactivate", headers=admin)
+        assert resp.status_code == 200, resp.text
+
+        # ★ 关键：同一张旧令牌现在必须处处被拒
+        assert (await http.get("/api/auth/me", headers=stale)).status_code == 401
+        assert (await http.get("/api/reservations", headers=stale)).status_code == 401
+        assert (
+            await http.post(
+                "/api/agent/chat", json={"message": "你好"}, headers=stale
+            )
+        ).status_code == 401
+
+    async def test_role_change_revokes_already_issued_tokens(self, http, as_user):
+        """降权也必须立刻生效，而不是等旧令牌过期。
+
+        原来的洞：把某人从 admin 降成 user，旧令牌载荷里的 ``role`` 仍是
+        admin，在过期前继续享有管理员权限。current_user 现在以库里的角色
+        为准，且令牌世代变化即拒。
+        """
+        sysadmin = await as_user("系统管理员")
+        created = await http.post(
+            "/api/users",
+            json={"username": "待降权", "email": "demote@example.com",
+                  "password": "long-enough", "role": ROLE_ADMIN},
+            headers=sysadmin,
+        )
+        assert created.status_code == 201, created.text
+        user_id = created.json()["id"]
+
+        login = await http.post(
+            "/api/auth/login",
+            json={"username": "待降权", "password": "long-enough"},
+        )
+        assert login.status_code == 200, login.text
+        old_token = login.json()["access_token"]
+        stale = {"Authorization": f"Bearer {old_token}"}
+
+        # 降权前：管理员视角能看到全量用户
+        assert (await http.get("/api/users", headers=stale)).status_code == 200
+
+        resp = await http.patch(
+            f"/api/users/{user_id}", json={"role": "user"}, headers=sysadmin
+        )
+        assert resp.status_code == 200, resp.text
+
+        # 降权后：同一张旧令牌不得再享有管理员权限
+        assert (await http.get("/api/users", headers=stale)).status_code == 401
+
     async def test_deactivation_keeps_the_history(self, http, as_user):
         """停用不能顺手删掉他的预约 —— 历史记录必须还在。"""
         admin = await as_user("管理员")

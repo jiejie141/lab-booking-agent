@@ -651,6 +651,29 @@ async def current_user(
             detail="访问令牌无效或已过期",
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
+
+    # ★ 回查令牌世代：验签只证明「这张令牌是我签的」，不证明「它现在还有效」。
+    #   不做这一步的话，停用账号 / 降权 / 改口令都只挡得住**新登录** ——
+    #   已发出的令牌在过期前（默认 2 小时）照常可用，降权后旧令牌里的 role
+    #   仍是 admin。实测复现过，所以这里必须回查。
+    #   代价是一次主键查询；它本来就要为审计做，不是新增开销。
+    async with session_scope() as session:
+        user = await session.get(User, principal.user_id)
+        if user is None or user.token_version != principal.token_version:
+            raise HTTPException(
+                status_code=401,
+                detail="访问令牌无效或已过期",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        # 以库里的角色为准，而不是令牌里的 —— 否则降权在令牌过期前不生效。
+        # principal.role 来自签名载荷，只在令牌世代一致时才该被信任为"最新"。
+        if user.role != principal.role:
+            raise HTTPException(
+                status_code=401,
+                detail="访问令牌无效或已过期",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
     # 解出身份就把「这次请求是谁」写进上下文（P1-3）。放在这里而不是各个端点里：
     # 它是唯一一个所有需要登录的端点都会经过的地方，加一次就到处生效 ——
     # 包括这条请求后续在审计、门禁、模型层里打的日志，全部自动带上 user_id。
@@ -843,7 +866,12 @@ async def login(body: LoginRequest, request: Request) -> TokenResponse:
         throttle.reset(key)
 
     settings = get_settings()
-    token = create_access_token(user_id=row.id, username=row.username, role=row.role)
+    token = create_access_token(
+        user_id=row.id,
+        username=row.username,
+        role=row.role,
+        token_version=row.token_version or 0,
+    )
     await audit.record(
         action=audit.ACTION_LOGIN,
         actor_id=row.id,
@@ -922,7 +950,12 @@ async def register(body: RegisterRequest, request: Request) -> TokenResponse:
     except CatalogError as exc:
         raise _catalog_error(exc) from exc
 
-    token = create_access_token(user_id=user.id, username=user.username, role=user.role)
+    token = create_access_token(
+        user_id=user.id,
+        username=user.username,
+        role=user.role,
+        token_version=user.token_version or 0,
+    )
     await audit.record(
         action=audit.ACTION_REGISTER,
         actor_id=user.id,

@@ -178,6 +178,13 @@ async def update_user(session: AsyncSession, user: User, payload: UserUpdate) ->
         return user
     password = changes.pop("password", None)
     certs = changes.pop("certs", None)
+    # 角色或口令一变，**已发出的令牌必须作废**：
+    #   * 改口令 → 旧令牌（可能是泄露后被人拿走的那张）应立刻失效；
+    #   * 改角色 → 否则降权的用户在令牌过期前仍是旧角色（实测过：
+    #     从 admin 降成 user，旧令牌里的 role 仍是 admin）。
+    # 自增 token_version 一次覆盖两者，见 api.current_user 的比对。
+    if password is not None or "role" in changes:
+        user.token_version = (user.token_version or 0) + 1
     for key, value in changes.items():
         setattr(user, key, value)
     if password is not None:
@@ -191,16 +198,22 @@ async def update_user(session: AsyncSession, user: User, payload: UserUpdate) ->
 
 
 async def deactivate_user(session: AsyncSession, user: User) -> User:
-    """停用：清空口令哈希。
+    """停用：清空口令哈希 **并作废已发出的令牌**。
 
     为什么不去加一个 ``is_active`` 列：那需要迁移，且会引入"停用后
     已有预约怎么办"的第二种语义。而**空口令哈希本来就不可登录**
     （``verify_password`` 对空串一律失败，fail-closed），语义已经存在，
     不需要新状态。重新设一次口令即恢复登录。
 
+    ⚠️ 但清空哈希**只挡住了新登录** —— 令牌是自包含的，已经发出去的那张
+    在过期前（默认 2 小时）仍然完全可用。所以这里必须同时自增
+    ``token_version`` 让旧令牌立刻失效（见 ``api.current_user``）。
+    这个缺陷是实测复现出来的：停用后拿旧令牌仍能 200 地看预约、下单。
+
     历史数据（预约 / 门禁 / 审计）一条都不动。
     """
     user.password_hash = ""
+    user.token_version = (user.token_version or 0) + 1
     await _flush(session, "用户")
     return user
 

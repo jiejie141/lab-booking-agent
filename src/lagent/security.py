@@ -148,10 +148,16 @@ def create_access_token(
     user_id: int,
     username: str,
     role: str,
+    token_version: int = 0,
     ttl_seconds: int | None = None,
     now_ts: int | None = None,
 ) -> str:
-    """签发一个 HS256 访问令牌。"""
+    """签发一个 HS256 访问令牌。
+
+    ``token_version`` 会被写进载荷，鉴权时与库里当前值比对 ——
+    用户被停用 / 改角色 / 改口令时该值自增，**所有旧令牌立即失效**。
+    这是「令牌可撤销」的载体：没有它，停用只挡得住新登录。
+    """
     settings = get_settings()
     issued = int(time.time() if now_ts is None else now_ts)
     ttl = settings.jwt_ttl_minutes * 60 if ttl_seconds is None else ttl_seconds
@@ -162,6 +168,8 @@ def create_access_token(
         "sub": str(user_id),
         "name": username,
         "role": role,
+        # 令牌世代：鉴权时回查比对，不等即拒（见 api.current_user）
+        "ver": int(token_version),
         "iat": issued,
         "exp": issued + ttl,
     }
@@ -234,6 +242,9 @@ class Principal(BaseModel):
     username: str = ""
     role: str = ROLE_USER
     expires_at: int = 0
+    # 令牌世代（来自 payload 的 "ver"）。鉴权时与库里当前值比对，
+    # 不相等说明这张令牌是在/停用/改角色/改口令之前签发的 → 拒。
+    token_version: int = 0
 
     @property
     def rank(self) -> int:
@@ -275,6 +286,9 @@ def principal_from_token(token: str, *, now_ts: int | None = None) -> Principal:
         username=str(payload.get("name", "")),
         role=str(payload.get("role", ROLE_USER)),
         expires_at=int(payload["exp"]),
+        # 老令牌没有 ver（升级前签发的）→ 按 0 处理；库里默认也是 0，
+        # 所以升级瞬间已发出的令牌不会被无故全废，但仍可被后续自增撤销。
+        token_version=int(payload.get("ver", 0)),
     )
 
 

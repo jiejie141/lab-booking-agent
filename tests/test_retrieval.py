@@ -159,12 +159,31 @@ class TestFactory:
         assert isinstance(index, BM25Index)
 
     def test_hybrid_degrades_without_vector_backend(self):
-        """没装 chromadb 时 hybrid 必须**明确降级**而不是抛异常或假装可用。"""
-        index = build_retriever("hybrid")
-        if not isinstance(index, HybridRetriever):
-            assert isinstance(index, BM25Index)
-            from lagent.knowledge.retriever import fallback_reason
+        """没装 chromadb 时 hybrid 必须**明确降级**而不是抛异常或假装可用。
 
+        这条用例原先写成 ``if not isinstance(index, HybridRetriever): ...`` ——
+        那是个**恒真断言**：装了 chromadb 时条件为假、整个函数体被跳过，
+        用例照样通过，于是「启用向量后端」这条路径实际上**零覆盖**。
+        现在改成两条互斥且**都必须成立**的断言：无论 chromadb 在不在，
+        二选一必然被执行，不会再有静默通过的余地。
+        """
+        from lagent.knowledge.retriever import ChromaVectorIndex, fallback_reason
+
+        # 用实际情况（而不是猜测）判断向量后端在不在：
+        # ChromaVectorIndex 构造失败时 available() 为 False。
+        vector_ok = ChromaVectorIndex(load_corpus()).available()
+        index = build_retriever("hybrid")
+
+        if vector_ok:
+            # 装了向量后端：必须真的用上，且不许报降级原因。
+            assert isinstance(index, HybridRetriever), (
+                "chromadb 可用时 hybrid 回退成了 BM25 —— 启用路径没有被真正执行"
+            )
+            assert fallback_reason() is None
+        else:
+            # 没装向量后端：必须明确降级到 BM25 并给出原因，而不是抛异常。
+            assert isinstance(index, BM25Index)
+            assert not isinstance(index, HybridRetriever)
             assert fallback_reason() is not None
 
     def test_unknown_backend_raises(self):
