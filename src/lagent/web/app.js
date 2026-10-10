@@ -61,6 +61,46 @@ async function apiFull(path,opts){
   return {body, headers:r.headers};
 }
 async function api(path,opts){ return (await apiFull(path,opts)).body; }
+
+/* 数字滚动。目标是"读数像一个仪表"而不是"文字被换掉"。
+   几个刻意的取舍：
+   - 只在值**真的变了**才动。健康轮询每 15 秒回一次，每次都重播动画
+     会让整条读数带持续抽搐 —— 不动反而更稳。
+   - easing 用 easeOutExpo（先快后慢），停下来的那一下才有"落位"感。
+   - 尊重 prefers-reduced-motion：关掉动效的用户直接拿到终值，
+     中间态对他们没有信息量。 */
+const REDUCED = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+function countTo(el,target){
+  const to=Number(target);
+  if(!el||!isFinite(to)) { if(el) el.textContent=target; return; }
+  const from=Number(el.dataset.v||0);
+  if(from===to){ if(el.textContent!==String(to)) el.textContent=String(to); return; }
+  el.dataset.v=String(to);
+  if(REDUCED||from===0&&to===0){ el.textContent=String(to); return; }
+  // 从上一轮回调里捡起：连续更新时不要在中间重启动画
+  if(el._raf) cancelAnimationFrame(el._raf);
+  const t0=performance.now(), dur=Math.min(900,260+Math.abs(to-from)*90);
+  const step=(now)=>{
+    const p=Math.min(1,(now-t0)/dur);
+    const e=1-Math.pow(2,-10*p); // easeOutExpo
+    const v=Math.round(from+(to-from)*e);
+    el.textContent=String(v);
+    if(p<1) el._raf=requestAnimationFrame(step);
+    else { el.textContent=String(to); el._raf=null; }
+  };
+  el._raf=requestAnimationFrame(step);
+}
+/* 极小的行内 markdown 渲染 —— 只认 `**粗体**` 和 ``代码``。
+   为什么需要它：模型偶尔会在正文里用 **强调**，而正文走的是 esc() 转义，
+   于是那些星号会原样显示成 "\\*\\*带取舍说明\\*\\*"，看起来像代码没写完。
+   为什么不引第三方：需求只有两种标记，引一个 markdown 库会把它支持的
+   HTML 透传能力也一起带进来 —— 那是 XSS 面。这里对内容先 esc 再套标签，
+   输入里的尖括号永远不可能变成标签。 */
+function mdInline(s){
+  return esc(s)
+    .replace(/\*\*(.+?)\*\*/g,"<strong>$1</strong>")
+    .replace(/`([^`]+)`/g,"<code>$1</code>");
+}
 const SKEL = {card:'<div class="skel sk-card"></div>',row:'<div class="skel sk-row"></div>'};
 const skel=(n,t)=>SKEL[t||"row"].repeat(n);
 
@@ -150,9 +190,11 @@ function renderIdentity(){
   const role=$("#who-role");
   role.textContent=me.role||"";
   role.className="who-role"+(isAdmin()?" admin":"");
+  // 这里原来写的是 --text / --warn，两个令牌**都不存在**（正确名是 --ink / --warn-ink）。
+  // 坏掉的 var() 不报错、只是静默失效，所以用户名一直是普通字色、"无"也一直是默认色。
   $("#identity-note").innerHTML=
-    '以 <b style="color:var(--text)">'+esc(me.username||"")+'</b> 的身份对话（身份取自令牌，不由前端指定）· 准入资质：'
-    +(certs.length?esc(certs.join(" / ")):'<span style="color:var(--warn)">无</span>');
+    '以 <b style="color:var(--ink)">'+esc(me.username||"")+'</b> 的身份对话（身份取自令牌，不由前端指定）· 准入资质：'
+    +(certs.length?esc(certs.join(" / ")):'<span style="color:var(--warn-ink)">无</span>');
   $("#tab-users").hidden=!isAdmin();
 }
 
@@ -206,10 +248,13 @@ async function loadHealth(){
     $("#badge-now").textContent=(h.now||"").slice(11,16);
     $("#badge-agent").innerHTML = h.agent_available
       ? '<span class="dot"></span>Agent 在线' : '<span class="dot warn"></span>Agent 降级（引导式表单）';
-    $("#st-labs").textContent=h.counts.labs;
-    $("#st-equip").textContent=h.counts.equipment;
-    $("#st-active").textContent=h.counts.active;
-    $("#st-res").textContent=h.counts.reservations;
+    // 读数带：数字**滚上去**而不是啪地出现。
+    // 只在数值真的变化时才动 —— 健康轮询每 15 秒一次，每次都重播一遍
+    // 会让整条读数带一直在抽搐，那反而比不动更廉价。
+    countTo($("#st-labs"),h.counts.labs);
+    countTo($("#st-equip"),h.counts.equipment);
+    countTo($("#st-active"),h.counts.active);
+    countTo($("#st-res"),h.counts.reservations);
     if(h.retrieval_degraded_reason) toast("检索已降级："+h.retrieval_degraded_reason,"err");
   }catch(e){
     $("#dot-health").className="dot bad";
@@ -257,7 +302,7 @@ async function loadUserDirectory(){
           const roleTag = u.role==="user" ? '<span class="tag">user</span>'
             : '<span class="tag warn">'+esc(u.role)+'</span>';
           const certs=(u.certs||[]).map(c=>'<span class="tag">'+esc(c)+'</span>').join(" ")
-            || '<span style="color:var(--text-faint)">无</span>';
+            || '<span style="color:var(--ink-3)">无</span>';
           return `<tr><td class="mono">#${u.id}</td><td>${esc(u.username)}</td>
             <td>${roleTag}</td><td>${certs}</td></tr>`;
         }).join("")
@@ -327,7 +372,7 @@ async function loadApprovals(){
           <td><input type="checkbox" class="b-pick" value="${r.id}" aria-label="选择申请 #${r.id}"></td>
           <td class="mono">#${r.id}</td>
           <td>${esc(r.user_name||"（未知用户）")}</td>
-          <td>${esc(r.equipment_name)}<div style="color:var(--text-faint);font-size:11px">${esc(r.lab_label)}</div></td>
+          <td>${esc(r.equipment_name)}<div style="color:var(--ink-3);font-size:11px">${esc(r.lab_label)}</div></td>
           <td class="mono">${esc(r.slot)}</td>
           <td><button class="btn sm" data-approve="${r.id}">通过</button>
               <button class="btn ghost sm" data-reject="${r.id}">驳回</button></td>
@@ -466,7 +511,7 @@ async function loadNotifications(){
       + rows.map(n=>`<tr>
           <td class="mono">${esc(fmtStamp(n.created_at))}</td>
           <td>${esc(n.kind)}</td>
-          <td>${esc(n.title)}<div style="color:var(--text-faint);font-size:11px">${esc(n.body)}</div></td>
+          <td>${esc(n.title)}<div style="color:var(--ink-3);font-size:11px">${esc(n.body)}</div></td>
           <td><span class="tag ${n.status==="failed"?"bad":(n.status==="sent"?"ok":"warn")}">${esc(NOTIFY_CN[n.status]||n.status)}</span></td>
         </tr>`).join("")
       + '</tbody></table>';
@@ -487,7 +532,7 @@ async function loadAudit(){
           <td>${esc(a.actor_name||"—")}</td>
           <td class="mono">${esc(a.target_type)}${a.target_id?("#"+esc(a.target_id)):""}</td>
           <td><span class="tag ${a.outcome==="ok"?"ok":"bad"}">${esc(a.outcome)}</span>
-            <div style="color:var(--text-faint);font-size:11px">${esc(a.detail)}</div></td>
+            <div style="color:var(--ink-3);font-size:11px">${esc(a.detail)}</div></td>
         </tr>`).join("")
       + '</tbody></table>';
   }catch(e){ box.innerHTML='<div class="empty">加载失败：'+esc(e.message)+"</div>"; }
@@ -592,7 +637,7 @@ async function loadLabs(){
           <span class="tag">工作日 ${esc(fmt(oh.weekday))}</span>
           <span class="tag">周末 ${esc(fmt(oh.weekend))}</span>
         </div>
-        <div style="color:var(--text-faint);font-size:12px;margin-bottom:8px">${esc(l.note||"")}</div>
+        <div style="color:var(--ink-3);font-size:12px;margin-bottom:8px">${esc(l.note||"")}</div>
         <table><thead><tr><th>编号</th><th>名称</th><th>类别</th><th>单次上限</th><th>准入</th><th>状态</th></tr></thead>
         <tbody>${rows}</tbody></table>
       </div>`;
@@ -615,15 +660,15 @@ async function loadReservations(){
 
     const total=rows.length;
     const dist={}; rows.forEach(r=>{dist[r.status]=(dist[r.status]||0)+1;});
-    const colors={pending:"var(--warn)",confirmed:"var(--ok)",cancelled:"var(--text-faint)",completed:"var(--accent)",expired:"var(--danger)"};
+    const colors={pending:"var(--warn-ink)",confirmed:"var(--ok-ink)",cancelled:"var(--ink-3)",completed:"var(--accent)",expired:"var(--bad-ink)"};
     const bar=Object.keys(dist).map(k=>
-      `<div class="seg" style="width:${(dist[k]/total*100).toFixed(1)}%;background:${colors[k]||"var(--border)"}" title="${esc(STATUS_CN[k]||k)} ${dist[k]}"></div>`).join("");
+      `<div class="seg" style="width:${(dist[k]/total*100).toFixed(1)}%;background:${colors[k]||"var(--line)"}" title="${esc(STATUS_CN[k]||k)} ${dist[k]}"></div>`).join("");
 
     const table=rows.map(r=>{
       const canCancel=r.status==="pending"||r.status==="confirmed";
       return `<tr>
         <td class="mono">#${r.id}</td>
-        <td>${esc(r.equipment_name)}<div style="color:var(--text-faint);font-size:11px">${esc(r.lab_label)}</div></td>
+        <td>${esc(r.equipment_name)}<div style="color:var(--ink-3);font-size:11px">${esc(r.lab_label)}</div></td>
         <td class="mono">${esc(r.slot)}</td>
         <td><span class="tag ${STATUS_TAG[r.status]||""}">${esc(STATUS_CN[r.status]||r.status)}</span></td>
         <td>${canCancel
@@ -701,6 +746,44 @@ function pushMsg(role,html,kind){
   return el;
 }
 
+/* 逐字显示 AI 的正文。
+   为什么只在正文上做、而不是整块 html：
+   reply 后面还挂着备选方案卡、引用块、执行轨迹 —— 那些是**结构化结果**，
+   逐字显示它们等于让人看着表格一格一格长出来，是干扰而不是反馈。
+   所以：正文按字吐出，结构化块等在后面，出完一起出现。
+
+   节奏取的不是"越像打字机越好"：中文按字数均匀吐会偏慢，
+   这里用固定时长（最长 1.1s）反推每帧字数，长回复不会比短回复慢太多。
+   标点后给一个小停顿，读起来才像句子而不像电报。 */
+function typeInto(bub, text, tailHtml, markdown){
+  const span=document.createElement("span");
+  bub.appendChild(span);
+  const finish=()=>{
+    span.innerHTML = markdown ? mdInline(text) : esc(text);
+    if(tailHtml) bub.insertAdjacentHTML("beforeend",tailHtml);
+    const b2=$("#msgs"); if(b2) b2.scrollTop=b2.scrollHeight;
+  };
+  if(REDUCED){ finish(); return Promise.resolve(); }
+  const chars=Array.from(text);
+  const dur=Math.min(1100,140+chars.length*11);
+  const t0=performance.now();
+  return new Promise((resolve)=>{
+    const tick=(now)=>{
+      const p=Math.min(1,(now-t0)/dur);
+      // easeOutQuad：开头稍快、收尾放慢，最后几个字有"落定"的感觉
+      const e=p*(2-p);
+      const n=Math.round(e*chars.length);
+      // 打字过程中**不**渲染 markdown：一是未闭合的 ** 会让中间态闪出星号，
+      // 二是每帧都跑一次 replace 是白费。逐字阶段只出纯文本，收尾时统一成标签。
+      span.textContent=chars.slice(0,n).join("");
+      const box=$("#msgs"); if(box) box.scrollTop=box.scrollHeight;
+      if(p<1) requestAnimationFrame(tick);
+      else{ finish(); resolve(); }
+    };
+    requestAnimationFrame(tick);
+  });
+}
+
 /* 停止生成（2026-09-29 加）：中断当前这次请求。
    用 AbortController 而不是"把按钮禁掉" —— 后者只是不让人点，
    请求还在跑、配额还在消耗。 */
@@ -719,7 +802,7 @@ function renderProposals(list){
       ? '<div class="relax">'+p.relaxations.map(r=>`<span class="rc">${esc(r)}</span>`).join("")+"</div>"
       : '<div class="relax"><span class="rc ok">完全满足</span></div>';
     return `<div class="prop"><span class="idx">${i+1}</span><div class="main">
-      <div class="line1">${esc(p.equipment_name)}<span style="color:var(--text-faint);font-weight:400"> · ${esc(p.lab_label)}</span></div>
+      <div class="line1">${esc(p.equipment_name)}<span style="color:var(--ink-3);font-weight:400"> · ${esc(p.lab_label)}</span></div>
       <div class="line2">${esc(p.date)} ${esc(p.start)}-${esc(p.end)} · ${p.hours}h</div>
       ${relax}</div>
       <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
@@ -826,21 +909,27 @@ async function send(message,accept){
 
     ph.remove();
     lastProposals=r.proposals||[];
-    let html=esc(r.reply);
+    // 正文先逐字出，结构化块（下单结果 / 备选 / 引用 / 轨迹）攒在 tail 里
+    // 等正文出完再挂 —— 见 typeInto 的注释。
+    // tail = 正文之后要挂的结构化块，攒好一次挂上
+    let tail="";
     if(r.booking&&r.booking.reservation){
       const b=r.booking;
-      html+='<div style="margin-top:8px"><span class="tag '+(b.ok?"ok":"bad")+'">'
+      tail+='<div style="margin-top:8px"><span class="tag '+(b.ok?"ok":"bad")+'">'
         + (b.ok?"已下单":"下单失败")+"</span> <span class='mono'>"
         + esc(b.reservation.slot||"")+"</span>"
         + (b.retries?` <span class="tag warn">重试 ${b.retries} 次</span>`:"")+"</div>";
     }else if(r.booking&&!r.booking.ok){
-      html+='<div style="margin-top:8px"><span class="tag bad">'+esc(r.booking.message)+"</span></div>";
+      tail+='<div style="margin-top:8px"><span class="tag bad">'+esc(r.booking.message)+"</span></div>";
     }
-    if(r.degraded) html+='<div style="margin-top:8px"><span class="tag warn">降级模式</span></div>';
-    html+=renderProposals(r.proposals);
-    html+=renderCitations(r.citations);
-    html+=renderTrace(r.trace);
-    const el=pushMsg("a",html);
+    if(r.degraded) tail+='<div style="margin-top:8px"><span class="tag warn">降级模式</span></div>';
+    tail+=renderProposals(r.proposals);
+    tail+=renderCitations(r.citations);
+    tail+=renderTrace(r.trace);
+
+    const el=pushMsg("a","");
+    // 正文经过 mdInline：esc 打底，再把 **粗体**/`代码` 变成真标签
+    await typeInto(el.querySelector(".bub"), String(r.reply||""), tail, true);
     $$("[data-accept]",el).forEach(btn=>btn.addEventListener("click",()=>{
       const p=lastProposals[Number(btn.getAttribute("data-accept"))];
       if(p) send("选：" + p.equipment_name + " " + p.date + " " + p.start + "-" + p.end, p);
@@ -876,8 +965,12 @@ const NODE_LABEL = {
 };
 
 /* ---------- 交互绑定 ---------- */
-const QUICK=["明天下午两点想用荧光光谱仪两小时","明天上午十点到十一点，紫外可见分光光度计",
-  "离心机使用有什么安全规范","我想约个设备"];
+/* 快捷示例。**第一条刻意不再和输入框 placeholder 重复** ——
+   两处都写"明天下午两点想用荧光光谱仪两小时"是在同一屏里说两遍同一句话，
+   占掉整整一行的高度却不提供新信息。现在四条各演示一种**不同的**说话方式：
+   模糊需求 / 带具体时段 / 常识提问 / 完全口语化，覆盖面反而更宽。 */
+const QUICK=["我想约个设备","明天上午十点到十一点，紫外可见分光光度计",
+  "离心机使用有什么安全规范","张伟能约离心机吗"];
 $("#quick").innerHTML=QUICK.map(q=>`<button class="btn ghost sm" data-q="${esc(q)}">${esc(q)}</button>`).join("");
 $$("[data-q]").forEach(b=>b.addEventListener("click",()=>{
   $("#inp-msg").value=b.getAttribute("data-q");
@@ -904,6 +997,31 @@ $("#flt-status").addEventListener("change",loadReservations);
 $("#btn-q").addEventListener("click",runRetrieve);
 $("#inp-q").addEventListener("keydown",e=>{if(e.key==="Enter")runRetrieve();});
 
+/* ---------- 指针跟随柔光 ----------
+   在卡片上写 --mx/--my，CSS 那边用 radial-gradient 跟着走（见 app.css 15.6）。
+   用事件委托挂一次而不是每张卡各挂一个：面板是动态渲染的，
+   逐卡绑定会在每次重渲染后失效。
+   requestAnimationFrame 合帧 —— mousemove 每秒能来上百次，
+   每次都写样式属性会让主线程一直在做无用功。 */
+(function pointerGlow(){
+  if(!window.matchMedia || !window.matchMedia("(hover:hover)").matches) return;
+  let pending=null, raf=0;
+  document.addEventListener("mousemove",(e)=>{
+    const card=e.target && e.target.closest ? e.target.closest(".card") : null;
+    if(!card) return;
+    pending={card,x:e.clientX,y:e.clientY};
+    if(raf) return;
+    raf=requestAnimationFrame(()=>{
+      raf=0;
+      if(!pending) return;
+      const r=pending.card.getBoundingClientRect();
+      pending.card.style.setProperty("--mx",(pending.x-r.left)+"px");
+      pending.card.style.setProperty("--my",(pending.y-r.top)+"px");
+      pending=null;
+    });
+  },{passive:true});
+})();
+
 /* ---------- 登录闸门交互 ---------- */
 $("#lg-go").addEventListener("click",doLogin);
 $("#rg-go").addEventListener("click",doRegister);
@@ -914,13 +1032,42 @@ $("#tg-reg").addEventListener("click",e=>{
 });
 $("#lg-pass").addEventListener("keydown",e=>{if(e.key==="Enter")doLogin();});
 $("#lg-user").addEventListener("keydown",e=>{if(e.key==="Enter")$("#lg-pass").focus();});
+/* 演示账号：点击时做两件事 —— 填好凭据，并**当场说明这个身份的边界**。
+   只填不解释的话，三个按钮看起来只是三个不同的名字；
+   而"资质不同能约到的设备不同"是这个项目最想让人看见的一条硬约束。
+   预览区用 aria-live 标注，读屏用户也能听到切换结果。 */
 $$("[data-demo]").forEach(b=>b.addEventListener("click",()=>{
   const [u,p]=b.getAttribute("data-demo").split("|");
   $("#lg-user").value=u; $("#lg-pass").value=p;
   gateError("");
+  $$("#demo-row [data-demo]").forEach(x=>x.setAttribute("aria-pressed",String(x===b)));
+  $$("#demo-row [data-demo]").forEach(x=>x.classList.toggle("on",x===b));
+  const pv=$("#demo-preview");
+  if(pv){
+    const certs=b.getAttribute("data-certs")||"";
+    const can=b.getAttribute("data-can")||"";
+    const cant=b.getAttribute("data-cant")||"";
+    pv.innerHTML=
+      '<dl class="pv">'
+      + '<div><dt>账号</dt><dd><b>'+esc(u)+'</b></dd></div>'
+      + '<div><dt>资质</dt><dd>'+esc(certs)+'</dd></div>'
+      + '<div><dt>能约</dt><dd class="ok">'+esc(can)+'</dd></div>'
+      + '<div><dt>会被拦</dt><dd class="'+(cant==="无"?"":"no")+'">'+esc(cant)+'</dd></div>'
+      + '</dl>';
+    // 重放一次入场动画：不重放的话第二次点击看不出"它更新了"
+    pv.classList.remove("pv-in"); void pv.offsetWidth; pv.classList.add("pv-in");
+  }
   $("#lg-go").focus();
 }));
-$("#btn-logout").addEventListener("click",()=>{
+$("#btn-logout").addEventListener("click",async()=>{
+  // 先请服务端作废令牌，再清本地 —— 只清 sessionStorage 只是"忘了它"，
+  // 令牌本身在过期前依然有效（这也是 1.1 那个缺陷的同一面）。
+  // 失败也不阻塞登出：本地清理始终要执行，否则用户会被卡在登录态里。
+  try{
+    await api("/api/auth/logout",{method:"POST",body:JSON.stringify({})});
+  }catch(e){
+    // 网络/令牌已失效都无所谓，下面照样清本地状态
+  }
   clearSession();
   showGate();
   toast("已退出登录");
