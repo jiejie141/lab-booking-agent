@@ -256,11 +256,11 @@ curl -X POST localhost:8200/api/users -H "Authorization: Bearer $ADMIN_TOKEN" \
 ## 数字台账（2026-10-09 复核）
 | 数字 | 出处 |
 |---|---|
-| **1026** 项测试 | `pytest --collect-only`（33 个测试文件；1010 passed + 16 skipped） |
+| **1026** 项测试 | `pytest --collect-only`（35 个测试文件；1010 passed + 16 skipped） |
 | 40 并发 ×3 轮：每轮 1 成功 / 39 明确冲突 / 0 异常 | `python main.py loadtest --concurrency 40 --rounds 3` |
 | HTTP 冒烟与越权清单 84/84 | `scripts/smoke_http.py`，真实 uvicorn 进程 |
 | 6 个迁移 revision | `migrations/versions/` |
-| 33 个测试文件 | `pytest --collect-only -q` |
+| 35 个测试文件 | `pytest --collect-only -q` |
 | 33 条 OpenAPI 路径（契约门禁） | `python scripts/check_openapi.py --check` |
 | 注册限流 5/h（可配） | `LAB_REGISTER_PER_HOUR`；超配额返回 429 + `Retry-After` |
 | 7 类机器可读 reason | `schemas.py` 的 `BookingReason` |

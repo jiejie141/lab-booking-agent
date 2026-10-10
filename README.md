@@ -6,9 +6,9 @@
 
 | | |
 |---|---|
-| **代码** | 16,984 行 `src/` · 15,073 行 `tests/` · 35 个测试文件（测试∶源码 ≈ 1∶1） |
-| **测试** | **1,026 项** pytest，全绿 · CI 双版本矩阵（Python 3.10 + 3.13） |
-| **接口** | **33 条** REST 路径 · OpenAPI 契约门禁（漂移即失败）· 6 个数据库迁移 |
+| **代码** | 16,984 行 `src/` · 15,073 行 `tests/` · 35 个测试文件（测试∶源码 ≈ 0.89∶1） |
+| **测试** | **1,026 项** pytest（952 个测试函数 + 参数化展开）· 本地 1010 通过 / 16 跳过，跳过项需真实 PostgreSQL，由 CI `postgres` job 执行 |
+| **接口** | **37 条**实现端点（33 条进 OpenAPI，`/metrics` 等 4 条刻意不文档化）· 契约门禁（漂移即失败）· 6 个数据库迁移 |
 | **质量门** | `pytest` · `ruff` · `mypy` · `check_openapi.py --check` —— 四项都在 CI 里卡 |
 | **可观测** | `/api/health` · `/api/health/ready` · `/metrics` · Prometheus 告警规则 · 结构化审计流水 |
 | **安全** | JWT + RBAC · 登录限流 · 幂等键 · 用内置默认密钥**拒绝启动** |
@@ -1172,7 +1172,7 @@ python scripts/embed_fonts.py   # 重新生成内嵌字体子集（可复现，�
 ```
 
 ```
-pytest:            1026 collected = 1010 passed + 16 skipped（33 个测试文件，`pytest --collect-only -q`；跳过项为需真实 PostgreSQL 的用例，由 CI 执行）
+pytest:            1026 collected = 1010 passed + 16 skipped（35 个测试文件，`pytest --collect-only -q`；跳过项为需真实 PostgreSQL 的用例，由 CI 的 postgres job 执行）
 评测报告:           意图准确率 100.0% · 槽位准确率 100.0% · 端到端通过率 100.0%（14/14）
 并发压测:           3 轮 × 40 并发，每轮恰好 1 成功、39 明确冲突、0 异常
 区间重叠竞态:        3/3 未超卖
@@ -1251,7 +1251,7 @@ mypy           # Success: no issues found in 78 source files
 
 | job | 跑什么 | 为什么单独拆 |
 |---|---|---|
-| `quality` | ruff（lint）→ mypy → pytest，**py3.10 与 py3.13 双版本矩阵** | 声明支持 3.10 就不能只在 3.13 上验证 |
+| `quality` | ruff（lint）→ mypy → pytest，**py3.10 与 py3.13 双版本矩阵**（另三个 job 固定 py3.13） | 声明支持 3.10 就不能只在 3.13 上验证 |
 | `smoke` | `main.py eval` → `scripts/overlap_race.py` → `scripts/sweep_demo.py` → `scripts/smoke_http.py` | 这几项都要起真实进程 / 真实 uvicorn / 真实 SQLite 文件，失败信号与单测不同类 |
 | `docker` | `docker compose up -d --build` → 等就绪 → `scripts/accept_deploy.py`（25 项）→ `down -v` | **只 `docker build` 只能证明「Dockerfile 语法对」**。迁移在真 PG 上跑不跑得到 head、容器健康检查转不转 healthy、端口映射对不对、控制台能不能打开 —— 这些单测与 smoke 全都覆盖不到（它们跑在一次性 SQLite 库上） |
 | `postgres` | 在 `postgres:16-alpine` service container 上跑 `main.py migrate` + `tests/test_postgres.py` | **整套单测都跑在 SQLite 上**，而生产形态是 PG。这个 job 存在的唯一目的就是让 PG 那条路径真的被执行一次 |
