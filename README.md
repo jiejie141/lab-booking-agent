@@ -35,6 +35,8 @@ Agent：预约成功：2026-09-24 12:00-14:00 荧光光谱仪（分析楼3楼301
 
 🏗️ **架构图（可交互）**：[`lab-booking-architecture.html`](.archify/architecture-lab-booking-20261010-110000/lab-booking-architecture.html) —— 双击打开即可缩放、聚焦节点、切换明暗主题；每个节点都挂着源码出处。
 
+<a href=".archify/architecture-lab-booking-20261010-110000/lab-booking-architecture.html"><img src=".archify/architecture-lab-booking-20261010-110000/preview.png" alt="lab-booking-agent 架构总览" width="100%"></a>
+
 </details>
 
 ---

@@ -77,7 +77,7 @@
       "id": "api",
       "type": "backend",
       "label": "FastAPI 路由层",
-      "sublabel": "33 条路径 · JWT 鉴权",
+      "sublabel": "34 条路径 · JWT 鉴权",
       "icon": "backend",
       "sources": [
         {
@@ -248,7 +248,7 @@
       "id": "db",
       "type": "database",
       "label": "SQLite",
-      "sublabel": "WAL · 6 个迁移",
+      "sublabel": "WAL · 7 个迁移",
       "icon": "database",
       "sources": [
         {
@@ -431,8 +431,8 @@
       "dot": "emerald",
       "title": "工程质量",
       "items": [
-        "16.6k 行代码 · 1026 项测试 · CI 三版本矩阵",
-        "33 条 API 带 OpenAPI 契约门禁 · 6 个数据库迁移"
+        "17.0k 行源码 · 1026 项测试（1010 通过 / 16 跳过）· CI 四类作业",
+        "34 条 OpenAPI 路径带契约门禁 · 7 个数据库迁移"
       ]
     }
   ]
