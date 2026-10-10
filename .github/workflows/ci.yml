@@ -50,6 +50,7 @@ jobs:
           pip install -r requirements.txt
           # 静态检查工具不进 requirements.txt：它们不是运行依赖
           pip install "ruff>=0.9" "mypy>=1.11"
+          pip install "pytest-cov>=5.0"
 
       # 把「这个 job 到底测的是哪套栈」打出来。
       #
@@ -89,6 +90,26 @@ jobs:
         # 经 ci_run.py 包装：失败时把 FAILED/ERROR 行抬成注解 ——
         # 原始日志要鉴权才能读，注解不用（见 scripts/ci_run.py 的说明）。
         run: python scripts/ci_run.py --match '^(FAILED|ERROR)' --tail 20 -- python -m pytest -q
+
+      # 覆盖率：只强制**总量下限**，不强制每个文件。
+      #
+      # 为什么不设 per-file 门槛：本项目有几个模块是“结构性低覆盖”，
+      #   它们不是“没测”，而是“这类代码在 CI 里没法测”：
+      #     - cli.py (39%)       —— 命令行入口，靠 scripts/ 下的脚本驱动
+      #     - llm.py (76%)       —— 真实 LLM 调用，没 API key 时走 mock 分支
+      #     - server.py (0%)     —— uvicorn 启动入口，由 smoke job 真实进程覆盖
+      #     - evaluation.py (35%)—— 评测集，需真实模型，mock 下只能覆盖骨架
+      #   给它们设门槛只会逼人写“为了覆盖而覆盖”的假测试，
+      #   或者把门槛一路调低到没有意义。
+      #
+      # 那为什么还要一个总量门槛：此前项目**完全没有覆盖率度量**，
+      #   于是“测试够不够”只能靠感觉。85% 是当前实测值，
+      #   把门槛定在 82%（留 3 个点抖动空间）是为了让它成为
+      #   **防倒退的闸门**而不是理想值 —— 掉了就红灯，涨了不奖励。
+      - name: 覆盖率（防倒退闸门，非理想值）
+        run: |
+          python -m pytest -q --cov=src/lagent --cov-report=term-missing --cov-fail-under=82
+
 
   smoke:
     name: 端到端验证（真实进程）
@@ -197,6 +218,53 @@ jobs:
   # 用 GitHub runner 自带的 service container 起 PG，不需要在开发机上装任何东西
   # （本机的 Docker 起不来时也照样能验，这正是它比"本地跑一遍"更可靠的地方）。
   # -------------------------------------------------------------------------
+  # 向量检索路径：装了 chromadb 才跑
+  #
+  # 为什么单独一个 job 而不是装进 quality：
+  #   requirements.txt 里 chromadb 是**注释掉的**（它不是运行依赖，
+  #   没装时 hybrid 会设计内降级回 BM25）。于是默认环境下
+  #   ChromaVectorIndex 那整条代码路径**从没被执行过** ——
+  #   不是「测了没过」，是「根本没跑」。
+  #
+  #   把它装进 quality job 会拖慢所有 Python 版本、且掩盖降级行为本身
+  #   （降级也是要验的）；单独一个 job 的好处是：
+  #     绿 = 向量路径真跑通了
+  #     红 = 向量路径坏了，而 quality 的绿说明降级路径没坏
+  #   两者信息量不同，混在一起就都看不出来了。
+  vector:
+    name: 向量检索路径（装 chromadb）
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: 安装依赖 + chromadb
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install "chromadb>=0.5.0"
+
+      # 先确认「这次确实是装上了」再跑测试。
+      #
+      # 不加这一步的话，万一 chromadb 装不上（版本冲突、平台没 wheel），
+      # 测试会因为降级而全部跳过、job 照样绿 ——
+      # **看起来通过了，实际什么都没验**。这是可选依赖 job 最容易的假绿。
+      - name: 确认 chromadb 真的可用（防止降级导致的假绿）
+        run: |
+          python -c "import chromadb; print('chromadb', chromadb.__version__)"
+          python -c "from lagent.knowledge.retriever import ChromaVectorIndex; print('import ok')"
+
+      # 跑全部检索测试。装了 chromadb 之后 test_retrieval.py 里那句
+      # `if vector_ok:` 会走 True 分支，断言 HybridRetriever 真的被建出来 ——
+      # 这条分支在本地默认环境里永远不会执行。
+      - name: 检索测试（此时向量分支会被真正执行）
+        run: python -m pytest tests/test_retrieval.py -q -rs
+
   postgres:
     name: PostgreSQL 真实链路
     runs-on: ubuntu-latest
