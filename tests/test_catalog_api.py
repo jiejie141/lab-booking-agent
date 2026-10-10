@@ -574,7 +574,6 @@ class TestUserMaintenance:
         按**新**世代签发就没事。这条用例就是钉住这个区别。
         """
         headers = await as_user("张伟")
-        token = headers["Authorization"].split(" ", 1)[1]
 
         # 登出前可用
         assert (await http.get("/api/auth/me", headers=headers)).status_code == 200
