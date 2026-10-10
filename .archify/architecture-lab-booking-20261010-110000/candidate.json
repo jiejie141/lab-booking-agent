@@ -1,0 +1,439 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "lab-booking-agent · 约束协商式预约",
+    "output": ".archify/architecture-lab-booking-20261010-110000/lab-booking-architecture.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/jiejie141/lab-booking-agent.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "a599f3290d1cbefae61ace004046424d77f5c4c1"
+    },
+    "views": [
+      {
+        "id": "journey",
+        "label": "主链路",
+        "focus": [
+          "client",
+          "api",
+          "graph",
+          "negotiate",
+          "booking",
+          "db"
+        ],
+        "note": "从一句话需求到落库"
+      },
+      {
+        "id": "guard",
+        "label": "约束与准入",
+        "focus": [
+          "graph",
+          "access",
+          "availability",
+          "violations",
+          "notify"
+        ],
+        "note": "资质、时段、违约三道闸"
+      },
+      {
+        "id": "ops",
+        "label": "运维面",
+        "focus": [
+          "api",
+          "metrics",
+          "state",
+          "retriever"
+        ],
+        "note": "指标、限流、检索降级"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "浏览器控制台",
+      "sublabel": "vanilla JS + SSE",
+      "icon": "frontend",
+      "sources": [
+        {
+          "path": "src/lagent/web/app.js",
+          "line": 792
+        }
+      ],
+      "pos": [
+        30,
+        320
+      ],
+      "size": [
+        136,
+        66
+      ]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "FastAPI 路由层",
+      "sublabel": "33 条路径 · JWT 鉴权",
+      "icon": "backend",
+      "sources": [
+        {
+          "path": "src/lagent/api.py",
+          "line": 782,
+          "end_line": 795
+        }
+      ],
+      "pos": [
+        300,
+        320
+      ],
+      "size": [
+        148,
+        66
+      ]
+    },
+    {
+      "id": "graph",
+      "type": "backend",
+      "label": "LangGraph 状态机",
+      "sublabel": "parse → negotiate → book",
+      "icon": "backend",
+      "sources": [
+        {
+          "path": "src/lagent/agent/graph.py",
+          "line": 132,
+          "end_line": 162
+        }
+      ],
+      "pos": [
+        560,
+        320
+      ],
+      "size": [
+        156,
+        66
+      ]
+    },
+    {
+      "id": "negotiate",
+      "type": "backend",
+      "label": "约束协商",
+      "sublabel": "放宽哪一条能约上",
+      "icon": "backend",
+      "sources": [
+        {
+          "path": "src/lagent/domain/negotiate.py",
+          "line": 118,
+          "end_line": 130
+        }
+      ],
+      "pos": [
+        800,
+        120
+      ],
+      "size": [
+        146,
+        66
+      ]
+    },
+    {
+      "id": "availability",
+      "type": "backend",
+      "label": "时段求解",
+      "sublabel": "冲突检测",
+      "icon": "clock",
+      "sources": [
+        {
+          "path": "src/lagent/domain/availability.py",
+          "line": 1
+        }
+      ],
+      "pos": [
+        1010,
+        120
+      ],
+      "size": [
+        136,
+        58
+      ]
+    },
+    {
+      "id": "access",
+      "type": "security",
+      "label": "准入与资质",
+      "sublabel": "硬约束 · 换时段解决不了",
+      "icon": "security",
+      "sources": [
+        {
+          "path": "src/lagent/domain/access.py",
+          "line": 193
+        }
+      ],
+      "pos": [
+        1010,
+        5
+      ],
+      "size": [
+        136,
+        58
+      ]
+    },
+    {
+      "id": "violations",
+      "type": "backend",
+      "label": "违约判定",
+      "sublabel": "未到 / 超时",
+      "icon": "flag",
+      "sources": [
+        {
+          "path": "src/lagent/domain/violations.py",
+          "line": 1
+        }
+      ],
+      "pos": [
+        1010,
+        520
+      ],
+      "size": [
+        136,
+        58
+      ]
+    },
+    {
+      "id": "booking",
+      "type": "backend",
+      "label": "下单与幂等",
+      "sublabel": "审批 · 豁免",
+      "icon": "backend",
+      "sources": [
+        {
+          "path": "src/lagent/domain/booking.py",
+          "line": 1
+        }
+      ],
+      "pos": [
+        800,
+        520
+      ],
+      "size": [
+        146,
+        66
+      ]
+    },
+    {
+      "id": "retriever",
+      "type": "backend",
+      "label": "BM25 检索",
+      "sublabel": "安全规范语料",
+      "icon": "database",
+      "sources": [
+        {
+          "path": "src/lagent/knowledge/retriever.py",
+          "line": 100
+        }
+      ],
+      "pos": [
+        560,
+        120
+      ],
+      "size": [
+        146,
+        58
+      ]
+    },
+    {
+      "id": "db",
+      "type": "database",
+      "label": "SQLite",
+      "sublabel": "WAL · 6 个迁移",
+      "icon": "database",
+      "sources": [
+        {
+          "path": "src/lagent/db.py",
+          "line": 93,
+          "end_line": 117
+        }
+      ],
+      "pos": [
+        800,
+        690
+      ],
+      "size": [
+        146,
+        58
+      ]
+    },
+    {
+      "id": "state",
+      "type": "database",
+      "label": "进程外状态",
+      "sublabel": "会话 / 滑动窗口限流",
+      "icon": "database",
+      "sources": [
+        {
+          "path": "src/lagent/localstate.py",
+          "line": 1
+        }
+      ],
+      "pos": [
+        300,
+        520
+      ],
+      "size": [
+        146,
+        58
+      ]
+    },
+    {
+      "id": "notify",
+      "type": "external",
+      "label": "通知与审批",
+      "sublabel": "管理员待办",
+      "icon": "person",
+      "sources": [
+        {
+          "path": "src/lagent/notify.py",
+          "line": 1
+        }
+      ],
+      "pos": [
+        560,
+        690
+      ],
+      "size": [
+        136,
+        58
+      ]
+    },
+    {
+      "id": "metrics",
+      "type": "cloud",
+      "label": "Prometheus 指标",
+      "sublabel": "/metrics + 告警规则",
+      "icon": "cloud",
+      "sources": [
+        {
+          "path": "deploy/prometheus-alerts.yml",
+          "line": 1
+        }
+      ],
+      "pos": [
+        30,
+        520
+      ],
+      "size": [
+        136,
+        58
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "c-api",
+      "from": "client",
+      "to": "api",
+      "label": "POST /chat/stream",
+      "variant": "emphasis"
+    },
+    {
+      "id": "api-graph",
+      "from": "api",
+      "to": "graph",
+      "label": "invoke",
+      "variant": "emphasis"
+    },
+    {
+      "id": "graph-neg",
+      "from": "graph",
+      "to": "negotiate",
+      "label": "备选方案"
+    },
+    {
+      "id": "neg-avail",
+      "from": "negotiate",
+      "to": "availability",
+      "label": "查空档"
+    },
+    {
+      "id": "neg-access",
+      "from": "negotiate",
+      "to": "access",
+      "label": "资质前置过滤",
+      "variant": "security"
+    },
+    {
+      "id": "graph-book",
+      "from": "graph",
+      "to": "booking",
+      "label": "选中后下单"
+    },
+    {
+      "id": "book-db",
+      "from": "booking",
+      "to": "db",
+      "label": "SQLAlchemy async"
+    },
+    {
+      "id": "graph-retr",
+      "from": "graph",
+      "to": "retriever",
+      "label": "规范问答"
+    },
+    {
+      "id": "graph-viol",
+      "from": "graph",
+      "to": "violations",
+      "label": "违约流水"
+    },
+    {
+      "id": "graph-notify",
+      "from": "graph",
+      "to": "notify",
+      "label": "审批待办",
+      "variant": "dashed"
+    },
+    {
+      "id": "api-state",
+      "from": "api",
+      "to": "state",
+      "label": "限流 / 会话",
+      "variant": "dashed"
+    },
+    {
+      "id": "api-metrics",
+      "from": "api",
+      "to": "metrics",
+      "label": "暴露指标",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "它和普通表单系统的差别",
+      "items": [
+        "预约失败时返回带取舍说明的备选方案，而不是一句「该时段不可预约」",
+        "每条备选都标注放宽了哪一条约束（起始时间 / 同类设备 / 时长 / 顺延）"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "约束是硬约束",
+      "items": [
+        "设备需培训资质才放行，换时段解决不了",
+        "资质过期 / 被撤销各是一句不同的话"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "工程质量",
+      "items": [
+        "16.6k 行代码 · 1026 项测试 · CI 三版本矩阵",
+        "33 条 API 带 OpenAPI 契约门禁 · 6 个数据库迁移"
+      ]
+    }
+  ]
+}

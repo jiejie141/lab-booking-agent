@@ -1,0 +1,377 @@
+{
+  "schemaVersion": 1,
+  "ok": false,
+  "command": "finalize",
+  "status": "skipped",
+  "type": "architecture",
+  "quality": "showcase",
+  "startedAt": "2026-10-10T03:08:45.652Z",
+  "specification": {
+    "path": "/tmp/lab-arch/.archify/architecture-lab-booking-20261010-110000/candidate.json",
+    "sha256": "560672d0b92844841bde8831c0a508267f7f50b5c591003b6944ea1155fd0d4b",
+    "bytes": 8653
+  },
+  "artifact": {
+    "path": "/tmp/lab-arch/.archify/architecture-lab-booking-20261010-110000/lab-booking-architecture.html",
+    "sha256": "de234d540ce7af17d4ba2b32f2688d7742fd7b987f6c66d6b64e9695c112e9d0",
+    "bytes": 771959
+  },
+  "stages": {
+    "validate": {
+      "status": "pass",
+      "exitCode": 0,
+      "durationMs": null,
+      "execution": "embedded-in-deliver",
+      "command": [
+        "/usr/bin/node",
+        "/tmp/archify-src/archify/bin/archify.mjs",
+        "deliver",
+        "architecture",
+        "/tmp/lab-arch/.archify/architecture-lab-booking-20261010-110000/candidate.json",
+        "/tmp/lab-arch/.archify/architecture-lab-booking-20261010-110000/lab-booking-architecture.html",
+        "--quality",
+        "showcase",
+        "--repo-root",
+        "/tmp/lab-checkout",
+        "--json"
+      ],
+      "receipt": {
+        "schemaVersion": 1,
+        "ok": true,
+        "command": "validate",
+        "specification": {
+          "sha256": "560672d0b92844841bde8831c0a508267f7f50b5c591003b6944ea1155fd0d4b",
+          "bytes": 8653
+        },
+        "validation": {
+          "checksPassed": 9,
+          "checkCount": 9,
+          "compositionProfile": "showcase",
+          "compositionStatus": "pass",
+          "errors": 0,
+          "warnings": 0
+        }
+      }
+    },
+    "deliver": {
+      "status": "pass",
+      "exitCode": 0,
+      "durationMs": 1179,
+      "command": [
+        "/usr/bin/node",
+        "/tmp/archify-src/archify/bin/archify.mjs",
+        "deliver",
+        "architecture",
+        "/tmp/lab-arch/.archify/architecture-lab-booking-20261010-110000/candidate.json",
+        "/tmp/lab-arch/.archify/architecture-lab-booking-20261010-110000/lab-booking-architecture.html",
+        "--quality",
+        "showcase",
+        "--repo-root",
+        "/tmp/lab-checkout",
+        "--json"
+      ],
+      "receipt": {
+        "schemaVersion": 1,
+        "receiptId": "dea3e621-aa84-4975-a4b7-928a7ef638d1",
+        "ok": true,
+        "command": "deliver",
+        "type": "architecture",
+        "input": "/tmp/lab-arch/.archify/architecture-lab-booking-20261010-110000/candidate.json",
+        "output": "/tmp/lab-arch/.archify/architecture-lab-booking-20261010-110000/lab-booking-architecture.html",
+        "specification": {
+          "sha256": "560672d0b92844841bde8831c0a508267f7f50b5c591003b6944ea1155fd0d4b",
+          "bytes": 8653
+        },
+        "artifact": {
+          "sha256": "de234d540ce7af17d4ba2b32f2688d7742fd7b987f6c66d6b64e9695c112e9d0",
+          "bytes": 771959
+        },
+        "validation": {
+          "checksPassed": 9,
+          "checkCount": 9,
+          "compositionProfile": "showcase",
+          "compositionStatus": "pass",
+          "errors": 0,
+          "warnings": 0
+        },
+        "evidence": {
+          "verified": true,
+          "repository": "https://github.com/jiejie141/lab-booking-agent",
+          "revision": "a599f3290d1cbefae61ace004046424d77f5c4c1",
+          "references": 13
+        },
+        "update": {
+          "status": "unavailable",
+          "installedVersion": null,
+          "availableVersion": null,
+          "releaseNotes": null,
+          "checkedAt": null,
+          "source": null,
+          "noticeRequired": false,
+          "noticeText": null,
+          "reason": "disabled"
+        }
+      }
+    },
+    "check": {
+      "status": "pass",
+      "exitCode": 0,
+      "durationMs": 128,
+      "command": [
+        "/usr/bin/node",
+        "/tmp/archify-src/archify/bin/archify.mjs",
+        "check",
+        "/tmp/lab-arch/.archify/architecture-lab-booking-20261010-110000/lab-booking-architecture.html",
+        "--require-provenance"
+      ],
+      "receipt": {
+        "ok": true,
+        "file": "/tmp/lab-arch/.archify/architecture-lab-booking-20261010-110000/lab-booking-architecture.html",
+        "artifact": {
+          "sha256": "de234d540ce7af17d4ba2b32f2688d7742fd7b987f6c66d6b64e9695c112e9d0",
+          "bytes": 771959
+        },
+        "checks": [
+          {
+            "name": "single_svg",
+            "ok": true,
+            "details": [
+              "found 1 <svg> block(s)"
+            ]
+          },
+          {
+            "name": "finite_svg",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "orthogonal_arrows",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "label_route_clearance",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "relationship_crossings",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "relationship_corridors",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "container_border_runs",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "route_rhythm",
+            "ok": true,
+            "details": []
+          },
+          {
+            "name": "legend_clearance",
+            "ok": true,
+            "details": []
+          }
+        ],
+        "composition": {
+          "schemaVersion": 1,
+          "profile": "showcase",
+          "status": "pass",
+          "summary": {
+            "errors": 0,
+            "warnings": 0
+          },
+          "metrics": {
+            "properCrossings": 0,
+            "resolvedCrossovers": 0,
+            "ambiguousCorridors": 0,
+            "arrowheadCollisions": 0,
+            "containerBorderRuns": 0,
+            "labelRouteClearanceIssues": 0,
+            "labelCanvasOverflowIssues": 0,
+            "minLabelRouteClearance": 21.1,
+            "desktopReadabilityIssues": 0,
+            "viewportHeightIssues": 0,
+            "minProjectedNodeTextPx": 6.27318718381113,
+            "maxBends": 2,
+            "routesOverSuggestedBends": 0,
+            "maxStretch": 1,
+            "routesOverSuggestedStretch": 0,
+            "minSegmentPx": 24,
+            "minInteriorSegmentPx": 186,
+            "shortSegmentCount": 0,
+            "shortEndpointSegmentCount": 0,
+            "shortInteriorSegmentCount": 0,
+            "microSegmentCount": 0
+          },
+          "suggestedLimits": {
+            "bendsPerRelationship": 2,
+            "stretch": 1.35,
+            "segmentPx": 16,
+            "microSegmentPx": 8
+          },
+          "routeReview": {
+            "crossings": [],
+            "detours": []
+          },
+          "leadingSpace": {
+            "measured": true,
+            "emptyTopPx": 5,
+            "emptyTopRatio": 0.006,
+            "occupiedTop": 5,
+            "viewBoxTop": 0,
+            "canvasHeight": 816,
+            "typicalNodeHeight": 58,
+            "reviewSuggested": false
+          },
+          "desktopReadability": {
+            "budgetBasis": "legacy-930",
+            "readerContract": "declared-wide-v1",
+            "availableDiagramWidth": 930,
+            "actualBudgetPx": 930,
+            "limit": "legacy",
+            "requestedTargetPx": 7.5,
+            "requestedTargetMet": false,
+            "hardFloorPx": 6,
+            "hardFloorMet": true,
+            "minimumOwner": {
+              "kind": "edge",
+              "id": "c-api",
+              "from": "client",
+              "to": "api"
+            },
+            "minimumSourceTextPx": 8,
+            "minimumProjectedTextPx": 6.27318718381113,
+            "semanticTextCount": 38
+          },
+          "issues": []
+        },
+        "provenance": "current",
+        "deliveryReceiptId": "dea3e621-aa84-4975-a4b7-928a7ef638d1"
+      }
+    },
+    "browser-check": {
+      "status": "skipped",
+      "exitCode": 2,
+      "durationMs": 19,
+      "command": [
+        "/usr/bin/node",
+        "/tmp/archify-src/archify/bin/archify.mjs",
+        "browser-check",
+        "/tmp/lab-arch/.archify/architecture-lab-booking-20261010-110000/lab-booking-architecture.html",
+        "--json",
+        "--require-provenance"
+      ],
+      "execution": "in-process",
+      "receipt": {
+        "schemaVersion": 1,
+        "ok": false,
+        "command": "browser-check",
+        "evidenceKind": "automated-browser",
+        "status": "skipped",
+        "visualReview": "not-requested",
+        "provenance": "current",
+        "deliveryReceiptId": "dea3e621-aa84-4975-a4b7-928a7ef638d1",
+        "artifact": {
+          "path": "/tmp/lab-arch/.archify/architecture-lab-booking-20261010-110000/lab-booking-architecture.html",
+          "sha256": "de234d540ce7af17d4ba2b32f2688d7742fd7b987f6c66d6b64e9695c112e9d0",
+          "bytes": 771959
+        },
+        "state": {
+          "detail": "read",
+          "motion": "still"
+        },
+        "chrome": {
+          "status": "unavailable",
+          "executable": null
+        },
+        "diagnostics": [
+          {
+            "code": "viewer/chrome-unavailable",
+            "severity": "warning",
+            "message": "Chrome or Chromium is unavailable. Set ARCHIFY_CHROME to its executable path.",
+            "subject": {
+              "artifact": "/tmp/lab-arch/.archify/architecture-lab-booking-20261010-110000/lab-booking-architecture.html"
+            },
+            "evidence": {
+              "executable": null
+            },
+            "supportedFixes": [
+              "set ARCHIFY_CHROME to a Chrome or Chromium executable and rerun browser-check"
+            ]
+          }
+        ],
+        "containment": {
+          "status": "skipped",
+          "policy": "fit-or-reader-declared-readable-vertical-scroll",
+          "viewports": []
+        },
+        "themeStates": {
+          "status": "skipped",
+          "viewports": []
+        },
+        "readability": {
+          "status": "skipped",
+          "minimumProjectedNodeTextPx": 6,
+          "viewports": []
+        },
+        "viewerChrome": {
+          "status": "skipped",
+          "viewports": []
+        },
+        "captures": {
+          "status": "not-requested",
+          "screenshots": [],
+          "contactSheet": null
+        },
+        "sidecars": {
+          "receipt": "lab-booking-architecture.browser-check.json",
+          "files": []
+        },
+        "error": "Chrome or Chromium is unavailable. Set ARCHIFY_CHROME to its executable path."
+      }
+    }
+  },
+  "diagnostics": [
+    {
+      "code": "viewer/chrome-unavailable",
+      "severity": "warning",
+      "message": "Chrome or Chromium is unavailable. Set ARCHIFY_CHROME to its executable path.",
+      "subject": {
+        "artifact": "/tmp/lab-arch/.archify/architecture-lab-booking-20261010-110000/lab-booking-architecture.html"
+      },
+      "evidence": {
+        "executable": null
+      },
+      "supportedFixes": [
+        "set ARCHIFY_CHROME to a Chrome or Chromium executable and rerun browser-check"
+      ]
+    }
+  ],
+  "evidence": {
+    "receipt": "/tmp/lab-arch/.archify/architecture-lab-booking-20261010-110000/lab-booking-architecture.finalize.json",
+    "summaryReceipt": "/tmp/lab-arch/.archify/architecture-lab-booking-20261010-110000/lab-booking-architecture.finalize-summary.json",
+    "browserCheckReceipt": "/tmp/lab-arch/.archify/architecture-lab-booking-20261010-110000/lab-booking-architecture.browser-check.json"
+  },
+  "visualReview": "not-requested",
+  "failedStage": "browser-check",
+  "finishedAt": "2026-10-10T03:08:47.320Z",
+  "durationMs": 1667,
+  "update": {
+    "status": "current",
+    "installedVersion": "3.0.1",
+    "availableVersion": "3.0.1",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-10T02:57:06.483Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  }
+}
