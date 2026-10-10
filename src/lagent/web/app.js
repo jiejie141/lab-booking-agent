@@ -243,7 +243,12 @@ async function loadHealth(){
     if(!r.ok) throw new Error("HTTP "+r.status);
     const h=await r.json();
     $("#dot-health").className="dot"+(h.agent_available?"":" warn");
-    $("#badge-mode").innerHTML='<span class="dot'+(h.agent_available?"":" warn")+'" id="dot-health"></span>'+esc(h.app_mode)+" · "+esc(h.database);
+    // 运行模式：头图只显示 app_mode，完整串（含 database）放进 title。
+    // 原因：header 里写死 "mock · sqlite+aiosqlite" 等于把"这是演示环境"
+    // 顶在最显眼的位置 —— 技术上诚实，但观感上像在说"这是个玩具"。
+    // 信息没丢（悬停可见），只是不再占第一眼的注意力。
+    $("#badge-mode").innerHTML='<span class="dot'+(h.agent_available?"":" warn")+'" id="dot-health"></span>'+esc(h.app_mode);
+    $("#badge-mode").title="运行模式："+esc(h.app_mode)+" · 数据库："+esc(h.database);
     $("#badge-backend").textContent=h.retrieval_backend+(h.retrieval_degraded_reason?"（降级）":"");
     $("#badge-now").textContent=(h.now||"").slice(11,16);
     $("#badge-agent").innerHTML = h.agent_available

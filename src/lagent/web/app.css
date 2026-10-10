@@ -124,7 +124,11 @@ body{
   font-family:var(--font-sans); font-size:var(--t-md); line-height:1.65;
   -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale;
   text-rendering:optimizeLegibility; font-kerning:normal;
+  /* 100dvh 而不是 100vh：iOS Safari 的 vh 按"地址栏收起时"的高度算，
+     页面一加载就会跳一下。dvh 跟着实际可视高度走。
+     先写 vh 兜底，不认 dvh 的老浏览器退回旧行为而不是拿不到高度。 */
   min-height:100vh;
+  min-height:100dvh;
   transition:background .3s var(--ease), color .3s var(--ease);
 }
 /* 极淡的暖色光斑。作用是在大片留白处提供"这里有东西"的深度感，
@@ -210,7 +214,7 @@ header.top{
    4) 布局
    ========================================================================== */
 .wrap{max-width:1440px;margin:0 auto;padding:0 32px 96px}
-.cols{display:grid;grid-template-columns:minmax(0,1.04fr) minmax(0,1fr);gap:20px;align-items:start}
+.cols{display:grid;grid-template-columns:minmax(0,1.04fr) minmax(0,1fr);gap:20px;align-items:stretch}
 /* 网格/弹性子项默认 min-width:auto —— 它会撑破轨道。
    写死 0 才让"轨道收缩"真正生效（窄屏溢出的根因，见 1020px 断点处的注释）。 */
 .cols>*{min-width:0}
@@ -270,7 +274,11 @@ header.top{
   padding:0 20px; height:54px; display:flex; align-items:center; gap:12px;
 }
 .card-b{position:relative;z-index:2;padding:20px}
-.card-chat{display:flex;flex-direction:column}
+/* 对话卡：整张卡是一个纵向 flex，卡体可以长高，让消息区去吃掉多余的高度。
+   两列等高（.cols align-items:stretch）之后，右侧数据卡的内容长度决定行高；
+   左卡若不让消息区吸收差额，就会在下方留出一段空白 —— 实测差 176px。 */
+.card-chat{display:flex;flex-direction:column;min-height:0}
+.card-chat>.card-b{display:flex;flex-direction:column;flex:1;min-height:0}
 
 /* ==========================================================================
    7) 标签页 —— 下划线式。胶囊会往页面上再加一排实心块，而"在哪个面板"
@@ -361,9 +369,24 @@ label.f{display:block;margin:0 0 6px;font-size:var(--t-micro)}
   font-size:var(--t-sm);color:var(--ink-2);background:var(--recess);
   border-radius:var(--r-sm);padding:10px 14px;margin-bottom:16px;line-height:1.6;
 }
+/* 输入区：把"你来说"标签和提示合并到一条线上。
+   原来 label(.f) + textarea + .hint + 按钮行 + 快捷 pill 五行纵向堆叠，
+   占了整张卡 47% 的高度。现在标签缩小并右对齐到同一行，提示移到
+   按钮行右侧 —— 同样的信息，少掉两行的高度。 */
+.composer{margin-top:18px;padding-top:16px;border-top:1px solid var(--line-soft)}
+.composer-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:6px}
+.composer-head .f{margin:0}
+.composer-head .hint{margin:0;text-align:right;flex:1;min-width:0}
+.composer-act{display:flex;gap:8px;align-items:center;margin-top:10px}
 .msgs{
   display:flex;flex-direction:column;gap:16px;
-  max-height:min(44vh,420px);overflow-y:auto;padding:2px 8px 2px 2px;
+  /* 让消息区**吃掉卡内剩余高度**：flex:1 才有资格长高，
+     只给 max-height 的话它会一直缩到内容大小（实测只剩 121px，
+     而同一张卡里输入区占了 253px —— 对话才是这个产品的主体，
+     不该是整张卡里最矮的那块）。min-height 保住一个可用的下限，
+     max-height 只作为上限兜底，防止极端长会话把卡片撑得过高。 */
+  flex:1 1 auto;min-height:180px;max-height:min(60vh,560px);
+  overflow-y:auto;padding:2px 8px 2px 2px;
   scrollbar-width:thin;
 }
 .msgs::-webkit-scrollbar{width:6px}
@@ -388,8 +411,6 @@ label.f{display:block;margin:0 0 6px;font-size:var(--t-micro)}
 .msg.err .bub{background:var(--bad-bg);color:var(--bad-ink)}
 @keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 
-.composer{margin-top:18px;padding-top:18px;border-top:1px solid var(--line-soft)}
-.composer-act{display:flex;gap:8px;margin-top:12px}
 .pill-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px}
 .pill-row .btn.sm{font-size:var(--t-xs)}
 
@@ -521,7 +542,13 @@ td .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
 }
 .gate-card{
   position:relative;
-  width:100%;max-width:928px;display:grid;grid-template-columns:1fr 400px;
+  /* 原来 1fr + 400px（实测 526 : 400 ≈ 57:43）。左边扛着主句、三条论据、
+     技术栈三块内容，右边只有一个标题 + 两个输入框 + 一个按钮 ——
+     重的那侧反而更窄。改成 1.32fr : 1fr，实测约 55:45 里再让左栏多拿一点，
+     左栏宽度从 526 提到约 560，主句那行中文才能自然地断成两行。
+     max-width 同步放宽：928px 下左栏那行主句每行只放得下 16 个字，
+     挤成 4 行；到 1000px 才断得舒服。 */
+  width:100%;max-width:1000px;display:grid;grid-template-columns:1.32fr 1fr;
   background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);
   box-shadow:var(--shadow-3);overflow:hidden;
   animation:rise .34s var(--ease-out) both;
@@ -534,9 +561,10 @@ td .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
    它不装饰，它**说服** —— 决定要不要登录是在这一步做的。 */
 .gate-aside{
   position:relative;z-index:4;
-  padding:42px 40px;background:var(--canvas-2);
-  display:flex;flex-direction:column;gap:26px;
+  padding:44px 40px;background:var(--canvas-2);
+  display:flex;flex-direction:column;gap:24px;
 }
+
 .brand-lg{display:flex;align-items:center;gap:12px}
 .brand-lg .mark{width:36px;height:36px;border-radius:8px;font-size:var(--t-sm)}
 .brand-lg-txt{display:flex;flex-direction:column;line-height:1.25}
@@ -556,7 +584,10 @@ td .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
   border-bottom:1px solid color-mix(in srgb,var(--ink) 30%,transparent);
   padding-bottom:1px;
 }
-.gate-points{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:15px}
+/* 三条论据之间留够气口，并让整块在品牌区与脚注之间**自然摊开**：
+   原来 gap 15px 会让三行挤在一起、底部空出 70px 的死区。
+   改 18px 并给容器一点上边距，三块内容在纵向上的分布就均匀了。 */
+.gate-points{list-style:none;margin:4px 0 0;padding:0;display:flex;flex-direction:column;gap:18px}
 .gate-points li{display:flex;gap:13px;align-items:flex-start;font-size:var(--t-sm);line-height:1.65;color:var(--ink-2)}
 .gate-points .k{
   font-family:var(--font-mono);font-size:var(--t-micro);color:var(--ink-3);flex:none;
@@ -565,7 +596,11 @@ td .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
 .gate-points b{color:var(--ink);font-weight:500;display:block;margin-bottom:1px;font-size:var(--t-sm)}
 .gate-foot{margin-top:auto;font-family:var(--font-mono);font-size:var(--t-micro);color:var(--ink-3);letter-spacing:.02em}
 
-.gate .box{position:relative;z-index:4;padding:40px 36px;display:flex;flex-direction:column;justify-content:center}
+/* 右侧表单：内容**顶对齐**，不是垂直居中。
+   居中的后果是上下各留一大块等量空白，表单悬在盒子中间，
+   和左边品牌区没有任何对齐关系。改成上对齐 + 与左栏同样的顶部留白，
+   两栏的第一行就落在同一条水平线上 —— 这是"贴合"最直接的来源。 */
+.gate .box{position:relative;z-index:4;padding:44px 40px;display:flex;flex-direction:column;justify-content:flex-start}
 .box-h{margin-bottom:24px}
 .box-h h2{margin:0;font-size:var(--t-lg);font-weight:500;letter-spacing:-.022em}
 .gate .sub{color:var(--ink-2);font-size:var(--t-sm);margin:6px 0 0;line-height:1.62}
@@ -580,9 +615,35 @@ td .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
 .gate-toggle{text-align:center;font-size:var(--t-sm);margin:16px 0 0}
 .gate-toggle a{color:var(--ink-2);text-decoration:none;border-bottom:1px solid var(--line);padding-bottom:1px;transition:color .16s var(--ease), border-color .16s var(--ease)}
 .gate-toggle a:hover{color:var(--ink);border-color:var(--ink)}
-.gate .demo{margin-top:24px;padding-top:20px;border-top:1px solid var(--line)}
+/* 演示账号区压到底：与左栏 .gate-foot（技术栈脚注）落在同一条底线上，
+   两栏因此上下都有对齐关系，而不是各自为政的两个盒子。
+   margin-top 用 auto + 28px 下界：auto 负责"能推多低推多低"，
+   但在**注册模式下**右栏内容变高、剩余空间归零，此时 auto 塌成 0，
+   演示账号就会紧贴"注册并登录"按钮（实测截图里显得挤）。
+   加一个最小间距，两种模式下都有呼吸。 */
+.gate .demo{margin-top:auto;padding-top:20px;border-top:1px solid var(--line)}
+.gate .box>.gate-toggle{margin-top:28px}
 .gate .demo .t{font-size:var(--t-micro);color:var(--ink-3);letter-spacing:.085em;text-transform:uppercase;margin-bottom:10px;font-weight:500}
 .gate .demo .pill-row{margin-top:0}
+
+/* 演示账号的"边界预览"：点一下当场说明这个身份能约到什么、会被什么拦下。
+   用 dl 而不是表格：这里只有四行键值，表格会给它加上一堆不必要的语义。 */
+.gate .demo-preview{margin-top:12px;min-height:96px}
+.gate .demo-preview .hint{margin-top:0}
+.pv{margin:0;display:grid;grid-template-columns:auto 1fr;gap:5px 12px;font-size:var(--t-sm)}
+.pv>div{display:contents}
+.pv dt{color:var(--ink-3);font-size:var(--t-micro);letter-spacing:.04em;padding-top:2px}
+.pv dd{margin:0;color:var(--ink-2);line-height:1.5}
+.pv dd b{color:var(--ink);font-weight:500}
+.pv dd.ok{color:var(--ok-ink)}
+.pv dd.no{color:var(--bad-ink)}
+/* 切换账号时预览整体淡入一次 —— 不动的话看不出内容变了 */
+@keyframes pvin{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.pv-in{animation:pvin .26s var(--ease-out) both}
+/* 被选中的演示账号：墨色描边 + 实底，和 hover 区分开 */
+.gate .demo .pill-row .btn.sm[aria-pressed="true"]{
+  background:var(--action);color:var(--action-ink);border-color:var(--action);
+}
 .gate .demo .btn.sm{font-family:var(--font-mono);font-size:var(--t-xs)}
 
 .who-role{font-size:var(--t-micro);padding:1px 7px;border-radius:var(--r-pill);background:var(--surface-3);color:var(--ink-3)}
@@ -620,6 +681,27 @@ td .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
 .gate .box>*:nth-child(1){animation-delay:.10s}
 .gate .box>*:nth-child(2){animation-delay:.15s}
 .gate .box>*:nth-child(3){animation-delay:.20s}
+
+/* ==========================================================================
+   15.6) 指针跟随的柔光 —— 全站唯一的"触感"动效
+   ========================================================================== */
+/* 卡片上有一层跟着指针走的极淡光斑。作用不是装饰，是**反馈**：
+   鼠标移到哪，哪就有响应，页面从"一张图"变成"一个可以摸的东西"。
+   几个刻意的限制：
+   - 只有 hover 得到的设备才有（hover:hover），触屏上不挂 ——
+     触屏没有"指针位置"这个概念，硬挂只会在滚动时闪。
+   - 透明度压到 0.05：能感觉到，但不会盖过内容，也不会让浅色主题发灰。
+   - 用 CSS 变量传坐标，JS 只负责写两个数，不碰布局属性（不触发重排）。 */
+@media(hover:hover){
+  .card{overflow:hidden}
+  .card::after{
+    content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;z-index:3;
+    background:radial-gradient(420px circle at var(--mx,50%) var(--my,0%),
+      color-mix(in srgb,var(--ink) 5.5%,transparent), transparent 62%);
+    opacity:0;transition:opacity .32s var(--ease);
+  }
+  .card:hover::after{opacity:1}
+}
 
 /* ==========================================================================
    16) 响应式
@@ -682,3 +764,15 @@ td .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
 @media(prefers-reduced-motion:reduce){
   *{animation:none!important;transition:none!important}
 }
+
+/* 跳转链接：平时移出视口，Tab 聚焦时滑回来。
+   用 transform 而不是 display —— 被 display 隐藏的元素不可聚焦。 */
+.skip{
+  position:fixed;top:10px;left:10px;z-index:200;
+  transform:translateY(-200%);
+  background:var(--action);color:var(--action-ink);
+  padding:9px 15px;border-radius:var(--r-sm);font-size:var(--t-sm);
+  text-decoration:none;box-shadow:var(--shadow-2);
+  transition:transform .18s var(--ease-out);
+}
+.skip:focus,.skip:focus-visible{transform:none}

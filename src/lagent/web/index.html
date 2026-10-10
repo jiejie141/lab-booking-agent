@@ -4,9 +4,20 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>lab-booking-agent · 智能实验室预约控制台</title>
+<meta name="description" content="约束协商式实验室预约：约不上时不只说「不可预约」，而是给出每条备选放宽了什么约束。含资质准入与全链路审计。">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#faf9f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#121110" media="(prefers-color-scheme: dark)">
+<!-- 图标内联成 data URI：这个项目要能离线单机跑，
+     一个对外请求的 favicon 会在断网时变成控制台里的一条 404。 -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111'/%3E%3Ctext x='16' y='22' font-family='Georgia,serif' font-size='15' fill='%23fff' text-anchor='middle'%3ELB%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
+
+<!-- 跳转到主内容：键盘用户第一次按 Tab 就能跳过顶部导航和一整排标签页。
+     默认视觉隐藏（不是 display:none —— 那样它拿不到焦点），聚焦时才显形。 -->
+<a class="skip" href="#msgs">跳到主内容</a>
 
 <!-- ==========================================================================
      登录闸门（P0-2：所有业务数据都要令牌）
@@ -81,12 +92,24 @@
 
       <div class="demo">
         <div class="t">演示账号 · 点击填充</div>
-        <div class="pill-row">
-          <button class="btn ghost sm" data-demo="张伟|zhangwei@123">张伟 · 仅光谱</button>
-          <button class="btn ghost sm" data-demo="李娜|lina@123">李娜 · 资质齐全</button>
-          <button class="btn ghost sm" data-demo="管理员|admin@123">管理员 · 可看全量</button>
+        <!-- 三个账号做成可预览的卡片：点一下不仅填好用户名密码，
+             右侧还会**当场演示这个身份能约到什么**。
+             原来只有三个静态按钮 + 一句说明，看不出差异；
+             差异恰恰是这个项目最想让人看到的东西。 -->
+        <div class="pill-row" id="demo-row">
+          <button class="btn ghost sm" data-demo="张伟|zhangwei@123"
+                  data-certs="光谱" data-can="光谱类设备" data-cant="离心机、色谱仪、细胞培养">
+            张伟 · 仅光谱</button>
+          <button class="btn ghost sm" data-demo="李娜|lina@123"
+                  data-certs="光谱 / 色谱 / 细胞培养 / 离心" data-can="全部设备" data-cant="无">
+            李娜 · 资质齐全</button>
+          <button class="btn ghost sm" data-demo="管理员|admin@123"
+                  data-certs="（管理员看全量）" data-can="全部设备 + 审批与用户管理" data-cant="无">
+            管理员 · 可看全量</button>
         </div>
-        <div class="hint">资质不同，能约到的设备也不同 —— 用张伟约离心机会被拦下。</div>
+        <div class="demo-preview" id="demo-preview" aria-live="polite">
+          <div class="hint">选一个账号 —— 这里会说明它<strong>能约到什么、会被哪条规则拦下</strong>。</div>
+        </div>
       </div>
     </div>
 
@@ -105,7 +128,7 @@
       <span class="badge" id="badge-user" hidden>
         <span class="dot"></span><b id="who-name">–</b><span class="who-role" id="who-role"></span>
       </span>
-      <span class="badge" id="badge-mode"><span class="dot" id="dot-health"></span>连接中…</span>
+      <span class="badge" id="badge-mode" title="运行模式与数据库（悬停可看完整串）"><span class="dot" id="dot-health"></span>连接中…</span>
       <span class="badge">检索 <b id="badge-backend">–</b></span>
       <span class="badge">时段 <b id="badge-now">–</b></span>
     </div>
@@ -127,11 +150,11 @@
       <div class="stat-top"><span class="k">设备</span><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6"/><path d="M10 3v6.5L5.2 18A2 2 0 0 0 7 21h10a2 2 0 0 0 1.8-3L14 9.5V3"/><path d="M7.5 15h9"/></svg></span></div>
       <div class="n" id="st-equip">–</div>
     </div>
-    <div class="stat v3">
+    <div class="stat v3" title="状态为 pending / confirmed / in_use 的预约。预约总数里其余的是已取消与已过期 —— 它们仍然占用冲突判断吗？不占，这是刻意的设计（见 availability.py 的 ACTIVE_STATUSES）">
       <div class="stat-top"><span class="k">有效预约</span><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/><path d="m9 15.5 2 2 4-4"/></svg></span></div>
       <div class="n" id="st-active">–</div>
     </div>
-    <div class="stat v4">
+    <div class="stat v4" title="库中全部预约记录（含已取消与已过期）。它比有效预约大是正常的 —— 历史记录不删，是为了让审计与违约统计有据可查。截至 2026-10-10：已确认 1 · 已取消 4 · 已过期 6">
       <div class="stat-top"><span class="k">预约总数</span><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/><circle cx="7" cy="6" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="9" cy="18" r="1.6" fill="currentColor" stroke="none"/></svg></span></div>
       <div class="n" id="st-res">–</div>
     </div>
@@ -157,14 +180,16 @@
             <div class="bub">我是实验室预约助手。
 
 直接说需求即可，例如「明天下午两点想用荧光光谱仪两小时」。
-遇到时段冲突我会给出**带取舍说明**的备选方案，而不是只说「约不上」。</div>
+遇到时段冲突我会给出<strong>带取舍说明</strong>的备选方案，而不是只说「约不上」。</div>
           </div>
         </div>
 
         <div class="composer">
-          <label class="f" for="inp-msg">你来说</label>
+          <div class="composer-head">
+            <label class="f" for="inp-msg">你来说</label>
+            <div class="hint" id="hint-inline"></div>
+          </div>
           <textarea id="inp-msg" placeholder="例如：明天下午两点想用荧光光谱仪两小时"></textarea>
-          <div class="hint" id="hint-inline"></div>
           <div class="composer-act">
             <button class="btn" id="btn-send">发送</button>
             <!-- 停止生成（2026-09-29 加）：只在请求进行中显示。
