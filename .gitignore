@@ -7,6 +7,12 @@ venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+# 覆盖率产物：由 CI 与本地 --cov 生成，属于运行态
+# （不入库，否则每次跑完都会多一个未跟踪文件，也容易误提交）
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
 
 # ---- 本地配置（可能含密钥）----
 # 以前这一项漏了：一旦有人把真实密钥写进 .env，`git add -A` 就会把它带进仓库。
