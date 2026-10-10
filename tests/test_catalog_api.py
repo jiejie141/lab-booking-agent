@@ -564,6 +564,33 @@ class TestUserMaintenance:
             )
         ).status_code == 401
 
+    async def test_logout_revokes_the_token_but_does_not_lock_the_account(
+        self, http, as_user
+    ):
+        """登出要作废令牌，但**不能**把账号也锁死 —— 否则用户登出后就回不来了。
+
+        这是 token_version 方案最容易写错的地方：自增世代让旧令牌失效，
+        但它同时也把「重新登录」这条路上的哈希比对排除在外 —— 只要登录时
+        按**新**世代签发就没事。这条用例就是钉住这个区别。
+        """
+        headers = await as_user("张伟")
+        token = headers["Authorization"].split(" ", 1)[1]
+
+        # 登出前可用
+        assert (await http.get("/api/auth/me", headers=headers)).status_code == 200
+
+        resp = await http.post("/api/auth/logout", headers=headers, json={})
+        assert resp.status_code == 200, resp.text
+
+        # 登出后同一个令牌立刻失效
+        assert (await http.get("/api/auth/me", headers=headers)).status_code == 401
+        assert (await http.get("/api/reservations", headers=headers)).status_code == 401
+
+        # ★ 但账号本身没被锁：重新登录必须能拿到**新的**可用令牌
+        again = await as_user("张伟")
+        assert (await http.get("/api/auth/me", headers=again)).status_code == 200
+        assert again["Authorization"] != headers["Authorization"]
+
     async def test_role_change_revokes_already_issued_tokens(self, http, as_user):
         """降权也必须立刻生效，而不是等旧令牌过期。
 

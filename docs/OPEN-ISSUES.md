@@ -8,10 +8,19 @@
 > * [`DELIVERY-READINESS.md`](DELIVERY-READINESS.md) —— 交付就绪度评估的整改项（P 编号）
 > * [`PROJECT-OVERVIEW.md`](PROJECT-OVERVIEW.md) —— 能力完成度矩阵里标 ⚠️/❌ 的行
 >
-> **当前状态：18 条里 14 条已闭合**（每条都带测试，整套 `pytest` 全绿），
+> **当前状态：19 条里 15 条已闭合**（每条都带测试，整套 `pytest` 全绿），
 > 剩下 4 条：**1 条有触发条件**（#5 —— 同机多进程已解决，只剩跨机多副本）、
 > **1 条缺外部资源**（#16）、**2 条是明确不做的取舍**（#17 / #18）。
 > 它们列在下面第一节，理由与触发条件都写清楚了 —— 留着不是因为忘了。
+>
+> **本轮新增闭合（#19）**：**令牌不可撤销** —— 停用/降权后已签发的令牌仍可用。
+> 这是实测复现出来的（不是读代码推断），修复 = 迁移 0007 的 `users.token_version`
+> 世代号 + `current_user` 回查；两条回归测试锁住。详见下面的「已闭合」区。
+>
+> **另修一处会误导审计的测试缺陷**：`tests/test_retrieval.py` 里
+> `test_hybrid_degrades_without_vector_backend` 原先写成
+> `if not isinstance(index, HybridRetriever): ...` —— 整个函数体被条件包住，
+> **装了 chromadb 时静默通过**，等于向量启用路径零覆盖。已拆成两条互斥且必执行的断言。
 >
 > **本轮新增（P2，已在代码与测试里）**：进程外状态（`localstate.py` + 两个 SQLite 存储）
 > 与自助注册（`POST /api/auth/register`）。两条都在下面的「已闭合」区有登记。
@@ -57,7 +66,7 @@
 |---|---|
 | **模块** | `security.py` |
 | **表现** | 令牌 2 小时到期需重登。 |
-| **为什么不做** | 把风险窗口压小，比签一个长令牌假装安全更诚实。要做得连吊销列表一起做，那是另一块工程量（见 README 的「已知限制」）。 |
+| **为什么不做** | 把风险窗口压小，比签一个长令牌假装安全更诚实。要做得连吊销列表一起做，那是另一块工程量 —— **而吊销本身现在做了，见 #19**：有 `token_version` 之后，2 小时的窗口可以被显式撤销缩短，未必需要再引入 refresh token。 |
 
 ---
 
@@ -95,6 +104,18 @@
 | 8 | 密钥投递仍是环境变量 | 新增 `LAB_JWT_SECRET_FILE` / `LAB_SMTP_PASSWORD_FILE`（Docker secret / K8s Secret 的通用约定），**文件优先**；读不出来或读到空 → **拒绝启动** | `tests/test_secret_delivery.py`（6 条） |
 | 9 | 违约判定准确度没有数据支撑 | 接口加 `total`（判过几次）与 `pardoned`（其中豁免几次），与 `count`（实际计入）分开 | `tests/test_violations.py::TestViolationBreakdown` |
 | 10 | 清扫跑在服务进程内 | CLI 新增 `sweep --loop [--interval N] [--ticks N]`；compose 里给出（默认注释掉的）独立 worker 段。单副本**不必**启用 | `tests/test_sweep.py::TestSweepLoop`（5 条） |
+### P0（本轮新增：令牌可撤销）
+
+| # | 是什么 | 怎么修的 | 在哪能验 |
+|---|---|---|---|
+| 19 | **停用 / 降权后，已签发的令牌仍然有效**（实测复现：停用后拿旧令牌 `/auth/me`、`/reservations`、`/agent/chat` 全部 200；降权后旧令牌里的 `role` 仍是 admin） | 加 `users.token_version`（迁移 `0007_token_version.py`）作为**令牌世代**而非黑名单 —— 不需要为每张令牌存 jti、也不需要过期清理任务。签发时写进载荷 `ver`；`current_user` 回查世代与角色，**不等即 401**，且**以库里的角色为准**；停用 / 改角色 / 改口令都自增世代 | `tests/test_catalog_api.py::TestUserMaintenance::test_deactivation_revokes_already_issued_tokens`（含「停用前令牌必须可用」的可证伪前置）与 `test_role_change_revokes_already_issued_tokens` |
+
+> **这条为什么值得单列**：原有的 `test_deactivated_account_cannot_log_in` **一直是绿的** ——
+> 它断言的是「新登录 401」，而那件事确实是对的。测试没说谎，它只是**问错了问题**：
+> 验证的是「密码还能用吗」，而不是「这个人现在还能操作系统吗」。
+> 这也是为什么补的那条回归测试**必须先断言停用前旧令牌可用** ——
+> 否则它同样无法证伪，会跟着缺陷一起通过。
+
 ### P2（本轮新增：进程外状态与自助注册）
 
 | # | 是什么 | 怎么修的 | 在哪能验 |

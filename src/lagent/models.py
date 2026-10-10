@@ -458,6 +458,10 @@ ACTION_LOGIN_FAILED = "auth.login_failed"
 # 自助注册（P2-2）。与 login 分开命名：审计里「造了一个号」和「登了一次」
 # 是两类事件 —— 批量造号的模式只有单独命名才统计得出来。
 ACTION_REGISTER = "auth.register"
+# 登出（P0-5）。与 login 成对，但不是同义反复：login 记「谁进来了」，
+# logout 记「谁主动作废了自己的凭证」。异常登出（改口令/被停用）走 admin.write，
+# 用户主动登出走这里 —— 两者的取证含义不同。
+ACTION_LOGOUT = "auth.logout"
 ACTION_BOOK = "reservation.create"
 ACTION_CANCEL = "reservation.cancel"
 # P1-5：管理员通过/驳回一条申请

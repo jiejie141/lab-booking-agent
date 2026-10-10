@@ -1920,6 +1920,32 @@
         "summary": "Login"
       }
     },
+    "/api/auth/logout": {
+      "post": {
+        "description": "登出：作废**该用户当前所有**令牌。\n\n有了 ``token_version`` 之后这条几乎是白送的 —— 自增世代即让所有在途令牌\n立刻失效，不需要维护黑名单。语义上比「只作废这一张」更强：退出登录意味着\n「这台设备上不该再残留任何有效凭证」，把同账号其他会话一并清掉是更安全的默认。\n\n代价：用户会在其他设备上被登出。单用户场景下这是期望行为；\n真要「只登出这一台」，就得引入 jti 黑名单 + 过期清理，那是另一块工程量。",
+        "operationId": "logout_api_auth_logout_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Logout Api Auth Logout Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Logout"
+      }
+    },
     "/api/auth/me": {
       "get": {
         "description": "回显当前令牌对应的身份，供控制台启动时校验 token 是否还有效。",

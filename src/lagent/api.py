@@ -888,6 +888,38 @@ async def login(body: LoginRequest, request: Request) -> TokenResponse:
     )
 
 
+@router.post("/api/auth/logout")
+async def logout(
+    request: Request,
+    principal: Principal = Depends(current_user),
+) -> dict:
+    """登出：作废**该用户当前所有**令牌。
+
+    有了 ``token_version`` 之后这条几乎是白送的 —— 自增世代即让所有在途令牌
+    立刻失效，不需要维护黑名单。语义上比「只作废这一张」更强：退出登录意味着
+    「这台设备上不该再残留任何有效凭证」，把同账号其他会话一并清掉是更安全的默认。
+
+    代价：用户会在其他设备上被登出。单用户场景下这是期望行为；
+    真要「只登出这一台」，就得引入 jti 黑名单 + 过期清理，那是另一块工程量。
+    """
+    async with session_scope() as session:
+        user = await session.get(User, principal.user_id)
+        if user is None:
+            raise HTTPException(status_code=401, detail="访问令牌无效或已过期")
+        user.token_version = (user.token_version or 0) + 1
+
+    await audit.record(
+        action=audit.ACTION_LOGOUT,
+        actor_id=principal.user_id,
+        actor_name=principal.username,
+        target_type="user",
+        target_id=principal.user_id,
+        detail="logout: 作废该用户全部在途令牌",
+        client_host=_client_host(request),
+    )
+    return {"ok": True, "detail": "已登出，该用户所有令牌已作废"}
+
+
 def _me_out(row: User) -> MeOut:
     """本人视图：在 ``UserOut`` 之外补上 ``rank`` 与 ``capabilities``。
 
