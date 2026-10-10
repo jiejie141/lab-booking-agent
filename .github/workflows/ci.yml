@@ -234,7 +234,11 @@ jobs:
   vector:
     name: 向量检索路径（装 chromadb）
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # 25 分钟不够：chromadb 首次使用要下载 all-MiniLM-L6-v2 的 ONNX 模型
+    # （约 79MB）。本机实测下载速率只有 ~34KB/s，光下模型就要 40 分钟。
+    # CI runner 的带宽通常好得多，但仍需留出余量 —— 超时的表现是 job 被杀，
+    # 而那和「测试失败」看起来不一样，容易被误读成基础设施抖动。
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -262,6 +266,20 @@ jobs:
       # 跑全部检索测试。装了 chromadb 之后 test_retrieval.py 里那句
       # `if vector_ok:` 会走 True 分支，断言 HybridRetriever 真的被建出来 ——
       # 这条分支在本地默认环境里永远不会执行。
+      # 预热：先把模型下下来。
+      #
+      # 不单独预热的话，第一步下载会和 pytest 的超时/输出混在一起，
+      # 而且 79MB 的进度条会刷满日志、把真正的失败信息冲走。
+      # 单独一步的好处是：如果这一步挂了，一眼就知道是“模型没下下来”，
+      # 不是“代码有问题”。
+      - name: 预热 ONNX 嵌入模型（首次约 79MB）
+        run: |
+          python -c "
+          import sys; sys.path.insert(0, 'src')
+          from lagent.knowledge.retriever import ChromaVectorIndex, load_corpus
+          print('available:', ChromaVectorIndex(load_corpus()).available())
+          "
+
       - name: 检索测试（此时向量分支会被真正执行）
         run: python -m pytest tests/test_retrieval.py -q -rs
 
