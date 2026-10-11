@@ -733,6 +733,26 @@ td .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
 }
 #pane-gate .filters .f{display:flex; align-items:center; gap:6px; white-space:nowrap}
 
+/* 手工签发区：与核验区用一条细线分开，但**不做成卡片** ——
+   它是一次动作的表单，不是一份内容。做成卡片会与右侧数据卡抢层级。 */
+.gate-issue{
+  margin-top:14px; padding-top:14px;
+  border-top:1px solid var(--line-soft);
+}
+.gate-issue-h{display:flex; align-items:baseline; gap:8px; margin-bottom:8px}
+.gate-issue-h .k{font-size:var(--t-sm); font-weight:600; color:var(--ink)}
+/* 明文凭证：必须一眼看出"这是一串要复制走的东西"。
+   用等宽 + 可换行，避免长串把布局撑破；背景压暗而不是加边框，
+   免得又被读成"一张卡片"。 */
+.gate-cred-box{
+  margin-top:8px; padding:10px 12px;
+  background:var(--canvas-2); border-radius:var(--r-sm);
+  overflow-x:auto;
+}
+.gate-cred-box code{
+  font-family:var(--font-mono); font-size:var(--t-xs);
+  color:var(--ink); word-break:break-all; white-space:pre-wrap;
+}
 /* ==========================================================================
    16) 响应式
    ========================================================================== */

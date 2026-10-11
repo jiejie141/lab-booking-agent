@@ -369,6 +369,31 @@
             <button class="btn ghost sm" id="gate-inside">在馆名单</button>
             <button class="btn ghost sm" id="gate-export" title="导出预约 CSV（权限口径与列表接口一致）">导出 CSV</button>
           </div>
+
+          <!-- 手工签发凭证（2026-10-11 补）
+               只有 verify 没有 issue 时，这个面板**永远只能演示"拒绝"** ——
+               种子数据里没人约了当天时段，于是"放行"这条路径看不见。
+               签发是 admin-only 且**必须写理由**（会进审计）：
+               "谁能绕过预约流程"是这类系统最该被追问的一件事，
+               所以理由框不是形式，是这个动作的一部分。 -->
+          <div class="gate-issue">
+            <div class="gate-issue-h">
+              <span class="k">手工签发凭证</span>
+              <span class="hint">管理员专用 · 必须写理由 · 每次进审计</span>
+            </div>
+            <div class="filters">
+              <select id="gi-user" aria-label="签发给谁"></select>
+              <input id="gi-date" type="date" aria-label="日期">
+              <input id="gi-from" type="time" step="1800" value="09:00" aria-label="生效时间">
+              <input id="gi-to" type="time" step="1800" value="18:00" aria-label="失效时间">
+            </div>
+            <div class="filters">
+              <input id="gi-reason" placeholder="理由（必填，会写进审计）" style="flex:1">
+              <button class="btn ghost" id="gi-issue">签发</button>
+            </div>
+            <div id="gi-result"></div>
+          </div>
+
           <div id="gate-result"></div>
           <div id="gate-inside-box"></div>
         </div>

@@ -189,7 +189,8 @@ class TestConsoleAuthWiring:
         #    对话/下单里出现 user_id 是错的（"我是谁"只能由令牌决定）；
         #    而门禁核验的 user_id 是"**被核验的那个人**是谁"，
         #    它恰恰是这个接口的输入（刷卡/人脸给出的身份），
-        #    不是调用者自称的身份。两者同名而语义相反，
+        #    不是调用者自称的身份。签发凭证的 user_id 同理 —— 那是
+        #    "**给谁**发凭证"，不是"我是谁"。两者同名而语义相反，
         #    所以按前缀放行，而不是把整条规则放宽。
         for line in hits:
             assert (
@@ -197,6 +198,7 @@ class TestConsoleAuthWiring:
                 or line.startswith("//")
                 or line.startswith("<!--")
                 or "lab_id:labId, user_id:userId" in line
+                or "user_id:userId, lab_id:labId" in line
             ), \
                 f"出现未预期的 user_id 用法：{line}"
 

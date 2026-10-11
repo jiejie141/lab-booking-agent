@@ -586,6 +586,22 @@ async function loadGateOptions(){
       +(state.users||[]).map(u=>
         '<option value="'+esc(u.id)+'">'+esc(u.username)+'</option>').join("");
   }
+  // 签发给谁：复用同一份用户列表，但**不带"不提供身份"那一项** ——
+  // 签发必须有明确对象，"签发给一个空身份"没有意义。
+  const giUsr=$("#gi-user");
+  if(giUsr && !giUsr.options.length){
+    giUsr.innerHTML='<option value="">（选择用户）</option>'
+      +(state.users||[]).map(u=>
+        '<option value="'+esc(u.id)+'">'+esc(u.username)+'</option>').join("");
+  }
+  // 默认今天：签发几乎总是"今天临时放行"，让人每次重填日期是纯浪费。
+  // 用本地日期而不是 toISOString() —— 后者按 UTC 算，东八区早上 8 点前会退回昨天。
+  const giDate=$("#gi-date");
+  if(giDate && !giDate.value){
+    const d=new Date();
+    giDate.value=d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")
+      +"-"+String(d.getDate()).padStart(2,"0");
+  }
 }
 
 async function gateVerify(){
@@ -605,7 +621,13 @@ async function gateVerify(){
       direction:$("#gate-dir").value,
       gate_id:"console-sim", precheck:!!$("#gate-precheck").checked,
     }});
-    const meta=GATE_REASON[r.reason_code]||{t:r.reason_code||"—",c:"bad"};
+    // ★ 放行时 reason_code 是**空串**（实测：granted=true, reason_code=""）。
+    // 直接查表会得到 undefined，再走 `r.reason_code||"—"` 得到 "—"，
+    // 而 c 默认 "bad" —— 于是一次成功放行被渲染成**红色 tag**。
+    // 明示处理：放行就是放行，不该去查拒绝码表。
+    const meta=r.granted
+      ? {t:"放行",c:"ok"}
+      : (GATE_REASON[r.reason_code]||{t:r.reason_code||"—",c:"bad"});
     box.innerHTML=
       '<div class="gate-verdict '+(r.granted?"yes":"no")+'">'
       + '<span class="tag '+meta.c+'">'+(r.granted?"✓ 放行":"✗ 拒绝")+'</span>'
@@ -620,6 +642,54 @@ async function gateVerify(){
       + '</div>';
   }catch(e){
     box.innerHTML='<div class="empty">核验失败：'+esc(e.message)+'</div>';
+  }
+}
+
+/* 手工签发凭证。
+   
+   为什么连这个一起做：只有 verify 没有 issue，这个面板**永远只能演示拒绝** ——
+   种子数据里没人约当天时段，于是"放行"那条路径根本看不见。
+   
+   ★ 凭证明文**只在签发时返回这一次**，系统只存哈希（见 api.py）。
+   所以 UI 必须把它显著展示并提示"复制走，关掉就再也拿不到" ——
+   默默显示一句"签发成功"等于让人丢掉一张用不了的凭证。
+   
+   签发后顺手把凭证填进上面的核验框：让人当场就能验证"刚发的这张能开门"，
+   把「签发 → 核验 → 放行」这条闭环压成一次点击。 */
+async function gateIssue(){
+  const box=$("#gi-result");
+  const userId=parseInt($("#gi-user").value,10);
+  const labId=parseInt($("#gate-lab").value,10);
+  const date=$("#gi-date").value, from=$("#gi-from").value, to=$("#gi-to").value;
+  const reason=$("#gi-reason").value.trim();
+  if(!userId){ box.innerHTML='<div class="empty">先选签发给谁</div>'; return; }
+  if(!labId){ box.innerHTML='<div class="empty">先在上面的下拉里选实验室</div>'; return; }
+  if(!date||!from||!to){ box.innerHTML='<div class="empty">日期与起止时间都要填</div>'; return; }
+  // 理由必填是**服务端**的约束，这里只是提前给一句人话，
+  // 真正的边界在后端（它会进审计）—— 前端拦是为了省一次往返，不是替它做决定。
+  if(!reason){ box.innerHTML='<div class="empty">必须写理由：谁能绕过预约流程要有据可查</div>'; return; }
+  box.innerHTML='<div class="skel sk-row"></div>';
+  try{
+    const r=await api("/api/access/issue",{method:"POST",body:{
+      user_id:userId, lab_id:labId, date:date, valid_from:from, valid_to:to, reason:reason,
+    }});
+    // 凭证只出现这一次 —— 显著展示 + 直接填进核验框
+    $("#gate-cred").value=r.credential||"";
+    box.innerHTML=
+      '<div class="gate-verdict yes"><span class="tag ok">✓ 已签发</span>'
+      + '<span class="mono">凭证 #'+esc(r.permit_id)+'</span>'
+      + '<span>'+esc(from)+' → '+esc(to)+'</span></div>'
+      + '<div class="gate-cred-box"><code>'+esc(r.credential||"")+'</code></div>'
+      + '<div class="gate-meta">⚠ 明文凭证<b>只返回这一次</b>，系统只留哈希 —— '
+      + '已自动填入上方核验框，可直接点「核验」验证放行。关掉就看不到了。</div>'
+      + (r.required_certs&&r.required_certs.length
+         ? '<div class="gate-meta">该实验室要求资质：'+esc(r.required_certs.join(" / "))+'</div>'
+         : '');
+    toast("已签发凭证 #"+r.permit_id);
+    // 名单会变，顺手刷一次
+    gateInside();
+  }catch(e){
+    box.innerHTML='<div class="empty">签发失败：'+esc(e.message)+'</div>';
   }
 }
 
@@ -1220,6 +1290,7 @@ $("#audit-action") && $("#audit-action").addEventListener("keydown",e=>{ if(e.ke
 $("#gate-verify") && $("#gate-verify").addEventListener("click",gateVerify);
 $("#gate-inside") && $("#gate-inside").addEventListener("click",gateInside);
 $("#gate-export") && $("#gate-export").addEventListener("click",gateExport);
+$("#gi-issue") && $("#gi-issue").addEventListener("click",gateIssue);
 
 /* ---------- 启动 ----------
    健康检查是公开端点，先跑，好让登录页顶部也能显示后端连接状态；
