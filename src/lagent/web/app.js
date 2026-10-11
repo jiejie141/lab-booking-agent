@@ -161,7 +161,36 @@ async function apiFull(path,opts){
   o.headers=Object.assign({"Content-Type":"application/json"},o.headers||{});
   const t=tokenApi.get();
   if(t) o.headers.Authorization="Bearer "+t;
-  const r=await fetch(path,o);
+  // ★ 网络层异常必须在这里兜住。
+  //
+  //   起因（Playwright，page.route 全部 abort("failed") 实测）：
+  //   原来这一行是裸的 await fetch —— 401 有处理、!r.ok 有处理，
+  //   唯独 fetch **自己抛异常**（断网 / DNS 失败 / 连接被重置）
+  //   没有任何人接。异常穿透到调用方，而调用方是
+  //   `box.innerHTML = await api(...)` 这种写法，
+  //   结果就是**面板永远停在骨架屏**：没有错误、没有重试入口，
+  //   用户看到的是"一直在加载"，永远等不到结果，也不知道发生了什么。
+  //
+  //   这是移动端最常见的一类失败（进电梯、切基站、Wi-Fi 掉线），
+  //   却恰好是唯一没有任何提示的一类 —— 因为 4xx/5xx 都有提示。
+  //
+  //   ⚠️ 注意不能直接读 err.message：浏览器给的是
+  //   "Failed to fetch" / "Load failed" 这种面向开发者的英文，
+  //   给用户看等于没说。这里统一换成人话，并把是否"网络不可达"
+  //   标记成 err.network，让调用方可以据此区分「断网」和「服务器报错」。
+  let r;
+  try{
+    r=await fetch(path,o);
+  }catch(e){
+    // navigator.onLine 是唯一能区分「你断网了」还是「服务器连不上」的信号。
+    // 两者对用户的下一步动作完全不同：前者叫他连 Wi-Fi，后者叫他稍等重试。
+    // 注意它只能判断**本地**有没有网络，不代表服务端可达 ——
+    // 所以只用来换措辞，不改变这是"失败"的事实。
+    const offline = typeof navigator!=="undefined" && navigator.onLine===false;
+    const err=new Error(offline ? "当前处于离线状态，连上网后重试" : "无法连接到服务器，请稍后重试");
+    err.network=true; err.status=0; err.cause=e;
+    throw err;
+  }
   let body=null;
   try{body=await r.json();}catch(e){}
   if(r.status===401){
@@ -203,6 +232,49 @@ function errText(body,status){
   if(d&&typeof d==="object") return JSON.stringify(d);
   return "HTTP "+status;
 }
+
+/* 面板加载失败时的统一呈现。
+   只给一行"加载失败：xxx"其实不够 —— 用户读完之后**无事可做**，
+   唯一的出路是刷新整页，而这会丢掉当前所有上下文。
+   所以这里做两件事：
+     1) 网络类失败给一个"重试"按钮（调同一个 loader，不刷新页面）
+     2) 把原始错误留在 title 上：界面给人话，排查要细节，两者不冲突
+   按钮用 data-retry 存 loader 的函数名，是因为它要跨 innerHTML 重建存活 ——
+   直接存函数引用会在每次重渲染时丢失。 */
+function errBox(e){
+  const msg = e && e.message ? e.message : "未知错误";
+  const canRetry = !!(e && (e.network || (e.status && e.status >= 500)));
+  const btn = canRetry
+    ? '<button class="btn ghost sm" data-retry="1" style="margin-top:10px">重试</button>'
+    : "";
+  return '<div class="empty" title="' + esc(String(e && e.raw ? JSON.stringify(e.raw) : msg)) + '">'
+    + "加载失败：" + esc(msg) + btn + "</div>";
+}
+/* 面板 → 加载函数的映射。新增面板时在这里补一行即可。
+   ⚠️ 必须定义在下面那个监听器**之前**：const 没有提升，
+   写在后面的话监听器一触发就是 ReferenceError（TDZ）。
+   ⚠️ 函数名要对着实际定义抄，不能凭印象写 ——
+   我第一版写了 loadUsers()，真实名字是 loadUserDirectory()。
+   箭头函数包一层是必要的：直接写 `loadLabs` 也不会有问题，
+   但包起来能保住 this 语义，也方便以后传参。 */
+const PANE_LOADER = {
+  "pane-labs": () => loadLabs(),
+  "pane-res": () => loadReservations(),
+  "pane-users": () => loadUserDirectory(),
+  "pane-appr": () => loadApprovals(),
+  "pane-viol": () => loadViolations(),
+  "pane-notif": () => loadNotifications(),
+  "pane-audit": () => loadAudit(),
+};
+/* 重试按钮的统一接线：事件委托挂在 document 上，
+   因为 errBox 生成的 DOM 会被反复重建 —— 逐个 addEventListener 必然漏。 */
+document.addEventListener("click", ev => {
+  const btn = ev.target && ev.target.closest && ev.target.closest("[data-retry]");
+  if(!btn) return;
+  const pane = btn.closest("[id^='pane-']");
+  const loader = pane ? PANE_LOADER[pane.id] : null;
+  if(loader){ btn.disabled=true; btn.textContent="重试中…"; loader(); }
+});
 
 async function api(path,opts){ return (await apiFull(path,opts)).body; }
 
@@ -460,7 +532,7 @@ async function loadUserDirectory(){
             <td>${roleTag}</td><td>${certs}</td></tr>`;
         }).join("")
       + '</tbody></table>';
-  }catch(e){box.innerHTML='<div class="empty">加载失败：'+esc(e.message)+"</div>";}
+  }catch(e){box.innerHTML=errBox(e);}
 }
 
 /* ---------- 管理员面板：审批 / 违约 / 通知 / 审计 ----------
@@ -542,7 +614,7 @@ async function loadApprovals(){
     $("#b-approve", box).addEventListener("click", ()=>batchReview(true));
     $("#b-reject", box).addEventListener("click", ()=>batchReview(false));
     stamp();
-  }catch(e){ box.innerHTML='<div class="empty">加载失败：'+esc(e.message)+"</div>"; }
+  }catch(e){ box.innerHTML=errBox(e); }
 }
 
 /* 批量审批（2026-09-29 加）。
@@ -663,7 +735,7 @@ async function loadViolations(){
         toast("已豁免 #"+id,"ok"); loadViolations(); loadHealth();
       }catch(e){ toast("豁免失败："+e.message,"err"); b.disabled=false; }
     }));
-  }catch(e){ box.innerHTML='<div class="empty">加载失败：'+esc(e.message)+"</div>"; }
+  }catch(e){box.innerHTML=errBox(e);}
 }
 
 const NOTIFY_CN={pending:"待投递",sent:"已投递",skipped:"已跳过",failed:"投递失败"};
@@ -688,7 +760,7 @@ async function loadNotifications(){
           <td><span class="tag ${n.status==="failed"?"bad":(n.status==="sent"?"ok":"warn")}">${esc(NOTIFY_CN[n.status]||n.status)}</span></td>
         </tr>`).join("")
       + '</tbody></table>';
-  }catch(e){ box.innerHTML='<div class="empty">加载失败：'+esc(e.message)+"</div>"; }
+  }catch(e){box.innerHTML=errBox(e);}
 }
 
 async function loadAudit(){
@@ -708,7 +780,7 @@ async function loadAudit(){
             <div style="color:var(--ink-3);font-size:11px">${esc(a.detail)}</div></td>
         </tr>`).join("")
       + '</tbody></table>';
-  }catch(e){ box.innerHTML='<div class="empty">加载失败：'+esc(e.message)+"</div>"; }
+  }catch(e){box.innerHTML=errBox(e);}
 }
 
 /* ---------- 门禁核验（2026-10-11 加） ----------
@@ -929,7 +1001,7 @@ async function gateInside(){
       + rows.map(r=>'<tr><td>'+esc(r.username)+'</td><td>'+esc(r.lab_label)+'</td>'
         + '<td class="mono">'+esc(fmtStamp(r.valid_from))+' → '+esc(fmtStamp(r.valid_to))+'</td></tr>').join("")
       + '</tbody></table>';
-  }catch(e){ box.innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>'; }
+  }catch(e){box.innerHTML=errBox(e);}
 }
 
 /* CSV 导出。为什么值得一个按钮：权限口径与列表接口**完全一致**
@@ -1063,7 +1135,7 @@ async function loadLabs(){
         <tbody>${rows}</tbody></table>
       </div>`;
     }).join("");
-  }catch(e){box.innerHTML='<div class="empty">加载失败：'+esc(e.message)+"</div>";}
+  }catch(e){box.innerHTML=errBox(e);}
 }
 
 /* ---------- 预约记录 ---------- */
@@ -1146,7 +1218,7 @@ async function loadReservations(){
         loadReservations(); loadHealth();
       }catch(e){ toast("取消失败："+e.message,"err"); b.disabled=false; b.textContent="取消"; }
     }));
-  }catch(e){box.innerHTML='<div class="empty">加载失败：'+esc(e.message)+"</div>";}
+  }catch(e){box.innerHTML=errBox(e);}
 }
 
 /* ---------- 规范检索 ---------- */
@@ -1419,6 +1491,21 @@ $$("[data-q]").forEach(b=>b.addEventListener("click",()=>{
 }));
 
 $("#btn-send").addEventListener("click",()=>send($("#inp-msg").value));
+// 欢迎区快捷入口：复用现有标签切换逻辑，让首次进入时可以直接开始任务。
+$$('[data-jump]').forEach(btn=>btn.addEventListener('click',()=>{
+  const tab=$(`#tabs .tab[data-tab="${btn.dataset.jump}"]`);
+  if(tab && !tab.hidden) tab.click();
+  const panel=$(".card-data");
+  if(panel) panel.scrollIntoView({behavior:"smooth",block:"start"});
+}));
+// 数字快捷键：熟练用户可以不离开键盘在主要面板间切换。
+document.addEventListener('keydown',e=>{
+  if(e.altKey||e.ctrlKey||e.metaKey||e.target.matches('input,textarea,select,button')) return;
+  const map={'1':'book','2':'labs','3':'res','4':'kb'};
+  const name=map[e.key]; if(!name) return;
+  const tab=$(`#tabs .tab[data-tab="${name}"]`);
+  if(tab && !tab.hidden){ e.preventDefault(); tab.click(); }
+});
 $("#inp-msg").addEventListener("keydown",e=>{
   if(e.key==="Enter"&&(e.ctrlKey||e.metaKey)){e.preventDefault();send($("#inp-msg").value);}
 });

@@ -38,10 +38,15 @@
         </div>
       </div>
 
-      <p class="gate-lede">
-        预约失败时，它不会只回一句「该时段不可预约」，<br>
-        而是告诉你<strong>放宽哪一条约束就能约上</strong>。
-      </p>
+      <p class="gate-kicker">让每一次实验，都有条不紊</p>
+      <p class="gate-lede">专注你的研究。<br><strong>预约，交给我们。</strong></p>
+      <p class="gate-description">从设备选择到时间协调，让智能助手帮你找到合适的实验安排。</p>
+      <div class="booking-preview" aria-label="预约协商示例">
+        <div class="preview-head"><span>预约协商示例</span><span class="preview-status">可选方案</span></div>
+        <div class="preview-device"><span class="preview-icon" aria-hidden="true">◈</span><div><b>荧光光谱仪</b><small>分析实验室 · 光谱分析</small></div></div>
+        <div class="preview-time"><span>14:00 — 16:00 <small>时段冲突</small></span><span aria-hidden="true">↓</span><strong>16:00 — 18:00 <small>备选时段</small></strong></div>
+        <p>同一台设备，换个时间，实验照常进行。</p>
+      </div>
 
       <ul class="gate-points">
         <li><span class="k">01</span><span><b>约束协商</b>冲突时给出带取舍说明的备选方案，每条都标注放宽了什么</span></li>
@@ -54,8 +59,9 @@
 
     <div class="box">
       <div class="box-h">
-        <h2>登录</h2>
-        <p class="sub">登录后进入控制台 · 身份取自令牌，不由前端指定</p>
+        <span class="login-kicker">欢迎回来</span>
+        <h2>进入你的实验工作台</h2>
+        <p class="sub">管理预约、发现设备，让实验安排更轻松。</p>
       </div>
 
       <div class="field">
@@ -140,6 +146,25 @@
 </header>
 
 <main class="wrap">
+
+  <section class="welcome" aria-labelledby="welcome-title">
+    <div class="welcome-copy">
+      <span class="eyebrow"><span class="live-dot"></span> 实验室预约工作台</span>
+      <h1 id="welcome-title">把实验安排好，<em>从一句话开始。</em></h1>
+      <p>告诉助手设备、时间和用途。遇到冲突时，它会解释限制并给出可以执行的备选方案。</p>
+      <div class="welcome-actions" aria-label="快捷操作">
+        <button class="btn" data-jump="book">直接预约 <span aria-hidden="true">→</span></button>
+        <button class="btn ghost" data-jump="labs">浏览设备</button>
+        <button class="btn ghost" data-jump="kb">查看规范</button>
+      </div>
+    </div>
+    <div class="welcome-orbit" aria-hidden="true">
+      <div class="orbit-ring ring-a"></div><div class="orbit-ring ring-b"></div>
+      <div class="orbit-core"><span>LB</span><small>READY</small></div>
+      <span class="orbit-node node-a">预约</span><span class="orbit-node node-b">资质</span>
+      <span class="orbit-node node-c">审计</span>
+    </div>
+  </section>
 
   <section class="stats" id="stats" aria-label="概览">
     <div class="stat">

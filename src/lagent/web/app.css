@@ -724,9 +724,10 @@ td .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
    它不装饰，它**说服** —— 决定要不要登录是在这一步做的。 */
 .gate-aside{
   position:relative;z-index:4;
-  padding:44px 40px;background:var(--canvas-2);
+  padding:42px 44px;background:linear-gradient(145deg,#10283a 0%,#183c50 55%,#0e202f 100%);color:#f5fbff;
   display:flex;flex-direction:column;gap:24px;
 }
+.gate-aside::after{content:"";position:absolute;right:-90px;top:70px;width:290px;height:290px;border:1px solid rgba(158,218,235,.2);border-radius:50%;box-shadow:0 0 0 28px rgba(158,218,235,.035),0 0 0 58px rgba(158,218,235,.025);pointer-events:none}.gate-aside>*{position:relative;z-index:1}.gate-aside .brand-lg-txt b,.gate-aside .gate-points b{color:#f5fbff}.gate-aside .brand-lg-txt small,.gate-aside .gate-points li,.gate-aside .gate-foot{color:rgba(228,243,249,.68)}.gate-aside .mark{background:#f4fbff;color:#10283a}.gate-kicker{margin:9px 0 -17px;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#9ed9e8;font-weight:700}.gate-description{margin:-12px 0 0;color:rgba(228,243,249,.72);font-size:13px;line-height:1.7;max-width:350px}.booking-preview{padding:14px 15px;border:1px solid rgba(181,227,237,.2);border-radius:11px;background:rgba(5,20,29,.24);backdrop-filter:blur(8px);max-width:360px}.preview-head,.preview-device,.preview-time{display:flex;align-items:center;justify-content:space-between;gap:10px}.preview-head{font-size:10px;color:#9ed9e8;letter-spacing:.08em;text-transform:uppercase}.preview-status{padding:3px 7px;border-radius:99px;background:rgba(142,218,176,.14);color:#9be0b5;letter-spacing:0;text-transform:none}.preview-device{justify-content:flex-start;margin:16px 0 13px}.preview-icon{display:grid;place-items:center;width:28px;height:28px;border-radius:8px;background:rgba(158,218,235,.14);color:#a8e5f0}.preview-device b{display:block;font-size:13px}.preview-device small,.preview-time small{display:block;color:rgba(228,243,249,.58);font-size:10px;margin-top:3px}.preview-time{padding:10px 0;border-top:1px solid rgba(181,227,237,.13);border-bottom:1px solid rgba(181,227,237,.13);font-size:12px}.preview-time>span:first-child{color:#e79a94;text-decoration:line-through}.preview-time strong{color:#a5e0b8;font-weight:500}.booking-preview p{margin:11px 0 0;color:rgba(228,243,249,.7);font-size:11px}.gate .box{background:var(--surface)}.login-kicker{display:block;color:var(--focus);font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;margin-bottom:8px}.gate .box-h h2{font-size:24px;letter-spacing:-.035em}
 
 .brand-lg{display:flex;align-items:center;gap:12px}
 .brand-lg .mark{width:36px;height:36px;border-radius:8px;font-size:var(--t-sm)}
@@ -1176,3 +1177,19 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--focus);outline-offs
   .msgs{min-height:60px;max-height:120px}
   .card-chat{max-height:calc(100dvh - 112px)}
 }
+
+/* 工作台欢迎区：把"下一步做什么"放在数据卡片之前，降低首次使用门槛。 */
+.welcome{
+  position:relative;display:flex;align-items:center;justify-content:space-between;gap:28px;
+  min-height:190px;margin:0 0 20px;padding:28px 34px;overflow:hidden;
+  border:1px solid color-mix(in srgb,var(--focus) 18%,var(--line));border-radius:var(--r-lg);
+  background:linear-gradient(115deg,color-mix(in srgb,var(--surface) 92%,var(--focus)),var(--surface));
+  box-shadow:var(--shadow-1)
+}
+.welcome::before{content:"";position:absolute;inset:0;pointer-events:none;opacity:.35;background-image:radial-gradient(color-mix(in srgb,var(--focus) 22%,transparent) 1px,transparent 1px);background-size:18px 18px;mask-image:linear-gradient(90deg,#000,transparent 70%)}
+.welcome-copy{position:relative;z-index:1;max-width:670px}.eyebrow{display:flex;align-items:center;gap:8px;color:var(--focus);font-size:var(--t-sm);font-weight:700;letter-spacing:.08em;text-transform:uppercase}.live-dot{width:7px;height:7px;border-radius:50%;background:var(--focus);box-shadow:0 0 0 4px color-mix(in srgb,var(--focus) 14%,transparent)}
+.welcome h1{margin:10px 0 8px;font-size:clamp(26px,3vw,40px);letter-spacing:-.04em;line-height:1.08}.welcome h1 em{color:var(--focus);font-style:normal}.welcome p{max-width:560px;margin:0;color:var(--muted);font-size:15px;line-height:1.7}.welcome-actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:18px}.welcome-actions .btn span{margin-left:8px;font-size:18px;line-height:0}
+.welcome-orbit{position:relative;flex:0 0 170px;width:170px;height:150px}.orbit-ring{position:absolute;border:1px solid color-mix(in srgb,var(--focus) 28%,transparent);border-radius:50%;transform:rotate(-18deg)}.ring-a{inset:18px 0;animation:orbit 12s linear infinite}.ring-b{inset:4px 20px;transform:rotate(58deg);animation:orbit 16s linear infinite reverse}.orbit-core{position:absolute;top:48px;left:58px;width:58px;height:58px;border-radius:20px;display:grid;place-items:center;background:var(--action);color:var(--action-ink);box-shadow:0 8px 28px color-mix(in srgb,var(--focus) 28%,transparent);transform:rotate(-8deg)}.orbit-core span{font:700 17px Georgia,serif}.orbit-core small{font-size:7px;letter-spacing:.15em;opacity:.72}.orbit-node{position:absolute;padding:4px 8px;border:1px solid var(--line);border-radius:99px;background:var(--surface);color:var(--muted);font-size:10px;box-shadow:var(--shadow-1)}.node-a{top:5px;right:5px}.node-b{bottom:7px;left:2px}.node-c{right:-3px;bottom:22px}
+@keyframes orbit{to{transform:rotate(342deg)}}
+@media(prefers-reduced-motion:reduce){.ring-a,.ring-b{animation:none}}
+@media(max-width:640px){.welcome{min-height:0;padding:22px 20px}.welcome-orbit{display:none}.welcome h1{font-size:29px}}
