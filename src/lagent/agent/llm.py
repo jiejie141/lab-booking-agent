@@ -464,6 +464,22 @@ class MockLLMClient:
 # ==========================================================================
 # 真实模型实现（OpenAI 兼容接口，直连 httpx，不依赖 langchain-openai）
 # ==========================================================================
+def _is_rate_limited(exc: BaseException) -> bool:
+    """判断一次失败是不是「被限流」（429）。
+
+    只看状态码本身，不看文案：不同供应商的报错文案各不相同，
+    而 429 的处置（按配额周期退避）与超时/5xx（小步重试）是两套策略。
+    拿不到状态码时保守返回 False —— 那样走的是原来的小步退避，
+    而不是让所有失败都排到 15 秒这一档上。
+    """
+    status = getattr(exc, "response", None)
+    code = getattr(status, "status_code", None) if status is not None else None
+    if code is None:
+        # httpx.HTTPStatusError 的字符串里带状态码，回退到文本匹配
+        return "429" in str(exc) or "Too Many Requests" in str(exc)
+    return code == 429
+
+
 class RealLLMClient:
     name = "live"
 
@@ -514,16 +530,35 @@ class RealLLMClient:
                     # 上却是同一件事 —— 后者才是要提前看到的信号。
                     if attempt < self.settings.llm_max_retry:
                         record_llm_retry(op)
-                        # 立即重试只是把 429 的配额再撞一次：小步退避，
-                        # 免费档（低 RPM）端点上这一行是成败分界。
-                        await asyncio.sleep(0.5 * (attempt + 1))
+                        # 退避分两种，因为 429 和超时的性质完全不同：
+                        #   429 = 配额没耗尽、只是这一刻太快 —— 等一会儿就好，
+                        #         但按**配额周期**等（起步 15s），否则 0.5s/1s
+                        #         这种小步退避只是把同一次 429 再撞一遍。
+                        #   其他（超时/5xx）= 可能是偶发抖动，小步退避即可。
+                        # 实测：Moonshot 免费/低档位 RPM 很低，eval 连跑 14 个
+                        # 用例时 0.5s 退避在第 2 个用例就撞死在 429 上；
+                        # 改成按 429 单独退避后才跑得完。
+                        # 另：429 应当尊重服务端给的 Retry-After —— 但 httpx 的
+                        # 异常对象拿不到响应头，这里退而用固定起步值，
+                        # 并在最后一次仍失败时把 429 明确写进错误消息里。
+                        if _is_rate_limited(exc):
+                            await asyncio.sleep(15 * (attempt + 1))
+                        else:
+                            await asyncio.sleep(0.5 * (attempt + 1))
             raise LLMError(f"模型调用失败：{last}")
 
     async def _text(self, system: str, user: str, op: str) -> str:
-        """发一次要自由文本的调用（不重试）。
+        """发一次要自由文本的调用（失败重试，与 _json 同一策略）。
 
         ``op`` 同样必须显式传：它决定这次耗时算在 ``ask_missing`` 还是 ``compose``
         头上，而这两个操作该看的量级完全不同。
+
+        ★ 这里原本是**不重试**的，理由是「自由文本不像 JSON 那样会因截断而失败」。
+        但实测换到 Moonshot 之后它成了第一个被 429 打死的地方：
+        eval 跑到 ``ask_missing`` / ``compose`` 就崩，而这两步走的正是 _text。
+        也就是说「不重试」这个决定把限流风险**全部**推给了这两个节点 ——
+        而它们是流程里最靠后、最像「系统坏了」的两步。
+        现在与 _json 一致：429 按配额周期退避，其他小步退避。
         """
         import httpx
 
@@ -537,17 +572,26 @@ class RealLLMClient:
                 ],
                 "temperature": _temperature(self.settings, 0.2),
             }
-            try:
-                async with httpx.AsyncClient(timeout=self.settings.llm_timeout) as client:
-                    resp = await client.post(
-                        url,
-                        json=payload,
-                        headers={"Authorization": f"Bearer {self.settings.llm_api_key}"},
-                    )
-                    resp.raise_for_status()
-                    return resp.json()["choices"][0]["message"]["content"]
-            except Exception as exc:
-                raise LLMError(f"模型调用失败：{exc}") from exc
+            last: Exception | None = None
+            for attempt in range(self.settings.llm_max_retry + 1):
+                try:
+                    async with httpx.AsyncClient(timeout=self.settings.llm_timeout) as client:
+                        resp = await client.post(
+                            url,
+                            json=payload,
+                            headers={"Authorization": f"Bearer {self.settings.llm_api_key}"},
+                        )
+                        resp.raise_for_status()
+                        return resp.json()["choices"][0]["message"]["content"]
+                except Exception as exc:  # noqa: BLE001
+                    last = exc
+                    if attempt < self.settings.llm_max_retry:
+                        record_llm_retry(op)
+                        if _is_rate_limited(exc):
+                            await asyncio.sleep(15 * (attempt + 1))
+                        else:
+                            await asyncio.sleep(0.5 * (attempt + 1))
+            raise LLMError(f"模型调用失败：{last}") from last
 
     async def chat_tools(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
