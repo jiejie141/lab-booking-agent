@@ -9,7 +9,7 @@
 | **代码** | 16,984 行 `src/` · 15,073 行 `tests/` · 35 个测试文件（测试∶源码 ≈ 0.89∶1） |
 | **测试** | **1,026 项** pytest（952 个测试函数 + 参数化展开）· 本地 1010 通过 / 16 跳过，跳过项需真实 PostgreSQL，由 CI `postgres` job 执行 |
 | **接口** | **37 个 OpenAPI 操作 / 34 条路径**（41 个路由装饰器，`/metrics` 等刻意不文档化）· 契约门禁（漂移即失败）· 7 个数据库迁移 |
-| **质量门** | `pytest` · `ruff` · `mypy` · `check_openapi.py --check` —— 四项都在 CI 里卡 |
+| **质量门** | `pytest` · `ruff` · `mypy` · `check_openapi.py --check` · `check_deps.py` —— 五项都在 CI 里卡 |
 | **可观测** | `/api/health` · `/api/health/ready` · `/metrics` · Prometheus 告警规则 · 结构化审计流水 |
 | **安全** | JWT + RBAC · 登录限流 · 幂等键 · 用内置默认密钥**拒绝启动** |
 
@@ -48,7 +48,7 @@ Agent：预约成功：2026-09-24 12:00-14:00 荧光光谱仪（分析楼3楼301
 python -m venv .venv
 .venv\Scripts\activate            # Windows
 # source .venv/bin/activate       # macOS / Linux
-pip install -r requirements.txt
+pip install -r requirements.txt   # 直接依赖，带兼容区间
 
 # 2) 设一个签名密钥（服务**拒绝**用仓库内置的公开默认值启动，见 §9）
 export LAB_JWT_SECRET=$(python -c "import secrets;print(secrets.token_hex(32))")
@@ -1169,6 +1169,7 @@ python scripts/sweep_demo.py    # 18/18（真实 SQLite 文件上的清扫端到
 python scripts/smoke_http.py    # 83/83（真实 uvicorn 进程，含 react 模式与降级链）
 python scripts/accept_deploy.py  # 25/25（真 compose 栈：真 PG + 真容器 + 真下单）
 python scripts/check_openapi.py --check   # OpenAPI 契约未漂移则静默通过
+python scripts/check_deps.py               # 依赖都带边界、且实际版本没越界（见"依赖版本"一节）
 python build_web.py             # 打包单文件控制台 → dist/console.html
 python scripts/embed_fonts.py   # 重新生成内嵌字体子集（可复现，见「字体」一节）
 ```
@@ -1312,6 +1313,42 @@ Docker Desktop → Settings → Docker Engine 里加：
 （该模式下每次启动都会打一条 CRITICAL，可被告警规则抓到）。
 
 ---
+
+## 依赖版本：为什么只给区间，不给 lock 文件
+
+`requirements.txt` 里每条直接依赖都带**上下限**（如 `sqlalchemy[asyncio]>=2.0,<2.2`），
+但仓库**不提供** `requirements.lock` —— 这是一个刻意的取舍，不是漏了。
+
+**起因是一次真实排查**：CI 的 py3.13 job 报 mypy 错、py3.10 job 全绿，
+两边跑的是同一份 mypy、同一份配置。真因是当时只写了 `>=` 下限，
+而 SQLAlchemy 2.1 抬高了 `requires_python` —— py3.10 被解析到 2.0、
+py3.13 拿到 2.1，**两个 job 静默地在测两套不同的栈**。
+
+当时的处置是在 CI 里加一步「打印这次装了哪些版本」。但那只是让问题**可见**，
+没让它**不可发生**。现在补了两件事：
+
+1. 每条直接依赖加上限。实测同一份 `requirements.txt`：
+
+   | | Python 3.10 | Python 3.13 |
+   |---|---|---|
+   | SQLAlchemy | 2.0.54 | 2.1.4 |
+   | 其余 12 条 | 完全一致 | 完全一致 |
+
+   SQLAlchemy 是唯一因 Python 版本而异的包，而且**被限制在 2.x 内** ——
+   差异从一个无界的漂移，变成了一条写明的、可预期的边界。
+
+2. CI 增加「校验依赖声明边界」这一步：任何直接依赖没有上限、
+   或实际装到的版本越出声明区间，CI 直接红。
+
+**为什么不生成 lock**：本项目 CI 同时跑 Python 3.10 与 3.13（见 `ci.yml` 的 matrix）。
+一份在 3.13 上生成的 lock 会把 SQLAlchemy 钉到 2.1，而 2.1 **装不上 3.10**；
+用 `pip-compile` 生成时也没法在一台机器上为另一个 Python 版本解析。
+换言之，在本项目的多版本矩阵下，**一份 lock 反而会锁死 CI**。
+真要做，正确形态是「每个 Python 版本一份 lock」，那是另一个量级的维护成本。
+当前区间方案覆盖了真实发生过的问题（跨大版本漂移），且不会锁死任何一个 job。
+
+> 这条限制的触发条件：如果将来 CI 只跑一个 Python 版本，
+> 那么一份 lock 就是更低成本、更严格的选择 —— 到那时应该换过去。
 
 ## 已知限制（明确写出来，而不是藏起来）
 

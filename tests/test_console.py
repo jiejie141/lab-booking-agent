@@ -184,7 +184,7 @@ class TestConsoleAuthWiring:
     def test_identity_field_only_used_for_read_filtering(self, html):
         """把「哪些地方出现了 user_id」钉死，防止悄悄长回来。"""
         hits = [line.strip() for line in html.splitlines() if "user_id" in line]
-        # 只允许三条：1) 预约列表的读侧过滤参数；2) 解释 as_user_id 的注释；
+        # 只允许四条：1) 预约列表的读侧过滤参数；2) 解释 as_user_id 的注释；
         # 3) ★ 门禁核验的 user_id —— 这条**性质不同**，必须单独说清楚：
         #    对话/下单里出现 user_id 是错的（"我是谁"只能由令牌决定）；
         #    而门禁核验的 user_id 是"**被核验的那个人**是谁"，
@@ -192,6 +192,11 @@ class TestConsoleAuthWiring:
         #    不是调用者自称的身份。签发凭证的 user_id 同理 —— 那是
         #    "**给谁**发凭证"，不是"我是谁"。两者同名而语义相反，
         #    所以按前缀放行，而不是把整条规则放宽。
+        # 4) ★ "刷卡出场"按钮读的是**响应里**的 user_id（r.user_id）——
+        #    方向与上面三条正好相反：不是前端把身份"送给"后端，
+        #    而是后端把"它识别到的是谁"告诉前端。这里取它，
+        #    是为了下一次"出场"核验能把身份带上（出场必须识别到身份）。
+        #    换句话说：这条恰恰**证明**身份来自服务端，而不是客户端自称。
         for line in hits:
             assert (
                 "?user_id=" in line
@@ -199,6 +204,10 @@ class TestConsoleAuthWiring:
                 or line.startswith("<!--")
                 or "lab_id:labId, user_id:userId" in line
                 or "user_id:userId, lab_id:labId" in line
+                # 仅"读响应里的身份"这一种：出现 r.user_id 说明是从
+                # 服务端返回里取的，不是前端自称。卡 r.user_id 这个具体
+                # 写法（而不是放开 user_id），避免它变成到处可用的通行证。
+                or "r.user_id" in line
             ), \
                 f"出现未预期的 user_id 用法：{line}"
 

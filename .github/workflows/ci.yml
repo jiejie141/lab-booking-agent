@@ -52,6 +52,19 @@ jobs:
           pip install "ruff>=0.9" "mypy>=1.11"
           pip install "pytest-cov>=5.0"
 
+      # 2026-10-11 加：把「依赖解析出界」这件事在 CI 里变成**硬失败**。
+      #
+      # 起因见下一段注释 —— requirements 只写下限时，SQLAlchemy 2.1 抬高了
+      # requires_python，py3.10 被解析到 2.0、py3.13 拿到 2.1，两个 job
+      # 静默地测两套栈。当时只加了「打印版本」，那让问题**可见**，
+      # 但没让它**不可发生**：下一个人照样会被 pip 悄悄带上新大版本。
+      #
+      # 现在 requirements.txt 里每条都带上限，CI 再校验一步：
+      # 只要解析结果越过了声明区间，这里直接红。代价是每次 CI 多跑几秒，
+      # 换的是「版本漂移再也不会无声发生」。
+      - name: 校验依赖声明边界
+        run: python scripts/check_deps.py
+
       # 把「这个 job 到底测的是哪套栈」打出来。
       #
       # 起因是一次真实的排查：py3.13 的 mypy 报错、py3.10 却全绿，而两边跑的是

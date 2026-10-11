@@ -43,6 +43,24 @@ function toast(msg,kind){
 }
 async function apiFull(path,opts){
   const o=Object.assign({},opts||{});
+  // ★ 在这里统一 stringify，而不是要求每个调用点自己记得。
+  //
+  //   起因：门禁模块的 verify / issue 两处写的是 `body:{...}`（原生对象），
+  //   而别的调用点写的是 `body:JSON.stringify({...})` —— 两种写法并存，
+  //   没有任何东西强制你选对那个。传原生对象时 fetch 会把它 String() 成
+  //   字面量 "[object Object]" 发出去，服务端收到的是非法 JSON，
+  //   回 422 "JSON decode error"，而 loc 是 ["body", 1] ——
+  //   前端把它渲染成 "1：JSON decode error"，完全看不出问题在哪。
+  //
+  //   修在公共入口：只要 body 不是字符串（且不是 FormData/Blob 这类
+  //   该原样交给 fetch 的），就统一转 JSON。这样两种写法都能工作，
+  //   以后新增接口也不会再踩 —— 靠约定不如靠一个绕不过去的入口。
+  if(o.body!=null && typeof o.body!=="string"
+     && !(typeof FormData!=="undefined" && o.body instanceof FormData)
+     && !(typeof Blob!=="undefined" && o.body instanceof Blob)
+     && !(typeof URLSearchParams!=="undefined" && o.body instanceof URLSearchParams)){
+    o.body=JSON.stringify(o.body);
+  }
   o.headers=Object.assign({"Content-Type":"application/json"},o.headers||{});
   const t=tokenApi.get();
   if(t) o.headers.Authorization="Bearer "+t;
@@ -55,11 +73,40 @@ async function apiFull(path,opts){
     throw new Error("登录状态已失效，请重新登录");
   }
   if(!r.ok){
-    const detail=(body&&(body.detail||body.message))||("HTTP "+r.status);
-    const err=new Error(detail); err.status=r.status; throw err;
+    // detail 有三种形态，原来只处理了第一种：
+    //   1) 字符串        —— 业务错误，如 "该时段已被占用"
+    //   2) 对象          —— 少数接口直接返回结构化错误
+    //   3) ★ 数组        —— FastAPI 422 校验失败的**默认形态**，
+    //                        形如 [{loc:["body","date"], msg:"...", type:"..."}]
+    //   原来是直接把 detail 丢给 new Error()，数组和对象都会被
+    //   String() 变成 "[object Object]" —— 用户看到的就是这句。
+    //   于是"签发失败"这种本该一眼看懂的错误，变成了不知道失败在哪。
+    const detail=errText(body, r.status);
+    const err=new Error(detail); err.status=r.status; err.raw=body; throw err;
   }
   return {body, headers:r.headers};
 }
+/* 把后端返回的错误体压成**一句人话**。
+   存在的理由见 apiFull 里那段注释：FastAPI 422 的 detail 是数组，
+   直接扔给 Error() 会变成 "[object Object]"，等于没说。 */
+function errText(body,status){
+  if(!body) return "HTTP "+status;
+  const d=body.detail!==undefined?body.detail:body.message;
+  if(typeof d==="string") return d;
+  if(Array.isArray(d)){
+    // 校验错误：把 loc 里的 "body"/"query" 这类前缀去掉，只留字段名，
+    // 拼成 "字段: 原因；字段: 原因" —— 比一坨 JSON 有用得多。
+    const parts=d.map(it=>{
+      const loc=(it&&it.loc||[]).filter(x=>x!=="body"&&x!=="query"&&x!=="path");
+      const field=loc.length?loc.join("."):"请求体";
+      return field+"："+(it&&it.msg?it.msg:"格式不正确");
+    });
+    return parts.length?parts.join("；"):"请求参数校验失败";
+  }
+  if(d&&typeof d==="object") return JSON.stringify(d);
+  return "HTTP "+status;
+}
+
 async function api(path,opts){ return (await apiFull(path,opts)).body; }
 
 /* 数字滚动。目标是"读数像一个仪表"而不是"文字被换掉"。
@@ -69,6 +116,8 @@ async function api(path,opts){ return (await apiFull(path,opts)).body; }
    - easing 用 easeOutExpo（先快后慢），停下来的那一下才有"落位"感。
    - 尊重 prefers-reduced-motion：关掉动效的用户直接拿到终值，
      中间态对他们没有信息量。 */
+// 最近一次放行识别到的身份（见 gateVerify / 刷卡出场按钮的注释）
+let gateLastUser = null;
 const REDUCED = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 function countTo(el,target){
   const to=Number(target);
@@ -576,10 +625,25 @@ const GATE_REASON={
 /* 实验室与用户下拉：复用已经加载好的 state，不额外打接口。
    门禁面板自己再拉一遍是浪费，而且会与顶部的刷新周期打架。 */
 async function loadGateOptions(){
+  // 门禁面板依赖实验室列表，而列表是在「实验室与设备」面板里拉的。
+  // 用户完全可能**直接点门禁**，这时 state.labs 还是空的 ——
+  // 下拉就会是空的、签发也点不动。这里按需补一次，而不是要求用户
+  // 先去点另一个标签（那等于把内部实现顺序暴露成使用步骤）。
+  if(!state.labs || !state.labs.length){
+    try{
+      const labs=await api("/api/labs");
+      state.labs=labs;
+      labs.forEach(l=>l.equipment.forEach(e=>state.equipment.set(e.id,e)));
+    }catch(_){ /* 拉不到就交给下面的空下拉 + 提示去表达 */ }
+  }
   const lab=$("#gate-lab"), usr=$("#gate-user");
   if(lab && !lab.options.length){
+    // ★ 字段名是 label 不是 name（/api/labs 返回 id/label/building/floor/room/...）。
+    //   原来写 l.name 会渲染成 "undefined" —— 下拉里三个选项全是 undefined，
+    //   而且选哪个都拿不到有意义的实验室。这类错字静态检查抓不到，
+    //   只有真的把下拉里的字读出来才会发现。
     lab.innerHTML=(state.labs||[]).map(l=>
-      '<option value="'+esc(l.id)+'">'+esc(l.name)+'</option>').join("");
+      '<option value="'+esc(l.id)+'">'+esc(l.label||l.name||('实验室 #'+l.id))+'</option>').join("");
   }
   if(usr && !usr.options.length){
     usr.innerHTML='<option value="">（不提供身份）</option>'
@@ -596,6 +660,7 @@ async function loadGateOptions(){
   }
   // 默认今天：签发几乎总是"今天临时放行"，让人每次重填日期是纯浪费。
   // 用本地日期而不是 toISOString() —— 后者按 UTC 算，东八区早上 8 点前会退回昨天。
+  gateLabHint();  // 与上面同一个理由：初始状态也要把依赖摆出来
   const giDate=$("#gi-date");
   if(giDate && !giDate.value){
     const d=new Date();
@@ -628,6 +693,9 @@ async function gateVerify(){
     const meta=r.granted
       ? {t:"放行",c:"ok"}
       : (GATE_REASON[r.reason_code]||{t:r.reason_code||"—",c:"bad"});
+    // 门禁那边响应里带回了真实身份（可能是"只凭凭证"解析出来的），
+    // 存下来给下面那个"刷卡出场"按钮用。见按钮处的注释。
+    gateLastUser = (r.granted && r.user_id) ? String(r.user_id) : null;
     box.innerHTML=
       '<div class="gate-verdict '+(r.granted?"yes":"no")+'">'
       + '<span class="tag '+meta.c+'">'+(r.granted?"✓ 放行":"✗ 拒绝")+'</span>'
@@ -639,7 +707,25 @@ async function gateVerify(){
       + (r.user_name?('用户：<b>'+esc(r.user_name)+'</b> · '):'')
       + (r.lab_label?('实验室：'+esc(r.lab_label)+' · '):'')
       + (r.permit_id?('凭证 #'+esc(r.permit_id)):'未签发凭证')
-      + '</div>';
+      + '</div>'
+      // 刚放行时给一个"刷卡出场"的一键入口。
+      // 理由：进门之后最自然的下一步就是出门，而方向是个下拉框 ——
+      // 演示时为了看出场，得先意识到"要手动把它改成出"，这一步会卡住。
+      // 把下一步做成按钮，是因为"下一步是什么"不该让使用者去猜。
+      // ★ 只在内向放行、且**能确定身份**时才给这个按钮。
+      //   起因：核验"出场"必须识别到身份（后端明确要求 —— 谁离开一栋楼
+      //   不能是匿名的）。而进门可以只凭凭证。于是"只凭凭证进门"之后，
+      //   如果直接给一个"刷卡出场"按钮，点下去必然 identity_mismatch ——
+      //   一个按下去只会失败的按钮，比没有这个按钮更糟。
+      //   现在：拿得到身份才显示，且点击时把身份一起带过去。
+      + (r.granted && r.user_id && $("#gate-dir").value==="in"
+          ? '<div class="filters" style="margin-top:8px"><button class="btn ghost sm" id="gate-out-now">'
+            + '刷卡出场</button></div>'
+          : '')
+      + (r.granted && !r.user_id && $("#gate-dir").value==="in"
+          ? '<div class="note">要看出场，请在上面的身份下拉里选人再核验 —— '
+            + '出场必须识别到身份（进场可以只凭凭证，出场不行）。</div>'
+          : '');
   }catch(e){
     box.innerHTML='<div class="empty">核验失败：'+esc(e.message)+'</div>';
   }
@@ -656,14 +742,30 @@ async function gateVerify(){
    
    签发后顺手把凭证填进上面的核验框：让人当场就能验证"刚发的这张能开门"，
    把「签发 → 核验 → 放行」这条闭环压成一次点击。 */
+// 签发区借用核验区的实验室下拉，这个依赖原来是隐式的：
+// 用户点了"签发"才被告知"先选实验室"，而那个下拉在另一个框里。
+// 做成实时提示 = 在用户动手之前就把依赖摆出来，而不是事后报错。
+function gateLabHint(){
+  const el=$("#gi-lab-hint"); if(!el) return;
+  const sel=$("#gate-lab");
+  const labId=parseInt(sel.value,10);
+  const name=labId && sel.selectedIndex>=0 ? sel.options[sel.selectedIndex].text : "";
+  el.innerHTML = labId
+    ? '将签到：<b>'+esc(name)+'</b> <button class="btn ghost sm" id="gi-change-lab">换一个</button>'
+    : '⚠ 还没选实验室 —— 签发前请先在上面核验区的「实验室」下拉里选一个';
+}
+
 async function gateIssue(){
   const box=$("#gi-result");
   const userId=parseInt($("#gi-user").value,10);
   const labId=parseInt($("#gate-lab").value,10);
   const date=$("#gi-date").value, from=$("#gi-from").value, to=$("#gi-to").value;
   const reason=$("#gi-reason").value.trim();
+  gateLabHint();
   if(!userId){ box.innerHTML='<div class="empty">先选签发给谁</div>'; return; }
-  if(!labId){ box.innerHTML='<div class="empty">先在上面的下拉里选实验室</div>'; return; }
+  // 实验室来自**上面核验区**的下拉 —— 签发区自己没有这个控件。
+  // 所以报错必须说清楚"去哪儿选"，并给一个能直接跳过去的锚点。
+  if(!labId){ box.innerHTML='<div class="empty">还没选实验室：请点上面的「实验室」下拉选一个（签发要知道凭证对哪个门有效）</div>'; return; }
   if(!date||!from||!to){ box.innerHTML='<div class="empty">日期与起止时间都要填</div>'; return; }
   // 理由必填是**服务端**的约束，这里只是提前给一句人话，
   // 真正的边界在后端（它会进审计）—— 前端拦是为了省一次往返，不是替它做决定。
@@ -812,6 +914,13 @@ async function loadLabs(){
   box.innerHTML=skel(3,"card");
   try{
     const labs=await api("/api/labs");
+    // ★ 存进 state：门禁面板的"实验室"下拉要复用它。
+    //   原来这里只存了 equipment，labs 是局部变量用完就丢 ——
+    //   于是 loadGateOptions 里的 state.labs 永远是 undefined，
+    //   门禁的实验室下拉**一条都填不出来**，签发功能实际上点不动。
+    //   （这个 bug 逃过了上一轮的"验证"，因为当时只看了面板渲染出来没有，
+    //     没有真正走一遍签发。渲染出来了 ≠ 能用。）
+    state.labs=labs;
     labs.forEach(l=>l.equipment.forEach(e=>state.equipment.set(e.id,e)));
     box.innerHTML=labs.map(l=>{
       const rows=l.equipment.map(e=>{
@@ -1299,6 +1408,29 @@ $("#gate-verify") && $("#gate-verify").addEventListener("click",gateVerify);
 $("#gate-inside") && $("#gate-inside").addEventListener("click",gateInside);
 $("#gate-export") && $("#gate-export").addEventListener("click",gateExport);
 $("#gi-issue") && $("#gi-issue").addEventListener("click",gateIssue);
+// 实验室下拉一变，签发区的提示要跟着变 —— 否则提示会停留在过期状态，
+// 那种"说了和没说一样"的提示比没有更糟。
+$("#gate-lab") && $("#gate-lab").addEventListener("change",gateLabHint);
+// 动态按钮用事件委托 —— 它在结果渲染后才存在，直接绑会绑到 null 上。
+document.addEventListener("click",e=>{
+  if(e.target && e.target.id==="gi-change-lab"){
+    const sel=$("#gate-lab"); sel.focus();
+    // 展开原生下拉只能靠用户点；这里至少把它滚进视野并高亮，
+    // 让"去哪儿改"这件事不用猜。
+    sel.scrollIntoView({block:"center",behavior:"smooth"});
+    return;
+  }
+  if(e.target && e.target.id==="gate-out-now"){
+    $("#gate-dir").value="out";
+    // 把上次放行识别到的身份补进下拉 —— 否则出场会因为"没识别到是谁"被拒。
+    // 这是"让按钮真的能用"，不是替用户做决定：身份本来就来自刚才那次核验。
+    if(gateLastUser){
+      const sel=$("#gate-user");
+      if(sel && !sel.value) sel.value=gateLastUser;
+    }
+    gateVerify();
+  }
+});
 
 /* ---------- 启动 ----------
    健康检查是公开端点，先跑，好让登录页顶部也能显示后端连接状态；

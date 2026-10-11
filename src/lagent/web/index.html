@@ -150,11 +150,11 @@
       <div class="stat-top"><span class="k">设备</span><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6"/><path d="M10 3v6.5L5.2 18A2 2 0 0 0 7 21h10a2 2 0 0 0 1.8-3L14 9.5V3"/><path d="M7.5 15h9"/></svg></span></div>
       <div class="n" id="st-equip">–</div>
     </div>
-    <div class="stat v3" title="状态为 pending / confirmed / in_use 的预约。预约总数里其余的是已取消与已过期 —— 它们仍然占用冲突判断吗？不占，这是刻意的设计（见 availability.py 的 ACTIVE_STATUSES）">
-      <div class="stat-top"><span class="k">有效预约</span><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/><path d="m9 15.5 2 2 4-4"/></svg></span></div>
+    <div class="stat v3" title="状态为 pending / confirmed / in_use 的预约。注意 pending（待审批）也算 —— 它还没被拒，仍然参与时段冲突判断。所以灌了待审批示例数据时，这个数会明显大于已确认条数。预约总数里其余的是已取消与已过期，它们不参与冲突判断（见 availability.py 的 ACTIVE_STATUSES）">
+      <div class="stat-top"><span class="k">生效中预约</span><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/><path d="m9 15.5 2 2 4-4"/></svg></span></div>
       <div class="n" id="st-active">–</div>
     </div>
-    <div class="stat v4" title="库中全部预约记录（含已取消与已过期）。它比有效预约大是正常的 —— 历史记录不删，是为了让审计与违约统计有据可查。截至 2026-10-10：已确认 1 · 已取消 4 · 已过期 6">
+    <div class="stat v4" title="库中全部预约记录（含已取消与已过期）。它比生效中预约大是正常的 —— 历史记录不删，是为了让审计与违约统计有据可查。">
       <div class="stat-top"><span class="k">预约总数</span><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/><circle cx="7" cy="6" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="9" cy="18" r="1.6" fill="currentColor" stroke="none"/></svg></span></div>
       <div class="n" id="st-res">–</div>
     </div>
@@ -391,6 +391,7 @@
               <input id="gi-reason" placeholder="理由（必填，会写进审计）" style="flex:1">
               <button class="btn ghost" id="gi-issue">签发</button>
             </div>
+            <div class="note" id="gi-lab-hint"></div>
             <div id="gi-result"></div>
           </div>
 

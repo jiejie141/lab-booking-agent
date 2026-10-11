@@ -63,6 +63,11 @@ async def isolated_db(tmp_path, monkeypatch):
     # 而限流计数走的是 LAB_STATE_DB_PATH —— 两条路径，之前只有一条被隔离了。
     # 要测 sqlite 后端本身，用例自己显式覆盖这一行（见 test_state_store.py）。
     monkeypatch.setenv("LAB_STATE_BACKEND", "memory")
+    # 种子规模也必须钉住，理由同上。这两个值一并归零/归定，
+    # 用例才能断言"库里恰好有几条"而不用管开发者本地的 .env 怎么配。
+    monkeypatch.setenv("LAB_SEED_PENDING_RESERVATIONS", "0")
+    monkeypatch.setenv("LAB_SEED_APPROVAL_EQUIPMENT", "0")
+    monkeypatch.setenv("LAB_SEED_DEMO_USERS", "0")
 
     from lagent import db as db_module
     from lagent.config import reset_settings_cache
