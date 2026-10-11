@@ -149,6 +149,23 @@ def running_server(extra_env: dict[str, str] | None = None):
     env.update({
         "PYTHONPATH": str(SRC),
         "LAB_DATABASE_URL": f"sqlite+aiosqlite:///{(root / 'smoke.db').as_posix()}",
+        # ★ 限流计数也走一个"状态库"，而且默认后端就是 sqlite（见 .env）。
+        #   之前只隔离了业务库，漏了这一个 —— 于是**上一次运行**的限流计数
+        #   会留在 ./var/state.db 里，被这一次读到。
+        #
+        #   实测症状很有误导性：单独跑 82/83 全绿，紧接着再跑就掉到 73/82，
+        #   报错全是 429、甚至连"李娜下单"都开始 429。看起来像"服务坏了"
+        #   或"模型挂了"，实际是脚本自己的历史计数没清。
+        #
+        #   隔离到本次的临时目录，跑多少次都是同一个结果。
+        "LAB_STATE_DB_PATH": str(root / "state.db"),
+        # ★ 种子规模同理必须钉住：下面有断言"管理员能看到全量 == 2 条"，
+        #   而 .env 里为了演示把 LAB_SEED_PENDING_RESERVATIONS 开成了 6。
+        #   于是脚本从"验接口"变成"验开发者的本地配置"，本机全红。
+        #   清单要的是**确定的**种子，不是当前 .env 的样子。
+        "LAB_SEED_PENDING_RESERVATIONS": "0",
+        "LAB_SEED_APPROVAL_EQUIPMENT": "0",
+        "LAB_SEED_DEMO_USERS": "0",
         "LAB_JWT_SECRET": SMOKE_SECRET,
         "LAB_APP_MODE": "mock",
         # 把服务端的"现在"钉在今天 12:00（见 smoke_now）：
@@ -231,6 +248,33 @@ def login(client: httpx.Client, username: str, password: str) -> str:
     resp = client.post("/api/auth/login", json={"username": username, "password": password})
     resp.raise_for_status()
     return resp.json()["access_token"]
+
+
+def fresh_user(client: httpx.Client, admin_headers: dict, prefix: str) -> str | None:
+    """建一个全新账号并返回它的令牌；建不出来就返回 None（探针退回 admin）。
+
+    为什么要这个：有些探针要“数第几次开始 429”，那就必须从一个没被用过的
+    配额开始。共用账号会让探针受前面用例的影响，套件于是不可重复运行。
+    用户名带时间戳，避免第二次运行时撞名。
+    """
+    import time as _time
+
+    name = f"{prefix}_{int(_time.time() * 1000) % 100000000}"
+    pwd = "Smoke@12345"
+    resp = client.post(
+        "/api/users",
+        json={"username": name, "email": f"{name}@smoke.local",
+              "password": pwd, "role": "member"},
+        headers=admin_headers,
+    )
+    if resp.status_code not in (200, 201):
+        return None
+    try:
+        return login(client, name, pwd)
+    except (httpx.HTTPError, KeyError):
+        # 建号成功但登录不上 —— 探针退回 admin 而不是让整个套件崩掉。
+        # 只接这两类：HTTP 层失败与响应缺字段，其余异常应当照常抛出。
+        return None
 
 
 def bearer(token: str) -> dict:
@@ -341,16 +385,30 @@ def run_checks(base: str) -> None:
            client.post("/api/auth/login",
                        json={"username": "李娜", "password": "lina@123", "role": "admin"}), 422)
 
+    # ★ 限流探针必须用自己的账号，不能复用 admin。
+    #
+    # 限流是**按用户**计数的（见 api.py 的 _chat_rate_guard），而上面几节
+    # 已经用 admin 打过十几次 /api/agent/chat。复用 admin 就等于：
+    # 探针一上来配额就被前面的用例吃掉一大半，于是
+    # 「前 6 次应当放行」这条断言必然失败。
+    #
+    # 实测到的现象很难查：单独跑 82/83 通过，紧接着再跑一次掉到 73/82，
+    # 报错全是 429，看起来像「服务坏了」，其实是脚本把自己的配额烧光了。
+    # 也就是说这个套件不可重复运行 —— 而可重复是脚本的基本要求。
+    #
+    # 换成独立账号后，探针拿到的是干净的 30/分钟配额，与前面跑过多少无关。
+    rl_token = fresh_user(client, admin, "smoke_rl")
+    rl_headers = bearer(rl_token) if rl_token else admin
     codes = [
         client.post("/api/agent/chat",
                     json={"message": "你好", "session_id": f"smoke-rl-{i}"},
-                    headers=admin).status_code
+                    headers=rl_headers).status_code
         for i in range(RATE_LIMIT + 2)
     ]
     check(f"限流：前 {RATE_LIMIT} 次放行", codes[:RATE_LIMIT] == [200] * RATE_LIMIT, str(codes))
     check("限流：超出后 429", codes[RATE_LIMIT] == 429, str(codes))
     check("429 带 Retry-After", "retry-after" in
-          client.post("/api/agent/chat", json={"message": "你好"}, headers=admin).headers)
+          client.post("/api/agent/chat", json={"message": "你好"}, headers=rl_headers).headers)
 
     resp = client.get("/api/health", headers={"Origin": "http://evil.example.com"})
     check("默认不发 CORS 头", "access-control-allow-origin" not in resp.headers)
@@ -482,7 +540,21 @@ def run_react_checks(base: str) -> None:
     以及**模型无法触发写操作**（这条是安全底线，必须端到端验一次）。
     """
     client = local_client(base)
-    lina = bearer(login(client, "李娜", "lina@123"))
+    # ★ [11]~[13] 必须用**独立账号**跑。
+    #
+    # 限流按用户计数，而本脚本把配额压到 LAB_RATE_LIMIT_PER_MINUTE=6（见上面
+    # 的 env），[6]/[7] 两节已经用 李娜 打过好几次 /api/agent/chat。
+    # 于是 [11] 的 react 对话一进来就是 429 —— 报错看起来像"模型坏了/服务坏了"，
+    # 实际是脚本自己把李娜的配额烧光了。
+    #
+    # 这不是理论推演：实测同一份脚本连跑两次，第一次 82/83，
+    # 第二次 73/82 且报错全是 429。一个自己会把自己跑红的套件，
+    # 比没有套件更危险 —— 它会让人开始无视红色。
+    #
+    # 换独立账号后，[11]~[13] 拿到的是干净的 6/分钟，与前文无关。
+    react_admin = bearer(login(client, "管理员", "admin@123"))
+    react_token = fresh_user(client, react_admin, "smoke_react")
+    lina = bearer(react_token) if react_token else bearer(login(client, "李娜", "lina@123"))
 
     print("\n[11] react 执行模式（模型自主选工具）")
     before = len(client.get("/api/reservations", headers=lina).json())
