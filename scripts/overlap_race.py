@@ -22,10 +22,21 @@
 
 期望
 ----
-三种情形都应「恰好 1 个成功」。当前后两种会各自成功 2 个。
+三种情形都应「恰好 1 个成功」。
 
 对应文档：docs/ENTERPRISE-UPGRADE.md 的 P0-1。
-修好之后，本脚本应当被改写成一条断言「恰好 1 成功」的测试。
+
+⚠️ 这个脚本**不再承担验证职责** —— 它只是把当年的故障现场留下来给人看。
+真正的回归防线在 `tests/test_concurrency.py`：
+
+  * `TestConcurrentBooking`         —— 领域层，同 user 的 N 并发
+  * `TestConcurrentBookingOverHTTP` —— 接口层，**两个不同账号**抢同一时段
+  * `TestSlotGridIsLoadBearing`     —— ★ 证明唯一索引真的在承重
+    （用 barrier 制造交错 + 用「开始时间不同」绕开老索引，
+      把"恰好 1 个成功"归因到占用格索引；删掉该索引这个用例会红）
+
+本脚本输出的是「当前实现下的现场」，它跑在内存/临时库上，
+且不包含鉴权、事务边界等接口层因素 —— 所以它**绿了不等于并发安全**。
 """
 
 from __future__ import annotations
