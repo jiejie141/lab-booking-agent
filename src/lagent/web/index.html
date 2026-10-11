@@ -189,6 +189,13 @@
             <label class="f" for="inp-msg">你来说</label>
             <div class="hint" id="hint-inline"></div>
           </div>
+          <!-- 快捷示例：**必须**在输入框上方。
+               原来它在 composer 最底部，实测 top=921px，而视口只有 900px ——
+               新用户第一眼看到的只有一个空输入框，四条示例全在屏幕外。
+               而示例恰恰是"不知道该问什么"时唯一的入口：
+               把入口放在需要它的人看不见的地方，等于没有入口。
+               放到输入框上方后，视线顺序自然变成"能问什么 → 我要问什么"。 -->
+          <div class="pill-row" id="quick"></div>
           <textarea id="inp-msg" placeholder="例如：明天下午两点想用荧光光谱仪两小时"></textarea>
           <div class="composer-act">
             <button class="btn" id="btn-send">发送</button>
@@ -196,7 +203,6 @@
                  没有它，一次走神的长对话只能干等或者刷新页面。 -->
             <button class="btn ghost" id="btn-stop" hidden>停止生成</button>
           </div>
-          <div class="pill-row" id="quick"></div>
         </div>
       </div>
     </section>

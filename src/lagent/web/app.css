@@ -235,13 +235,31 @@ header.top{
 }
 .stat{
   padding:22px 26px 20px; position:relative;
-  border-left:1px solid var(--line-soft);
+  border-left:1px solid var(--line);
   transition:background .2s var(--ease);
 }
 .stat:first-child{border-left:0}
+/* 每格底部一条 2px 的墨条：四个读数并排时，
+   它给每一格一个"底座"，让人一眼数得出是"四个指标"而不是"一行数字"。 */
+.stat::after{
+  content:"";position:absolute;left:26px;right:26px;bottom:0;height:2px;
+  background:var(--ink);opacity:.12;
+  transform:scaleX(0);transform-origin:left;
+  animation:sweepIn .6s var(--ease-out) forwards;
+}
+.stat:nth-child(1)::after{animation-delay:.05s}
+.stat:nth-child(2)::after{animation-delay:.11s}
+.stat:nth-child(3)::after{animation-delay:.17s}
+.stat:nth-child(4)::after{animation-delay:.23s}
+@keyframes sweepIn{to{transform:scaleX(1)}}
 .stat:hover{background:var(--surface-2)}
 .stat-top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
-.stat .k{font-size:var(--t-micro)}
+/* 标签：从 10px 提到 11px 并**拉宽字距**。
+   10px 的中文标签在浅色底上辨识成本很高（字形挤在一起），
+   而它恰恰是"这个 42px 的数字是什么"的唯一说明 ——
+   读数越醒目，标签越不能糊。字距而不是字号，是因为加宽字距
+   能在不撑高盒子的前提下把中文一个个分开。 */
+.stat .k{font-size:var(--t-xs);letter-spacing:.08em;font-weight:500;color:var(--ink-2)}
 /* 图标：细线、统一 1.7 描边、单色。装饰物，不参与信息层级。 */
 .ic{width:15px;height:15px;flex:none;color:var(--ink-3);opacity:.8}
 .ic svg{width:100%;height:100%;display:block}
@@ -281,7 +299,51 @@ header.top{
 /* 对话卡：整张卡是一个纵向 flex，卡体可以长高，让消息区去吃掉多余的高度。
    两列等高（.cols align-items:stretch）之后，右侧数据卡的内容长度决定行高；
    左卡若不让消息区吸收差额，就会在下方留出一段空白 —— 实测差 176px。 */
-.card-chat{display:flex;flex-direction:column;min-height:0}
+/* ⚠️ 2026-10-11 修：对话卡**不能**无限跟着右卡长高。
+   .cols 是 align-items:stretch，行高由右侧数据卡的内容决定 ——
+   实验室列表很长，整个网格行被撑到 950px+，对话卡跟着长，
+   于是 composer（含快捷示例和发送按钮）被推到视口外：
+   实测 900px 视口下"发送"不可见，800px 下连输入框都看不见。
+   一个把主操作推出屏幕的布局，无论单看多整齐都是错的。
+
+   办法是给对话卡一个视口相关的上限，让它**自己滚动**而不是长过屏幕。
+   减去的高度：顶栏约 120px + 概览 + 页脚余量，取 210px 留出富余。 */
+/* 上限要按**卡的实际起始位置**算，不能只减顶栏。
+   实测 900px 视口：卡从 239px 开始（顶栏 + 概览 + 外边距），
+   我原来只减 210px → 上限 690px → 卡底 929px，**仍然溢出 29px**。
+   改成 dvh + 减 260px，并把卡内输入区也一起收紧（见下）。 */
+.card-chat{
+  display:flex;flex-direction:column;min-height:0;
+  max-height:calc(100dvh - 260px);
+}
+/* 输入框高度可压缩：原来 min-height:76px 是硬底线，
+   四个控件（示例 / 输入 / 按钮 / 标签）叠加 209px，
+   在 800px 屏幕上把"发送"挤出可视区。
+   降到 60px 并在矮屏进一步降 —— 按钮永远比输入框多几行更重要。 */
+#inp-msg{min-height:60px}
+@media(max-height:820px){
+  #inp-msg{min-height:52px}
+  .msgs{min-height:120px}
+}
+/* 矮屏不再解除上限 —— 那是自相矛盾的：
+   解除上限 = 卡回到被右卡撑高的老路 = 主操作又掉出屏幕。
+   正确做法是继续收紧，让消息区让位。 */
+/* 矮屏的出路不是继续压对话卡，而是**把固定开销收起来**。
+   实测 800px 视口：header 74px + #stats 113px + 外边距 = 卡从 239px 才开始，
+   留给它 561px，而"卡头 54 + 输入区 200 + 消息区下限 180"= 434px 起跳，
+   再算上页面下边距就必然溢出。压输入框只是把问题从一处挪到另一处。
+   概览数字（3 实验室 / 6 设备…）是"看一眼就走"的信息，
+   对话是"一直在用"的 —— 矮屏下让位给后者是唯一合理的取舍。 */
+@media(max-height:800px){
+  #stats{display:none}
+  .card-chat{max-height:calc(100dvh - 150px)}
+}
+@media(max-height:700px){
+  #inp-msg{min-height:44px}
+  .msgs{min-height:88px;max-height:200px}
+  .card-chat{max-height:calc(100dvh - 140px)}
+}
+
 .card-chat>.card-b{display:flex;flex-direction:column;flex:1;min-height:0}
 
 /* ==========================================================================
@@ -305,20 +367,51 @@ header.top{
   display:flex;gap:0;flex-wrap:wrap;align-self:stretch;
 }
 .tabs::-webkit-scrollbar{display:none}
+/* 分段控件：选中态用**块**表达，不用下划线。
+   下划线的问题不是难看，是**重量不够** —— 2px 的线在 6 个并排的标签里
+   几乎看不出光标在哪，而"我现在在哪个面板"恰恰是用户最需要一眼知道的。
+   块面把"已选 / 未选"变成明暗差，扫视成本立刻降下来。 */
+#tabs{
+  display:flex;align-items:center;gap:2px;padding:3px;
+  background:var(--canvas-2);border:1px solid var(--line-soft);
+  border-radius:var(--r);margin:14px 0 0;
+  /* ⚠️ 这里**不能**用 inline-flex：inline-level 盒子的宽度由内容决定，
+     而它的父容器是按"可用宽度 - 其他兄弟"分配的。实测 inline-flex 只拿到
+     439px，内容却有 676px —— 最后两个标签（审计 / 门禁核验）被裁掉，
+     其中"门禁核验"是整个门禁模块的**唯一入口**，等于把功能藏没了。
+     用块级 flex + 让标签可收缩，宽度就跟父容器一致了。 */
+  flex-wrap:nowrap;
+  /* ⚠️ 修宽度不是靠 min-width:0，而是要**明确表达诉求**。
+     父容器 .card-h 里有 5 个兄弟（标题 / #tabs / spacer / 日期 / 更新于），
+     #tabs 只写 min-width:0 就等于"我可以被压到任意小" ——
+     实测被压到 439px（需要 676px），最后两个标签被裁掉。
+     改成 min-width:max-content：按内容宽度要空间，
+     spacer 会先让位；真的不够时才由下面的标签内边距压缩兜底。 */
+  min-width:max-content;flex:0 0 auto;
+}
 .tab{
-  position:relative;padding:0 14px;height:53px;border:0;background:transparent;
+  position:relative;padding:0 11px;height:34px;border:0;background:transparent;
+  border-radius:calc(var(--r) - 3px);
+  flex:0 0 auto;
   font-size:var(--t-sm);font-family:inherit;color:var(--ink-2);cursor:pointer;white-space:nowrap;
-  transition:color .16s var(--ease);
+  transition:color .16s var(--ease),background .16s var(--ease);
 }
-.tab::after{
-  content:"";position:absolute;left:14px;right:14px;bottom:-1px;height:2px;
-  background:var(--ink);border-radius:2px 2px 0 0;
-  transform:scaleX(0);transition:transform .24s var(--ease-out);
+.tab:hover{color:var(--ink);background:var(--surface-2)}
+.tab.on{
+  color:var(--action-ink);font-weight:500;background:var(--action);
+  box-shadow:var(--shadow-1);
 }
-.tab:hover{color:var(--ink)}
-.tab.on{color:var(--ink);font-weight:500}
-.tab.on::after{transform:scaleX(1)}
-.tab:focus-visible{outline:2px solid var(--focus);outline-offset:-4px;border-radius:4px}
+.tab:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+
+/* 计数徽标：待办类标签要能一眼看出"有没有东西等我"。
+   0 或 1 时不喧宾夺主 —— 数字本身小、且跟着标签一起反白。 */
+.tab .n{
+  display:inline-block;margin-left:6px;padding:0 6px;min-width:18px;
+  font-size:var(--t-micro);line-height:16px;text-align:center;
+  font-variant-numeric:tabular-nums;
+  background:var(--surface-3);color:var(--ink-2);border-radius:var(--r-pill);
+}
+.tab.on .n{background:rgba(0,0,0,.14);color:var(--action-ink)}
 
 /* ==========================================================================
    8) 表单 —— 内凹而不是描边：凹槽是"这里可以写"，描边是"这里有个框"
@@ -330,9 +423,19 @@ select,input,textarea{
   transition:background .16s var(--ease), border-color .16s var(--ease), box-shadow .16s var(--ease);
 }
 select:hover,input:hover,textarea:hover{background:var(--surface-3)}
+/* 聚焦态：三重信号，缺一不可。
+   实测（真实键盘 Tab 走一遍登录页）：原来只有 border-color + 一层
+   rgba(143,180,217,.12) 的浅蓝光晕 —— 在 #fbfbfa 的浅色底上，
+   它和未聚焦态几乎分不出来。第 2、3 跳（用户名 / 密码）被判为"看不见焦点"，
+   也就是说**键盘用户登不了录**：他不知道自己在哪个框里打字。
+   多加 outline 是刻意的 —— 它画在盒子**外面**，不会被 overflow 裁掉，
+   也不受边框圆角影响，是唯一"任何底色上都必然可见"的手段。 */
 select:focus,input:focus,textarea:focus{
-  background:var(--surface);border-color:var(--focus);
-  box-shadow:0 0 0 3px var(--accent-soft);
+  background:var(--surface);
+  border-color:var(--focus);
+  outline:2px solid var(--focus);
+  outline-offset:2px;
+  box-shadow:0 0 0 4px var(--accent-soft);
 }
 select{
   appearance:none;padding-right:34px;cursor:pointer;
@@ -387,11 +490,15 @@ label.f{display:block;margin:0 0 6px;font-size:var(--t-micro)}
    原来 label(.f) + textarea + .hint + 按钮行 + 快捷 pill 五行纵向堆叠，
    占了整张卡 47% 的高度。现在标签缩小并右对齐到同一行，提示移到
    按钮行右侧 —— 同样的信息，少掉两行的高度。 */
-.composer{margin-top:18px;padding-top:16px;border-top:1px solid var(--line-soft)}
+/* 输入区整体收紧：原来 margin-top:18 + padding-top:16 + 内部若干
+   margin 叠加，实测 .composer 高 214px —— 它把"快捷示例"顶到了
+   视口外（top=921px / 视口 900px）。对话才是主体，
+   输入区不该比消息区还抢眼。 */
+.composer{margin-top:14px;padding-top:14px;border-top:1px solid var(--line-soft)}
 .composer-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:6px}
 .composer-head .f{margin:0}
 .composer-head .hint{margin:0;text-align:right;flex:1;min-width:0}
-.composer-act{display:flex;gap:8px;align-items:center;margin-top:10px}
+.composer-act{display:flex;gap:8px;align-items:center;margin-top:9px}
 .msgs{
   display:flex;flex-direction:column;gap:16px;
   /* 让消息区**吃掉卡内剩余高度**：flex:1 才有资格长高，
@@ -425,7 +532,9 @@ label.f{display:block;margin:0 0 6px;font-size:var(--t-micro)}
 .msg.err .bub{background:var(--bad-bg);color:var(--bad-ink)}
 @keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 
-.pill-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px}
+/* 默认用于输入区上方的快捷示例；下间距而非上间距，
+   因为它现在紧跟在"你来说"标签下面、输入框上面。 */
+.pill-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:2px;margin-bottom:10px}
 .pill-row .btn.sm{font-size:var(--t-xs)}
 
 /* 备选方案卡片 —— 整个项目的门面。
@@ -479,9 +588,17 @@ th{
   text-transform:uppercase;white-space:nowrap;border-bottom:1px solid var(--line);
 }
 td{border-bottom:1px solid var(--line-soft)}
+/* 斑马纹：设备表有 6+ 行、每行 5 列，只靠 --line-soft 的分隔线
+   在浅色底上几乎看不见，横向读一行很容易串到下一行。
+   交替底把"一行"变成可追踪的横带 —— 这是长表格的标准解法，
+   比加竖线或加粗边框都轻。 */
 tbody tr{transition:background .14s var(--ease)}
+tbody tr:nth-child(even){background:var(--canvas-2)}
 tbody tr:hover{background:var(--surface-2)}
 tbody tr:last-child td{border-bottom:none}
+/* 表格第一列（编号）用等宽体对齐：SPEC-F7000 / SPEC-UV1900 这类
+   编号长度不一，比例字体下左边缘会参差。 */
+tbody td:first-child{font-family:var(--font-mono);font-size:var(--t-sm);color:var(--ink-2)}
 td .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
 
 /* ==========================================================================
@@ -946,6 +1063,23 @@ body.busy header.top::after{opacity:.9; animation:sweep 1.6s var(--ease) infinit
      这是 grid 的经典陷阱：轨道能收缩的前提是下限写死为 0。 */
   .cols{grid-template-columns:minmax(0,1fr)}
   .msgs{max-height:340px}
+  /* 标签栏在这里**必须**允许换行。
+     上面给 #tabs 写了 min-width:max-content —— 那是宽屏下的正确取舍
+     （宁可让日期让位，也不能裁掉标签；"门禁核验"是整个门禁模块的
+     唯一入口，裁掉它等于把功能藏没了）。但窄屏没有"可以让位"的兄弟：
+     容器本身就比内容窄，于是最后几个标签被裁在盒子里。
+     实测 420px 视口：容器 658px、屏幕 420px，后 3 个标签完全不可见。
+     换行牺牲的是卡片头高度（53 → 约 78px），换来标签全部可达 ——
+     对单栏窄屏这是明显划算的交易。 */
+  /* ⚠️ 两层都要改，只改 #tabs 没用。
+     #tabs 是 .card-h 的 flex 子项，.card-h 自己是 flex-wrap:nowrap ——
+     父容器不允许换行时，子项写 flex-wrap:wrap 也换不了：
+     实测 420px 视口，.card-h 宽 382px，而 #tabs 仍被撑到 658px
+     （子项比父项宽 276px），标签照样裁在盒子里。
+     必须让 .card-h 先允许换行，把 #tabs 放下来独占一行。 */
+  .card-h{flex-wrap:wrap;row-gap:8px}
+  #tabs{flex-wrap:wrap;min-width:0;flex:1 1 100%;justify-content:flex-start}
+  .tab{flex:0 0 auto;overflow:visible;text-overflow:clip}
   /* 四个读数改成两行两列，比挤成一条好读。
      列数固定了，所以"第二行第一格没有左线、第二行有上边线"是确定的事实。 */
   .stats{grid-template-columns:1fr 1fr}
@@ -1004,3 +1138,29 @@ body.busy header.top::after{opacity:.9; animation:sweep 1.6s var(--ease) infinit
   transition:transform .18s var(--ease-out);
 }
 .skip:focus,.skip:focus-visible{transform:none}
+
+/* 内联文字链接的焦点环：浏览器默认的 outline:auto 是 1px 单线，
+   在浅色底上细到几乎看不见（实测"注册一个"那一跳被判为不可见）。
+   文字链接没有边框可以变色，所以 outline 是它**唯一**的焦点信号，
+   必须给足厚度和偏移。 */
+a:focus-visible,button:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+
+/* ══════════════════════════════════════════════════════════════════════
+   矮屏收尾（必须放在**文件最后**）
+   ══════════════════════════════════════════════════════════════════════
+   这些规则要覆盖 .msgs{min-height:180px} 这类主规则。CSS 在同优先级下
+   由**出现顺序**决定胜负 —— 写在主规则之前等于没写（实测 560px 视口
+   消息区仍是 180px，因为主规则在它后面）。所以统一收在文件末尾。 */
+@media(max-height:620px){
+  .msgs{min-height:96px;max-height:180px}
+}
+@media(max-height:600px){
+  .msgs{min-height:76px;max-height:150px}
+  .composer{margin-top:10px;padding-top:10px}
+  .composer-head{display:none}
+  .card-chat{max-height:calc(100dvh - 120px)}
+}
+@media(max-height:540px){
+  .msgs{min-height:60px;max-height:120px}
+  .card-chat{max-height:calc(100dvh - 112px)}
+}
