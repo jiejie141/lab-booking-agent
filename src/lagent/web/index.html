@@ -226,6 +226,10 @@
         <div class="spacer"></div>
         <!-- 数据新鲜度落点。原来它被 append 进卡片标题的 <h2> 里，
              改版后那个 h2 是给读屏用的（视觉隐藏），时间戳会跟着一起消失。 -->
+        <!-- 「今天」取自服务端 /api/today，不用 new Date()：
+             服务端可以钉住 LAB_FAKE_NOW（演示与测试都会），
+             前端自己算就会和库里、日志里显示的日期对不上。 -->
+        <span class="stamp" id="today-line" title="服务端当前日期与星期（取自 /api/today）"></span>
         <span class="stamp" id="data-stamp"></span>
       </div>
 
@@ -290,6 +294,15 @@
           </div>
           <div class="hint">检索《实验室准入与设备使用规范》，命中会标注由哪几路召回。</div>
           <div id="kb-box"></div>
+
+          <!-- Agent 工具清单（GET /api/tools）。放在这里是因为它回答的是
+               同一个问题：检索能看到"规范里写了什么"，这份清单能看到
+               "Agent 到底能动手做什么"。之前后端有接口、前端一直没接 ——
+               于是这块能力在界面上等于不存在。 -->
+          <div class="filters" style="margin-top:14px">
+            <button class="btn ghost sm" id="tools-toggle">显示 Agent 工具清单</button>
+          </div>
+          <div id="tools-box" hidden></div>
         </div>
 
         <!-- 管理员专属：普通用户拿到的是 403，该标签页根本不会出现 -->
@@ -329,6 +342,10 @@
           <div class="filters">
             <select id="notif-user"></select>
             <button class="btn ghost sm" id="notif-refresh">刷新</button>
+            <!-- 重投：把"发失败/卡住"的通知放回待发队列。默认没配 SMTP 时
+                 这条链路是断的，所以更需要一个能当场重试的入口 ——
+                 否则用户只能看着 failed 计数干等下一次清扫。 -->
+            <button class="btn ghost sm" id="notif-retry">重投失败通知</button>
           </div>
           <div id="notif-box"></div>
         </div>

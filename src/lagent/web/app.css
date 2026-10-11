@@ -160,6 +160,7 @@ a{color:inherit}
 :lang(zh) .k,:lang(zh) .card-t,:lang(zh) .trace-h,:lang(zh) label.f{letter-spacing:.04em}
 .card-t{margin:0}
 .stamp{margin:0}
+#today-line:not(:empty) + #data-stamp:not(:empty){padding-left:12px;border-left:1px solid var(--line);margin-left:12px}
 
 /* ==========================================================================
    3) 顶栏 —— 悬浮工具条，不贴边
@@ -539,6 +540,38 @@ td .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
 }
 .toast.err{border-left-color:var(--bad-ink)}
 .toast.ok{border-left-color:var(--ok-ink)}
+
+/* 对话框（2026-10-11）：替代浏览器原生 alert/confirm/prompt。
+   刻意贴着 .toast 放 —— 两者是同一层"临时覆盖层"，分开放会让人以为
+   其中一个不存在。z-index 比 .toast(95) 高：对话框必须盖住提示。 */
+.dlg-back{
+  position:fixed;inset:0;z-index:98;background:rgba(0,0,0,.34);
+  display:grid;place-items:center;padding:24px;
+  animation:enter .16s var(--ease-out) both;
+}
+.dlg{
+  background:var(--surface);border:1px solid var(--line);
+  border-radius:var(--r-sm);box-shadow:var(--shadow-2);
+  padding:20px 22px;width:min(420px,100%);
+  animation:rise .22s var(--ease-out) both;
+}
+.dlg-t{font-size:var(--t-lg);color:var(--ink);margin-bottom:6px}
+.dlg-b{font-size:var(--t-base);color:var(--ink-2);line-height:1.65;margin-bottom:14px}
+.dlg-i{
+  width:100%;box-sizing:border-box;margin-bottom:14px;padding:9px 11px;
+  background:var(--canvas);border:1px solid var(--line);border-radius:var(--r-sm);
+  color:var(--ink);font:inherit;font-size:var(--t-base);
+}
+.dlg-i:focus{outline:none;border-color:var(--ink-3)}
+.dlg-a{display:flex;gap:8px;justify-content:flex-end}
+/* 只有一个按钮时（alert 形态）不该左对齐吊在一边。 */
+.dlg-a .btn:first-child:last-child{margin-left:auto}
+
+/* 危险动作（推翻判定这类）：用项目既有的 --bad-* 令牌。
+   注意按钮**默认**仍是墨色（见 .btn 用 --action）—— 只有真正不可逆的
+   动作才染红，否则红色会因为到处出现而失去"停下来看一眼"的作用。 */
+.btn.danger{background:var(--bad-ink);border-color:var(--bad-ink);color:var(--canvas)}
+.btn.danger:hover{background:color-mix(in srgb,var(--bad-ink) 86%,var(--canvas));border-color:color-mix(in srgb,var(--bad-ink) 86%,var(--canvas))}
 
 /* ==========================================================================
    15) 登录闸门

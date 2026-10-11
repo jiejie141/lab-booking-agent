@@ -41,6 +41,103 @@ function toast(msg,kind){
   $("#toasts").appendChild(el);
   setTimeout(()=>{el.style.opacity="0";setTimeout(()=>el.remove(),260);},3400);
 }
+/* ---------- 对话原语（替代浏览器原生 alert/confirm/prompt）----------
+   ★ 为什么不用原生弹窗（2026-10-11 换掉）：
+     1) 原生 confirm/prompt 是**阻塞**的，会冻住整个渲染线程；
+     2) 样式完全不受控 —— 项目已经有一套深浅色主题，原生弹窗是系统外观，
+        在深色页面上弹出一个浅色方框，割裂感很强；
+     3) ★ 最实际的一条：**自动化里会被静默吞掉**。Playwright 默认自动
+        取消所有弹窗，于是"点了按钮没反应"—— 我在实测门禁时就被这个
+        骗过一次，查了半天以为是按钮没绑事件，其实是 confirm 返回了 false。
+        换成自己的对话框后，"有没有弹出来"可以被断言。
+
+   这里刻意只做一个原语（askDialog），三种形态都是它的参数组合，
+   而不是 alert/confirm/prompt 三个函数 —— 三种函数会各自长出一套样式。
+   它返回 Promise：confirm 形态给 true/false，prompt 形态给字符串或 null。
+   所以调用点要 await，这正是我们想要的：阻塞式弹窗本来就该改成异步。
+*/
+function askDialog(o){
+  o = o || {};
+  const isPrompt = o.input === true;
+  return new Promise((resolve) => {
+    const back = document.createElement("div");
+    back.className = "dlg-back";
+    const card = document.createElement("div");
+    card.className = "dlg";
+    card.setAttribute("role","dialog");
+    card.setAttribute("aria-modal","true");
+
+    const title = document.createElement("div");
+    title.className = "dlg-t";
+    title.textContent = o.title || "确认";
+    card.appendChild(title);
+
+    if(o.body){
+      const body = document.createElement("div");
+      body.className = "dlg-b";
+      body.textContent = o.body;
+      card.appendChild(body);
+    }
+
+    let input = null;
+    if(isPrompt){
+      input = document.createElement("input");
+      input.className = "dlg-i";
+      input.type = "text";
+      input.value = o.value || "";
+      if(o.placeholder) input.placeholder = o.placeholder;
+      card.appendChild(input);
+    }
+
+    const row = document.createElement("div");
+    row.className = "dlg-a";
+    const no = document.createElement("button");
+    no.className = "btn ghost";
+    no.id = "dlg-no";
+    no.textContent = o.cancelText || "取消";
+    const yes = document.createElement("button");
+    yes.className = "btn" + (o.danger ? " danger" : "");
+    yes.id = "dlg-yes";
+    yes.textContent = o.okText || "确认";
+    row.appendChild(no); row.appendChild(yes);
+    card.appendChild(row);
+    back.appendChild(card);
+    document.body.appendChild(back);
+
+    // 焦点落在哪里：prompt 落在输入框（进来就能打字），
+    // 其余落在确认键 —— 键盘用户不该为了按一次回车先去 Tab。
+    (isPrompt && input ? input : yes).focus();
+    if(isPrompt && input) input.select();
+
+    let done = false;
+    function close(val){
+      if(done) return;
+      done = true;
+      document.removeEventListener("keydown", onKey, true);
+      back.remove();
+      resolve(val);
+    }
+    function onKey(e){
+      if(e.key === "Escape"){ e.preventDefault(); close(isPrompt ? null : false); }
+      else if(e.key === "Enter" && (e.target === input || e.target === yes || !isPrompt)){
+        e.preventDefault(); close(isPrompt ? input.value : true);
+      }
+    }
+    document.addEventListener("keydown", onKey, true);
+    yes.addEventListener("click", () => close(isPrompt ? input.value : true));
+    no.addEventListener("click", () => close(isPrompt ? null : false));
+    // 点遮罩 = 取消。但只在点到遮罩**本身**时生效：
+    // 点到卡片内部会冒泡上来，不判断的话在输入框里拖选文字也会关掉弹窗。
+    back.addEventListener("click", (e) => { if(e.target === back) close(isPrompt ? null : false); });
+  });
+}
+
+/* 三种形态的便捷包装。名字保持 alert/confirm 的语义，
+   这样替换调用点时一眼能看出原来是什么。 */
+function alertBox(title, body){ return askDialog({title: title, body: body, okText: "知道了", cancelText: null}); }
+function confirmBox(title, body, o){ return askDialog(Object.assign({title: title, body: body}, o||{})); }
+function promptBox(title, value, o){ return askDialog(Object.assign({title: title, input: true, value: value}, o||{})); }
+
 async function apiFull(path,opts){
   const o=Object.assign({},opts||{});
   // ★ 在这里统一 stringify，而不是要求每个调用点自己记得。
@@ -250,7 +347,8 @@ function renderIdentity(){
 
 async function enterApp(){
   renderIdentity();
-  await Promise.all([loadLabs(), loadUserDirectory()]);
+  // 与其它面板并行拉，不占串行时间。
+  await Promise.all([loadLabs(), loadUserDirectory(), loadToday()]);
   fillBookingOptions();   // 设备下拉依赖 loadLabs 填好的 state.equipment
   // 管理员专属标签：非管理员一律保持 hidden。
   // ⚠️ 这只是"不显示无权限的控件"，**真正的边界在服务端** ——
@@ -453,13 +551,22 @@ async function loadApprovals(){
 async function batchReview(approve){
   const box = $("#appr-box");
   const ids = $$(".b-pick", box).filter(c=>c.checked).map(c=>Number(c.value));
-  if(!ids.length){ alert("先勾选要处理的申请"); return; }
+  if(!ids.length){ alertBox("还没选申请","先勾选要处理的申请。"); return; }
   let reason = "";
-  if(!approve){
-    reason = window.prompt("驳回理由（会记进审计，可留空）","") || "";
-  }
   const verb = approve ? "通过" : "驳回";
-  if(!confirm(`确认${verb}这 ${ids.length} 条申请？`)) return;
+  if(!approve){
+    // 驳回理由：会进驳回消息与审计，可留空。
+    // 留空与"取消"是**两件事** —— 所以这里是 prompt 不是 confirm：
+    // 取消（返回 null）应当整个流程停住，而不是当成"没写理由"继续驳回。
+    const r = await promptBox("驳回这 " + ids.length + " 条申请", "", {
+      body: "理由会记进审计，可以留空。",
+      okText: "驳回", danger: true,
+    });
+    if(r === null) return;
+    reason = r;
+  } else {
+    if(!(await confirmBox("通过这 " + ids.length + " 条申请？", ""))) return;
+  }
   const hint = $("#b-hint"); hint.textContent = "处理中…";
   try{
     const r = await api("/api/reservations/batch-review", {
@@ -471,7 +578,9 @@ async function batchReview(approve){
       msg += `，失败 ${r.failed.length} 条：` + r.failed.map(f=>`#${f.id} ${f.reason}`).join("；");
     }
     hint.textContent = msg;
-    if(r.failed && r.failed.length) alert(msg);
+    // 有失败项才额外弹一次：toast 会自己消失，而"哪几条没批成功"
+    // 是管理员需要照着处理的，不该一闪而过。
+    if(r.failed && r.failed.length) alertBox("部分未处理", msg);
     await loadApprovals();
     toast && toast(msg);
   }catch(e){ hint.textContent = "失败：" + e.message; }
@@ -481,10 +590,16 @@ async function review(btn,kind){
   const id=btn.getAttribute(kind==="approve"?"data-approve":"data-reject");
   let body=null;
   if(kind==="reject"){
-    // 用一个原生 prompt 而不是自建模态框：这里只有一个输入框，
-    // 为它引一套组件不划算。理由会进驳回消息与审计。
-    const reason=(window.prompt("驳回理由（会记进审计，可留空）","")||"");
-    body=JSON.stringify({reason});
+    // 理由会进驳回消息与审计，可留空。
+    // 原来这里用的是原生 prompt，注释写"只有一个输入框，引一套组件不划算"——
+    // 那个判断在当时是对的。现在是第 7 个原生弹窗了，一个共享原语显然更划算；
+    // 而且原生 prompt 在深色页面上弹出一个系统浅色框，观感是割裂的。
+    const r = await promptBox("驳回 #" + id, "", {
+      body: "理由会记进审计，可以留空。",
+      okText: "驳回", danger: true,
+    });
+    if(r === null) return;   // 取消 = 什么也不做，不是"以空理由驳回"
+    body=JSON.stringify({reason:r});
   }
   btn.disabled=true; const old=btn.textContent; btn.textContent="…";
   try{
@@ -538,7 +653,10 @@ async function loadViolations(){
       const id=b.getAttribute("data-pardon");
       // 豁免接口**不收理由**，所以这里不去假装收集一个 —— 收一个不会被记录的
       // 理由，比不收更糟：它会让管理员以为"我写过原因了"。
-      if(!window.confirm("确认推翻 #"+id+" 的未到场判定？判定本身会保留（标记为已豁免）。")) return;
+      const ok = await confirmBox("推翻 #" + id + " 的未到场判定？",
+        "判定本身会保留，只是标记为已豁免。",
+        { okText: "豁免", danger: true });
+      if(!ok) return;
       b.disabled=true;
       try{
         await api(`/api/reservations/${id}/pardon`,{method:"POST"});
@@ -988,16 +1106,27 @@ async function loadReservations(){
     // 改期：走 PATCH（**一个事务**里换坑），不是"取消再重约"。
     // 后者在新旧时段之间有个窗口，别人一抢就两头落空 —— 界面上必须给出
     // 真正的改期入口，否则用户只能自己那么干。
-    $$("[data-move]",box).forEach(b=>b.addEventListener("click",()=>{
+    $$("[data-move]",box).forEach(b=>b.addEventListener("click",async()=>{
       const id=b.getAttribute("data-move");
       const row=rows.find(x=>String(x.id)===String(id));
-      const raw=window.prompt(
-        "新的时段（HH:MM-HH:MM）", (row&&row.slot?String(row.slot).slice(-13):"")
-      );
-      if(!raw) return;
-      const parts=String(raw).split(/[-–—～~]/).map(s=>s.trim());
-      if(parts.length!==2 || !/^\d{2}:\d{2}$/.test(parts[0]) || !/^\d{2}:\d{2}$/.test(parts[1])){
-        toast("格式不对，请写成 14:00-16:00","err"); return;
+      // 预填当前时段，让人改的是"哪一段"而不是从头敲。
+      // 原来的原生 prompt 只在**第一次**打开时预填，且带一个前导空格
+      // （slice(-13) 切的是" 09:00-10:00"）—— 换成自己的框顺手修掉。
+      const cur = row && row.slot ? String(row.slot).replace(/^\s+|[\s]+$/g,"").slice(-11) : "";
+      let value = cur;
+      // 格式不对时**重新弹一次**并说明原因，而不是弹个 toast 让它消失：
+      // 用户当下正盯着输入框，把错误放在原地才有用。
+      let parts = null;
+      for(;;){
+        const raw = await promptBox("改期 #" + id, value, {
+          body: "新的时段，格式 HH:MM-HH:MM" + (cur ? "（原 " + cur + "）" : ""),
+          placeholder: "14:00-16:00",
+          okText: "改期",
+        });
+        if(raw === null) return;          // 取消 = 不改
+        parts = String(raw).split(/[-–—～~]/).map(t=>t.trim());
+        if(parts.length===2 && /^\d{2}:\d{2}$/.test(parts[0]) && /^\d{2}:\d{2}$/.test(parts[1])) break;
+        value = raw;                      // 保留用户敲的内容，别让他重打
       }
       b.disabled=true; const old=b.textContent; b.textContent="…";
       api(`/api/reservations/${id}`,{method:"PATCH",body:JSON.stringify({
@@ -1402,6 +1531,69 @@ $$("#tabs .tab").forEach(tab=>tab.addEventListener("click",()=>{
 }));
 $("#viol-refresh") && $("#viol-refresh").addEventListener("click",loadViolations);
 $("#notif-refresh") && $("#notif-refresh").addEventListener("click",loadNotifications);
+// Agent 工具清单（GET /api/tools）。按需加载：这份清单不长，但它是"看一眼"的
+// 内容，不该在每次打开控制台时都请求一次。加载过一次就缓存住。
+let toolsLoaded = false;
+$("#tools-toggle") && $("#tools-toggle").addEventListener("click",async e=>{
+  const box=$("#tools-box"); if(!box) return;
+  const showing=!box.hidden;
+  if(showing){ box.hidden=true; e.target.textContent="显示 Agent 工具清单"; return; }
+  e.target.textContent="隐藏 Agent 工具清单";
+  box.hidden=false;
+  if(toolsLoaded) return;
+  box.innerHTML='<div class="skel sk-row"></div>';
+  try{
+    const r=await api("/api/tools");
+    const list=r.tools||[];
+    toolsLoaded=true;
+    box.innerHTML = list.length
+      ? '<div class="note" style="margin-top:10px">共 '+list.length+' 个工具。'
+        + '带「写操作」标记的会改变数据，Agent 执行前需要用户确认。</div>'
+        + list.map(t=>'<div class="card" style="margin-top:8px">'
+          + '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+          + '<span class="mono">'+esc(t.name)+'</span>'
+          + '<span class="tag '+(t.side_effect?"warn":"")+'">'
+          + (t.side_effect?"写操作":"只读")+'</span></div>'
+          + '<div class="note" style="margin-top:6px">'+esc(t.description||"")+'</div>'
+          + (t.params && Object.keys(t.params).length
+              ? '<div class="note mono" style="margin-top:6px">'
+                + Object.keys(t.params).map(k=>esc(k)).join(" · ")+'</div>'
+              : '')
+          + '</div>').join("")
+      : '<div class="empty">没有已注册的工具</div>';
+  }catch(err){
+    e.target.textContent="显示 Agent 工具清单"; box.hidden=true;
+    toast("工具清单加载失败：" + err.message,"err");
+  }
+});
+// 重投失败通知。接口只做"放回队列"，真正的投递要靠后台清扫或 main.py notify，
+// 所以返回的 requeued 数是"回了几条"，不是"发出去几条" —— 提示必须说清这点，
+// 否则用户会以为已经送达了。
+$("#notif-retry") && $("#notif-retry").addEventListener("click",async e=>{
+  const btn=e.target; btn.disabled=true; const oldTxt=btn.textContent; btn.textContent="重投中…";
+  try{
+    const r=await api("/api/notifications/retry",{method:"POST",body:{}});
+    const n=r.requeued||0;
+    toast(n? ("已放回 " + n + " 条，等待下次投递") : "没有需要重投的通知", n?"ok":"");
+    if(n) loadNotifications(), loadHealth();
+  }catch(err){ toast("重投失败：" + err.message,"err"); }
+  finally{ btn.disabled=false; btn.textContent=oldTxt; }
+});
+/* 「今天」：后端已有一个 /api/today（日期/时间/星期/明天），前端一直没接。',
+   它不只是装饰 —— 页面上的"今天"必须和服务端时钟一致：服务端可以钉住
+   LAB_FAKE_NOW（演示与测试都会），前端用 new Date() 自己算就会和库里、
+   日志里显示的日期对不上。
+   ⚠️ 必须放在**认证之后**调用。第一版把它写成模块顶层的 IIFE，
+   结果它在登录前就发了请求、拿回 401（实测 HTTP401 /today）——
+   右上角一直是空的。 */
+async function loadToday(){
+  const el=$("#today-line"); if(!el) return;
+  try{
+    const t=await api("/api/today");
+    el.textContent = t.date + " " + t.weekday + " " + t.time;
+    el.title = "明天 " + t.tomorrow + "（服务端日期，取自 /api/today）";
+  }catch(e){ el.textContent=""; }
+}
 $("#audit-refresh") && $("#audit-refresh").addEventListener("click",loadAudit);
 $("#audit-action") && $("#audit-action").addEventListener("keydown",e=>{ if(e.key==="Enter") loadAudit(); });
 $("#gate-verify") && $("#gate-verify").addEventListener("click",gateVerify);
