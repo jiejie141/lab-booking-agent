@@ -1088,6 +1088,11 @@ async function send(message,accept){
   state.abort = ctl;
   const stopBtn = $("#btn-stop");
   if(stopBtn) stopBtn.hidden = false;
+  // 同时给 body 打一个 busy 标记：顶上那条扫描线由**这里**驱动，
+  // 而不是一个常驻循环动画。理由与扫描线本身一样 ——
+  // 动画要说的是"Agent 正在工作"，那它就必须真的只在工作时出现。
+  // 常驻的扫描线会被读成"页面在加载"，那是谎话。
+  document.body.classList.add("busy");
 
   try{
     let lastNode = "";
@@ -1142,6 +1147,9 @@ async function send(message,accept){
     state.busy=false; $("#btn-send").disabled=false;
     state.abort = null;
     if(stopBtn) stopBtn.hidden = true;
+    // 放在 finally 里：成功、用户中断、报错三条路径都必须撤销 busy，
+    // 否则扫描线会一直挂着 —— "停在处理中"比"没有动画"更糟。
+    document.body.classList.remove("busy");
   }
 }
 

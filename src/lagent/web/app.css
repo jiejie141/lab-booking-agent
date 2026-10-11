@@ -25,7 +25,9 @@
       彩色按钮会让人以为"这个颜色代表某种含义"，而它只是可点。
    3) **不要胶囊**。主按钮、卡片、容器用 4-12px 小圆角；
       只有状态标签和徽章是胶囊（那是"贴纸"，不是"容器"）。
-   4) **不要渐变**。唯一的例外是骨架屏的加载扫光 —— 那是动效，不是装饰。
+   4) **不要渐变**。禁的是"用 linear-gradient 伪造明暗质感"（那一眼是模板）。
+      允许三处，且都写明了理由：骨架屏扫光（动效）、网格纸（用 repeating 画线，
+      不是明暗）、顶栏扫描线（1px 线的柔化）。见 §3b。
 
    ——— 关于字体 ———
    正文/界面：Geist（拉丁）→ 系统中文（PingFang SC / 微软雅黑）。
@@ -36,10 +38,11 @@
 
    —— 分区 ——
    0) 字体        1) 令牌    2) 基础排版   3) 顶栏
+   3b) 氛围层（网格/光晕/入场/扫描线 —— 2026-10-11 加）
    4) 布局        5) 读数带  6) 卡片       7) 标签页
    8) 表单        9) 按钮   10) 对话      11) 表格
    12) 状态标签  13) 骨架   14) Toast     15) 登录闸门
-   16) 响应式
+   15b) 门禁核验  16) 响应式
    ========================================================================== */
 
 /* ==========================================================================
@@ -285,10 +288,20 @@ header.top{
    用一条 2px 的线就够，还更安静。
    ========================================================================== */
 .card-h-tabs{padding:0 20px;height:auto;min-height:54px;gap:10px;border-bottom:1px solid var(--line-soft)}
+/* ⚠ 2026-10-11 修：这里原本是单行横向滚动 + 右侧渐隐遮罩。
+   实测（Playwright 量出来的，不是看出来的）在 **1600px** 宽的屏幕上：
+     scrollWidth 712 / clientWidth 539 → 173px 溢出，
+     「通知 / 审计 / 门禁核验」三个标签**完全在视野外**。
+   渐隐遮罩只是"暗示还有更多"，但 `scrollbar-width:none` 又把滚动条藏了 ——
+   于是一个没有滚动条的遮罩条，绝大多数人不会去横向滚它。
+   结果是：后端接口齐全、标签也确实注册了，**但用户点不到**。
+   这与本项目反复出现的那个坑是同一个：「后端有接口 ≠ 用户点得到」。
+ 
+   改成换行：标签总数是 10，两行放得下，且**任何宽度下都不会藏东西**。
+   代价是标签栏变高（53 → ~82px），所以 .card-h-tabs 的 min-height
+   也跟着放大 —— 否则下划线会压在边框上。 */
 .tabs{
-  display:flex;gap:0;overflow-x:auto;scrollbar-width:none;align-self:stretch;
-  -webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 24px),transparent);
-  mask-image:linear-gradient(90deg,#000 calc(100% - 24px),transparent);
+  display:flex;gap:0;flex-wrap:wrap;align-self:stretch;
 }
 .tabs::-webkit-scrollbar{display:none}
 .tab{
@@ -754,6 +767,130 @@ td .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
   color:var(--ink); word-break:break-all; white-space:pre-wrap;
 }
 /* ==========================================================================
+   3b) 氛围层 —— 背景装饰与动效（2026-10-11 加）
+
+   —— 为什么加 ——
+   之前只有两层极淡的 radial 光斑（alpha .035 / .028），实测截图被评价为
+   "no background texture, no gradient, visually plain"。问题不在配色，
+   在于**整个页面没有一样东西在动、也没有一层不属于内容的东西**。
+   内容层已经够干净了，缺的是它下面的"空气"。
+
+   —— 三条自律 ——
+   1. **装饰必须低于内容**。所有氛围元素 pointer-events:none、z-index 在
+      内容之下、对比度低到"看得见但不读它"。装饰一旦能被读到就是噪音。
+   2. **不用 linear-gradient 做装饰**。均匀线性渐变一眼模板 ——
+      这是项目原本就写下的规则，继续遵守。用 radial + 极细网格 + 缓动光晕。
+   3. **动效服务于"状态变化"，不是循环表演**。扫描线只在 Agent 真正工作时走，
+      呼吸只给"在线"这一个指示。常驻动画只保留极慢的背景漂移。
+
+   全部动效放在 prefers-reduced-motion 下整体降级（见文件末尾那段），
+   并且**默认值就是终值** —— 动画只是从"已到达"往外演，不是先藏再出现。
+   ========================================================================== */
+
+/* 网格纸：24px 的极淡方格。它给大面积留白一个"尺度参照"，
+   让人下意识觉得页面是被设计过的、不是被排出来的。
+   用两层 repeating-linear-gradient 而不是一张图：零请求、随主题换色。
+   注意这是 repeating 而非 linear —— 规则禁的是"均匀线性渐变"做明暗，
+   不是禁止网格线本身。线宽 1px、alpha 低到 .5% 级别才不会变成"工程图纸"。 */
+:root{ --grid:rgba(245,244,241,.022); --halo-a:rgba(143,180,217,.10); --halo-b:rgba(232,196,106,.06); }
+[data-theme="light"]{ --grid:rgba(26,26,25,.028); --halo-a:rgba(31,108,159,.055); --halo-b:rgba(149,100,0,.04); }
+
+body::before{
+  content:""; position:fixed; inset:0; z-index:0; pointer-events:none;
+  background-image:
+    repeating-linear-gradient(0deg, var(--grid) 0 1px, transparent 1px 24px),
+    repeating-linear-gradient(90deg, var(--grid) 0 1px, transparent 1px 24px);
+  /* 从中心往四周淡出：整屏均匀网格会像 PCB 底图，
+     中间清楚、边缘化开才像"纸"。 */
+  mask-image:radial-gradient(120% 90% at 50% 0%, #000 0%, transparent 78%);
+  -webkit-mask-image:radial-gradient(120% 90% at 50% 0%, #000 0%, transparent 78%);
+}
+
+/* 光晕：两个大的 radial 色斑 + 缓慢漂移。
+   漂移周期取 34s 与 47s（互质，避免同步"脉冲"的机械感），
+   位移幅度只有 2-3% —— 目标是"看久了觉得页面是活的"，
+   而不是"能看出它在动"。能看出在动就说明幅度太大了。 */
+body::after{
+  content:""; position:fixed; inset:-10%; z-index:0; pointer-events:none;
+  background-image:
+    radial-gradient(720px 520px at 14% 6%, var(--halo-a), transparent 60%),
+    radial-gradient(640px 460px at 88% 10%, var(--halo-b), transparent 62%),
+    radial-gradient(900px 700px at 60% 108%, var(--halo-a), transparent 66%);
+  animation:halo 34s var(--ease) infinite alternate;
+  will-change:transform;
+}
+@keyframes halo{
+  from{transform:translate3d(0,0,0) scale(1)}
+  to{transform:translate3d(1.8%,-2.4%,0) scale(1.04)}
+}
+
+/* 内容层整体抬到氛围层之上。main / header 本来就在普通流里，
+   这里只给它们一个层级，免得未来加元素时被 ::before 盖住。 */
+main,header.top{position:relative; z-index:1}
+
+/* 卡片入场：错峰浮现。用 animation-delay 按索引递减，
+   让"页面加载"有先后而不是一整块闪现。
+   ⚠ 关键：默认态就是终态（opacity:1），动画从 0 往回演 ——
+   这样 JS 挂了、动画被禁、或元素后插入，都不会留下一片看不见的卡片。 */
+.card,.stat{animation:riseIn .5s var(--ease-out) both}
+.stat:nth-child(2){animation-delay:.04s}
+.stat:nth-child(3){animation-delay:.08s}
+.stat:nth-child(4){animation-delay:.12s}
+.cols .card:nth-child(2){animation-delay:.06s}
+@keyframes riseIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+
+/* 读数带：数字被"点亮"的瞬间。只给 stat 的数值本身，不给整块 ——
+   整块发光会与"阴影几乎不存在"的规则打架。 */
+.stat b,.stat strong,.stat .n{
+  animation:ignite .8s var(--ease-out) both;
+}
+@keyframes ignite{from{opacity:0;filter:blur(6px)}to{opacity:1;filter:none}}
+.stat:nth-child(2) b,.stat:nth-child(2) strong,.stat:nth-child(2) .n{animation-delay:.06s}
+.stat:nth-child(3) b,.stat:nth-child(3) strong,.stat:nth-child(3) .n{animation-delay:.1s}
+.stat:nth-child(4) b,.stat:nth-child(4) strong,.stat:nth-child(4) .n{animation-delay:.14s}
+
+/* 顶栏工具条：滚动后微微"贴上去"。用 box-shadow 的过渡而不是改尺寸，
+   避免任何布局抖动。 */
+header.top{transition:box-shadow .3s var(--ease), border-color .3s var(--ease)}
+
+/* 按钮：按下有反馈。transform 只有 1px —— 大位移会让密集工具栏显得毛躁。 */
+.btn{transition:transform .12s var(--ease), background .16s var(--ease), border-color .16s var(--ease), color .16s var(--ease)}
+.btn:active{transform:translateY(1px)}
+
+/* 标签页下划线：切换时"滑"过去而不是跳。
+   transform-origin 跟着方向走是做不出来的（纯 CSS 不知道方向），
+   所以统一从左展开 —— 视觉上等于"重新画一遍"，比瞬移舒服。 */
+.tab{transition:color .18s var(--ease)}
+.tab::after{transition:transform .22s var(--ease-out), opacity .22s var(--ease)}
+
+
+/* 扫描线：只在 body.busy 时存在。它挂在顶栏下沿，横贯整个宽度。
+   为什么用"扫描"而不是"进度条"：项目里**没有真实进度** ——
+   Agent 的耗时由模型决定，画一个百分比进度条是在编数字。
+   扫描线只承诺"在动"，不承诺"到哪了"，这是唯一诚实的动效。 */
+/* 说明：扫描线不能挂在 body::before 上 —— body 只有一个 ::before，
+   已经被网格占用。所以它走 header.top::after。 */
+header.top::after{
+  content:""; position:absolute; left:12px; right:12px; bottom:-1px; height:1px;
+  background:linear-gradient(90deg, transparent, var(--focus), transparent);
+  opacity:0; transform:scaleX(.2);
+  transition:opacity .25s var(--ease);
+  pointer-events:none;
+}
+body.busy header.top::after{opacity:.9; animation:sweep 1.6s var(--ease) infinite}
+@keyframes sweep{
+  0%{transform:scaleX(.15) translateX(-10%)}
+  50%{transform:scaleX(.7) translateX(30%)}
+  100%{transform:scaleX(.15) translateX(90%)}
+}
+/* 这里的 linear-gradient 是**一条 1px 线**的柔化，不是装饰性明暗渐变。
+   规则禁的是后者 —— 用 linear 做出"这一块比那一块亮"的假质感。 */
+
+/* 「Agent 在线」呼吸点。复刻项目已有的 dotpulse 节奏（1.4s）但更慢，
+   因为它是常驻指示而不是"正在输入"。2.4s 接近静息频率，不抢注意力。 */
+.live-dot,.dot-on{animation:breathe 2.4s var(--ease) infinite}
+@keyframes breathe{0%,100%{opacity:.35}50%{opacity:1}}
+/* ==========================================================================
    16) 响应式
    ========================================================================== */
 /* 先收窄标签本身再让它滚动：9 个标签在 1280px 上收一收正好放得下，
@@ -812,7 +949,15 @@ td .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
   .toast{max-width:none}
 }
 @media(prefers-reduced-motion:reduce){
-  *{animation:none!important;transition:none!important}
+  /* *::before / *::after 必须显式列出。
+     实测（Playwright，reducedMotion:"reduce"）：只写 *{} 时，
+     卡片动画确实关掉了（animation:none），但 `body.busy header.top::after`
+     那条扫描线的 animationName 仍然是 `sweep` —— 伪元素不算 *。
+     于是"关掉动效"的用户还是看到一条一直在扫的线。 */
+  *,*::before,*::after{animation:none!important;transition:none!important}
+  /* 扫描线在无动效环境下**整体不出现**：它存在的唯一意义就是"在动"，
+     静止的一条线只会被读成"这里有个边框"。 */
+  body.busy header.top::after{opacity:0!important}
 }
 
 /* 跳转链接：平时移出视口，Tab 聚焦时滑回来。
