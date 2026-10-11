@@ -1125,7 +1125,19 @@ body.busy header.top::after{opacity:.9; animation:sweep 1.6s var(--ease) infinit
   /* 扫描线在无动效环境下**整体不出现**：它存在的唯一意义就是"在动"，
      静止的一条线只会被读成"这里有个边框"。 */
   body.busy header.top::after{opacity:0!important}
+  /* 平滑滚动也要关。它不在 *{} 的覆盖范围里 ——
+     scroll-behavior 是**根元素**的属性，而"平滑滚动"本身就是一段
+     视口位移动画，正是前庭敏感用户最容易被触发的那一类。
+     transition:none 管不到它：这是两套独立的机制。 */
+  html{scroll-behavior:auto!important}
 }
+
+/* 平滑滚动：项目里只有两处锚点（"跳到主内容" / "注册一个"），
+   但点击后视口**瞬移**的观感很突兀 —— 用户会短暂失去"我从哪来"的位置感。
+   只影响锚点跳转，不影响鼠标滚轮，开销为零。
+   注意 @media(prefers-reduced-motion) 里必须显式关掉（见文件末尾）：
+   transition:none 覆盖不到 scroll-behavior，那是两套独立机制。 */
+html{scroll-behavior:smooth}
 
 /* 跳转链接：平时移出视口，Tab 聚焦时滑回来。
    用 transform 而不是 display —— 被 display 隐藏的元素不可聚焦。 */
