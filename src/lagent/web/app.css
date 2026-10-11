@@ -704,6 +704,36 @@ td .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
 }
 
 /* ==========================================================================
+   15b) 门禁核验面板
+
+   为什么它需要自己的样式而不是复用表格：核验的结果是一个判决
+   （放行/拒绝 + 原因码），不是一行数据。用表格展示判决会把它降级成
+   一条记录，而「为什么不开门」是这里唯一值得被看见的东西 ——
+   所以它做成一个结论块，占据视觉重心。
+
+   配色严格走既有令牌：放行=ok、拒绝=bad、可补救（满员/非开放时段）=warn。
+   没有新增任何颜色 —— 面板不该有自己的调色板。
+   ========================================================================== */
+.gate-verdict{
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  padding:12px 14px; border-radius:var(--r);
+  border:1px solid var(--line); background:var(--surface-2);
+}
+/* 左侧 3px 色条用 border-left 而不是 box-shadow：
+   box-shadow 在这里会被当成卡片阴影，与「阴影几乎不存在」这条规则冲突。 */
+.gate-verdict.yes{border-left:3px solid var(--ok-ink)}
+.gate-verdict.no{border-left:3px solid var(--bad-ink)}
+.gate-verdict .tag{font-size:var(--t-xs)}
+.gate-msg{
+  margin-top:8px; color:var(--ink-2); font-size:var(--t-base); line-height:1.6;
+}
+.gate-meta{
+  margin-top:6px; color:var(--ink-3); font-size:var(--t-xs);
+  font-family:var(--font-mono);
+}
+#pane-gate .filters .f{display:flex; align-items:center; gap:6px; white-space:nowrap}
+
+/* ==========================================================================
    16) 响应式
    ========================================================================== */
 /* 先收窄标签本身再让它滚动：9 个标签在 1280px 上收一收正好放得下，

@@ -127,6 +127,7 @@ function showGate(msg){
   $("#btn-logout").hidden=true;
   $("#tab-users").hidden=true;
   $("#pane-users").hidden=true;
+  $("#tab-gate").hidden=true;
   // 退出后不能残留上一个身份的数据
   $("#labs-box").innerHTML=skel(2,"card");
   $("#res-box").innerHTML=skel(3,"row");
@@ -206,7 +207,7 @@ async function enterApp(){
   // ⚠️ 这只是"不显示无权限的控件"，**真正的边界在服务端** ——
   // 手动构造请求照样只会拿到 403（见 tests/test_booking_api.py 的越权清单）。
   if(isAdmin()){
-    ["tab-users","tab-appr","tab-viol","tab-notif","tab-audit"]
+    ["tab-users","tab-appr","tab-viol","tab-notif","tab-audit","tab-gate"]
       .forEach(id=>{ $("#"+id).hidden=false; });
   }
   await loadReservations();
@@ -541,6 +542,124 @@ async function loadAudit(){
         </tr>`).join("")
       + '</tbody></table>';
   }catch(e){ box.innerHTML='<div class="empty">加载失败：'+esc(e.message)+"</div>"; }
+}
+
+/* ---------- 门禁核验（2026-10-11 加） ----------
+   后端 domain/access.py 写完并有测试，但控制台**一个入口都没有** ——
+   管理员要验证门禁只能 curl 或读库，等于这个模块没交付到他手上。
+   这与当初"预约只能靠跟模型说话"是同一类问题：
+       **后端有接口 ≠ 用户点得到**
+
+   这里刻意做成"门禁机视角"而不是再堆一张表：核验的核心价值是
+   「刷一下，立刻看见放行还是拒绝、以及**为什么**」，
+   而原因码（reason_code）正是这个模块最值得展示的东西 ——
+   它把"拒绝"从一句话变成了一个可归因的事件。 */
+const GATE_REASON={
+  ok:{t:"放行",c:"ok"},
+  no_permit:{t:"无有效凭证",c:"bad"},
+  permit_used:{t:"凭证已用（单次通行）",c:"bad"},
+  permit_revoked:{t:"凭证已撤销",c:"bad"},
+  permit_expired:{t:"凭证已过期",c:"bad"},
+  not_yet_valid:{t:"未到凭证生效时间",c:"warn"},
+  wrong_lab:{t:"凭证不属于这个实验室",c:"bad"},
+  identity_mismatch:{t:"身份与凭证不匹配",c:"bad"},
+  cert_missing:{t:"缺少准入资质",c:"bad"},
+  cert_expired:{t:"准入资质已过期",c:"bad"},
+  cert_revoked:{t:"准入资质已撤销",c:"bad"},
+  lab_full:{t:"房间已满",c:"warn"},
+  already_inside:{t:"已在馆内（重复进入）",c:"warn"},
+  lab_closed:{t:"不在开放时段",c:"warn"},
+  no_such_user:{t:"无此用户",c:"bad"},
+  concurrent_conflict:{t:"并发冲突（座位被抢）",c:"warn"},
+};
+
+/* 实验室与用户下拉：复用已经加载好的 state，不额外打接口。
+   门禁面板自己再拉一遍是浪费，而且会与顶部的刷新周期打架。 */
+async function loadGateOptions(){
+  const lab=$("#gate-lab"), usr=$("#gate-user");
+  if(lab && !lab.options.length){
+    lab.innerHTML=(state.labs||[]).map(l=>
+      '<option value="'+esc(l.id)+'">'+esc(l.name)+'</option>').join("");
+  }
+  if(usr && !usr.options.length){
+    usr.innerHTML='<option value="">（不提供身份）</option>'
+      +(state.users||[]).map(u=>
+        '<option value="'+esc(u.id)+'">'+esc(u.username)+'</option>').join("");
+  }
+}
+
+async function gateVerify(){
+  const box=$("#gate-result");
+  const labId=parseInt($("#gate-lab").value,10);
+  const userId=$("#gate-user").value?parseInt($("#gate-user").value,10):null;
+  const cred=$("#gate-cred").value.trim();
+  if(!labId){ box.innerHTML='<div class="empty">先选一个实验室</div>'; return; }
+  if(!userId && !cred){
+    box.innerHTML='<div class="empty">凭证与身份<b>至少给一个</b> —— 两个都空等于"既没带卡也说不清是谁"</div>';
+    return;
+  }
+  box.innerHTML='<div class="skel sk-row"></div>';
+  try{
+    const r=await api("/api/access/verify",{method:"POST",body:{
+      lab_id:labId, user_id:userId, credential:cred||null,
+      direction:$("#gate-dir").value,
+      gate_id:"console-sim", precheck:!!$("#gate-precheck").checked,
+    }});
+    const meta=GATE_REASON[r.reason_code]||{t:r.reason_code||"—",c:"bad"};
+    box.innerHTML=
+      '<div class="gate-verdict '+(r.granted?"yes":"no")+'">'
+      + '<span class="tag '+meta.c+'">'+(r.granted?"✓ 放行":"✗ 拒绝")+'</span>'
+      + '<span class="mono">'+esc(r.reason_code||"—")+'</span>'
+      + '<span>'+esc(meta.t)+'</span>'
+      + '</div>'
+      + '<div class="gate-msg">'+esc(r.message||"")+'</div>'
+      + '<div class="gate-meta">'
+      + (r.user_name?('用户：<b>'+esc(r.user_name)+'</b> · '):'')
+      + (r.lab_label?('实验室：'+esc(r.lab_label)+' · '):'')
+      + (r.permit_id?('凭证 #'+esc(r.permit_id)):'未签发凭证')
+      + '</div>';
+  }catch(e){
+    box.innerHTML='<div class="empty">核验失败：'+esc(e.message)+'</div>';
+  }
+}
+
+/* 在馆名单 —— 容量是"数据库裁决"的，这个列表就是裁决结果。
+   看见它才能当场证明"容量限制真的生效了"，而不是只写在文档里。 */
+async function gateInside(){
+  const box=$("#gate-inside-box");
+  box.innerHTML=skel(2,"row");
+  try{
+    // 注意：这个端点返回的是 {count, inside}，不是裸数组。
+    // 按数组写会拿到 undefined.length 直接抛错 —— 而"在馆名单"恰恰是
+    // 火灾/清场场景下最不能坏的那一个。
+    const data=await api("/api/access/inside");
+    const rows=(data&&data.inside)||[];
+    if(!rows.length){ box.innerHTML='<div class="empty">现在没有人在馆</div>'; return; }
+    box.innerHTML='<table><thead><tr><th>用户</th><th>实验室</th><th>有效期</th></tr></thead><tbody>'
+      + rows.map(r=>'<tr><td>'+esc(r.username)+'</td><td>'+esc(r.lab_label)+'</td>'
+        + '<td class="mono">'+esc(fmtStamp(r.valid_from))+' → '+esc(fmtStamp(r.valid_to))+'</td></tr>').join("")
+      + '</tbody></table>';
+  }catch(e){ box.innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>'; }
+}
+
+/* CSV 导出。为什么值得一个按钮：权限口径与列表接口**完全一致**
+   （非管理员只能导自己的），所以它是最容易漏权限的一类接口 ——
+   但这里复用的是服务端同一段 scope 逻辑，前端只负责触发下载。 */
+async function gateExport(){
+  try{
+    const t=tokenApi.get();
+    const r=await fetch("/api/reservations/export.csv",{
+      headers:t?{Authorization:"Bearer "+t}:{},
+    });
+    if(r.status===401){ sessionExpired(); throw new Error("登录状态已失效，请重新登录"); }
+    if(!r.ok){ throw new Error("HTTP "+r.status); }
+    const blob=await r.blob();
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a");
+    a.href=url; a.download="reservations.csv"; a.click();
+    URL.revokeObjectURL(url);
+    toast("已导出 CSV");
+  }catch(e){ toast("导出失败："+e.message,"bad"); }
 }
 
 /* ---------- 直接预约（不经过模型） ----------
@@ -1081,11 +1200,11 @@ $("#btn-logout").addEventListener("click",async()=>{
 
 // 面板名 → 切过去时要拉什么。写成表而不是一串 if：
 // 加一个标签页只改这张表，不会漏掉"新面板忘了加载"这种错。
-const PANES=["book","labs","res","kb","users","appr","viol","notif","audit"];
+const PANES=["book","labs","res","kb","users","appr","viol","notif","audit","gate"];
 const TAB_LOADERS={
   book:fillBookingOptions, labs:loadLabs, res:loadReservations, kb:null,
   users:loadUserDirectory, appr:loadApprovals, viol:loadViolations,
-  notif:loadNotifications, audit:loadAudit,
+  notif:loadNotifications, audit:loadAudit, gate:loadGateOptions,
 };
 $$("#tabs .tab").forEach(tab=>tab.addEventListener("click",()=>{
   $$("#tabs .tab").forEach(t=>t.classList.toggle("on",t===tab));
@@ -1098,6 +1217,9 @@ $("#viol-refresh") && $("#viol-refresh").addEventListener("click",loadViolations
 $("#notif-refresh") && $("#notif-refresh").addEventListener("click",loadNotifications);
 $("#audit-refresh") && $("#audit-refresh").addEventListener("click",loadAudit);
 $("#audit-action") && $("#audit-action").addEventListener("keydown",e=>{ if(e.key==="Enter") loadAudit(); });
+$("#gate-verify") && $("#gate-verify").addEventListener("click",gateVerify);
+$("#gate-inside") && $("#gate-inside").addEventListener("click",gateInside);
+$("#gate-export") && $("#gate-export").addEventListener("click",gateExport);
 
 /* ---------- 启动 ----------
    健康检查是公开端点，先跑，好让登录页顶部也能显示后端连接状态；

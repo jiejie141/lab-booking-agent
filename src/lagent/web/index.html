@@ -221,6 +221,7 @@
           <button class="tab" data-tab="viol" id="tab-viol" hidden>违约</button>
           <button class="tab" data-tab="notif" id="tab-notif" hidden>通知</button>
           <button class="tab" data-tab="audit" id="tab-audit" hidden>审计</button>
+          <button class="tab" data-tab="gate" id="tab-gate" hidden>门禁核验</button>
         </div>
         <div class="spacer"></div>
         <!-- 数据新鲜度落点。原来它被 append 进卡片标题的 <h2> 里，
@@ -339,6 +340,37 @@
             <button class="btn ghost sm" id="audit-refresh">刷新</button>
           </div>
           <div id="audit-box"><div class="skel sk-row"></div><div class="skel sk-row"></div></div>
+        </div>
+        <!-- 门禁核验（2026-10-11 加）
+             后端 access.py 写完并有测试，但控制台**一个入口都没有** ——
+             等于这个模块没交付到管理员手上。这与当初"预约只能靠跟模型说话"
+             是同一类问题：**后端有接口 ≠ 用户点得到**。
+             这个面板刻意做成"门禁机视角"：刷一下就能看见放行/拒绝与原因码，
+             而不是又一个表格。 -->
+        <div id="pane-gate" hidden>
+          <div class="note">
+            <span class="note-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 3l8 4v5c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V7z"/><path d="m9 12 2 2 4-4"/></svg></span>
+            <span>模拟<b>门禁机</b>发起一次核验。凭证与身份<b>至少给一个</b>；两个都给会交叉校验 ——
+            这正是挡住"拿别人截图进门"的那一步。</span>
+          </div>
+          <div class="filters">
+            <select id="gate-lab" aria-label="实验室"></select>
+            <select id="gate-user" aria-label="身份"></select>
+            <select id="gate-dir" aria-label="方向">
+              <option value="in">进</option>
+              <option value="out">出</option>
+            </select>
+            <input id="gate-cred" placeholder="凭证串（可留空，走身份核验）">
+          </div>
+          <div class="filters">
+            <label class="f"><input type="checkbox" id="gate-precheck"> 仅预检（不核销、不占座）</label>
+            <div class="spacer"></div>
+            <button class="btn" id="gate-verify">核验</button>
+            <button class="btn ghost sm" id="gate-inside">在馆名单</button>
+            <button class="btn ghost sm" id="gate-export" title="导出预约 CSV（权限口径与列表接口一致）">导出 CSV</button>
+          </div>
+          <div id="gate-result"></div>
+          <div id="gate-inside-box"></div>
         </div>
       </div>
     </section>
