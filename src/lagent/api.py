@@ -2356,7 +2356,8 @@ async def chat(
         response = await agent.ainvoke(req)
     except Exception as exc:
         # 模型侧异常不该变成 500 堆栈；明确告诉前端失败了，并由前端切到表单
-        raise HTTPException(status_code=502, detail=f"Agent 执行失败：{exc}") from exc
+        _log.exception("Agent invocation failed")
+        raise HTTPException(status_code=502, detail="助手暂时无法完成请求，请稍后重试，也可以使用直接预约表单。") from exc
 
     # 只在真的产生下单动作时留痕，避免把每句闲聊都写进审计表
     booking = response.booking
@@ -2429,10 +2430,11 @@ async def chat_stream(
                         client_host=_client_host(request),
                     )
                 yield _sse({"type": "done", "data": payload.model_dump(mode="json")})
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             # 流里的错误不能用 HTTP 状态码表达（头已经发出去了），
             # 所以包成一帧 error 让前端切到表单路径 —— 它必须知道"这次没成"
-            yield _sse({"type": "error", "detail": f"Agent 执行失败：{exc}"})
+            _log.exception("Agent streaming failed")
+            yield _sse({"type": "error", "detail": "助手暂时无法完成请求，请稍后重试，也可以使用直接预约表单。"})
 
     return StreamingResponse(_gen(), media_type="text/event-stream",
                              headers=_SSE_HEADERS)
