@@ -140,6 +140,8 @@ function promptBox(title, value, o){ return askDialog(Object.assign({title: titl
 
 async function apiFull(path,opts){
   const o=Object.assign({},opts||{});
+  const epoch=state.epoch;
+  if(!o.signal) o.signal=state.requests.signal;
   // ★ 在这里统一 stringify，而不是要求每个调用点自己记得。
   //
   //   起因：门禁模块的 verify / issue 两处写的是 `body:{...}`（原生对象），
@@ -182,6 +184,7 @@ async function apiFull(path,opts){
   try{
     r=await fetch(path,o);
   }catch(e){
+    if(e.name==="AbortError") throw e;
     // navigator.onLine 是唯一能区分「你断网了」还是「服务器连不上」的信号。
     // 两者对用户的下一步动作完全不同：前者叫他连 Wi-Fi，后者叫他稍等重试。
     // 注意它只能判断**本地**有没有网络，不代表服务端可达 ——
@@ -193,6 +196,7 @@ async function apiFull(path,opts){
   }
   let body=null;
   try{body=await r.json();}catch(e){}
+  if(epoch!==state.epoch) throw new DOMException("会话已切换", "AbortError");
   if(r.status===401){
     // 令牌缺失/过期不是"一次普通请求失败"，而是会话结束 —— 直接回登录闸门
     sessionExpired();
@@ -323,7 +327,7 @@ const SKEL = {card:'<div class="skel sk-card"></div>',row:'<div class="skel sk-r
 const skel=(n,t)=>SKEL[t||"row"].repeat(n);
 
 /* ---------- 状态 ---------- */
-const state={ users:[], equipment:new Map(), session:"web-"+Math.random().toString(36).slice(2,8), busy:false, me:null };
+const state={ users:[], equipment:new Map(), session:"web-"+Math.random().toString(36).slice(2,8), busy:false, me:null, epoch:0, requests:new AbortController() };
 /* 权限判定：问"我有没有这个能力"，而不是问"我的角色叫什么"。
  *
  * 在此之前这里写的是 role==="admin"||role==="sysadmin" ——
@@ -346,15 +350,42 @@ function showGate(msg){
   $("#tab-users").hidden=true;
   $("#pane-users").hidden=true;
   $("#tab-gate").hidden=true;
+  ["users","appr","viol","notif","audit","gate"].forEach(name=>{
+    $("#tab-"+name).hidden=true;
+    $("#pane-"+name).hidden=true;
+  });
   // 退出后不能残留上一个身份的数据
   $("#labs-box").innerHTML=skel(2,"card");
   $("#res-box").innerHTML=skel(3,"row");
   $("#kb-box").innerHTML="";
   $("#users-box").innerHTML=skel(3,"row");
+  ["appr-box","viol-box","notif-box","audit-box"].forEach(id=>{
+    $("#"+id).innerHTML="";
+  });
+  $("#flt-user").value="";
+  $("#flt-status").value="";
   $("#lg-pass").value="";
   gateError(msg||"");
 }
-function clearSession(){ tokenApi.set(null); state.me=null; state.users=[]; $("#msgs").innerHTML=""; }
+function clearSession(){
+  state.epoch++;
+  state.requests.abort();
+  state.requests=new AbortController();
+  if(state.abort) state.abort.abort();
+  state.abort=null;
+  clearInterval(window.__autoRefresh);
+  window.__autoRefresh=null;
+  tokenApi.set(null);
+  state.me=null; state.users=[]; state.equipment.clear();
+  state.session="web-"+crypto.randomUUID();
+  state.busy=false;
+  gateLastUser=null;
+  $("#msgs").innerHTML="";
+  $("#inp-msg").value="";
+  $("#btn-send").disabled=false;
+  $("#btn-stop").hidden=true;
+  document.body.classList.remove("busy");
+}
 function sessionExpired(){ clearSession(); showGate("登录状态已失效，请重新登录"); }
 
 async function doLogin(){
@@ -418,9 +449,11 @@ function renderIdentity(){
 }
 
 async function enterApp(){
+  const epoch=state.epoch;
   renderIdentity();
   // 与其它面板并行拉，不占串行时间。
   await Promise.all([loadLabs(), loadUserDirectory(), loadToday()]);
+  if(epoch!==state.epoch) return;
   fillBookingOptions();   // 设备下拉依赖 loadLabs 填好的 state.equipment
   // 管理员专属标签：非管理员一律保持 hidden。
   // ⚠️ 这只是"不显示无权限的控件"，**真正的边界在服务端** ——
@@ -429,9 +462,13 @@ async function enterApp(){
     ["tab-users","tab-appr","tab-viol","tab-notif","tab-audit","tab-gate"]
       .forEach(id=>{ $("#"+id).hidden=false; });
   }
+  const activeTab=$("#tabs .tab.on");
+  if(activeTab && activeTab.hidden) $("#tabs .tab[data-tab='book']").click();
   await loadReservations();
+  if(epoch!==state.epoch) return;
   stamp();
   await loadHealth();
+  if(epoch!==state.epoch) return;
   // 会变的面板开始自动刷新（2026-09-29）—— 后台 sweep 改了数据，
   // 页面不该等着人来点一下才知道。
   startAutoRefresh();
@@ -439,6 +476,7 @@ async function enterApp(){
 
 /* ---------- 顶部与统计 ---------- */
 async function loadHealth(){
+  const epoch=state.epoch;
   /* 健康详情需要登录。这里刻意**不走 api()**：
      api() 在 401 时会调 sessionExpired() 并把错误抛进来，
      于是 boot() 在**未登录**状态下第一次加载时，会把"还没登录"
@@ -453,7 +491,8 @@ async function loadHealth(){
       $("#badge-mode").innerHTML='<span class="dot warn" id="dot-health"></span>未登录';
       return;
     }
-    const r=await fetch("/api/health/details",{headers:{"Authorization":"Bearer "+t}});
+    const r=await fetch("/api/health/details",{headers:{"Authorization":"Bearer "+t},signal:state.requests.signal});
+    if(epoch!==state.epoch) return;
     if(r.status===401){
       $("#dot-health").className="dot warn";
       $("#badge-mode").innerHTML='<span class="dot warn" id="dot-health"></span>登录已过期';
@@ -462,6 +501,7 @@ async function loadHealth(){
     }
     if(!r.ok) throw new Error("HTTP "+r.status);
     const h=await r.json();
+    if(epoch!==state.epoch) return;
     $("#dot-health").className="dot"+(h.agent_available?"":" warn");
     // 运行模式：头图只显示 app_mode，完整串（含 database）放进 title。
     // 原因：header 里写死 "mock · sqlite+aiosqlite" 等于把"这是演示环境"
@@ -482,6 +522,7 @@ async function loadHealth(){
     countTo($("#st-res"),h.counts.reservations);
     if(h.retrieval_degraded_reason) toast("检索已降级："+h.retrieval_degraded_reason,"err");
   }catch(e){
+    if(epoch!==state.epoch || e.name==="AbortError") return;
     $("#dot-health").className="dot bad";
     $("#badge-mode").innerHTML='<span class="dot bad"></span>连接失败';
     toast("无法连接后端："+e.message,"err");
@@ -532,7 +573,7 @@ async function loadUserDirectory(){
             <td>${roleTag}</td><td>${certs}</td></tr>`;
         }).join("")
       + '</tbody></table>';
-  }catch(e){box.innerHTML=errBox(e);}
+  }catch(e){if(e.name!=="AbortError") box.innerHTML=errBox(e);}
 }
 
 /* ---------- 管理员面板：审批 / 违约 / 通知 / 审计 ----------
@@ -567,23 +608,30 @@ function stamp(){
 
 /** 只刷"会变"的面板。登录后由 enterApp 启动。 */
 function startAutoRefresh(){
-  if(window.__autoRefresh){ clearInterval(window.__autoRefresh); }
-  window.__autoRefresh = setInterval(async () => {
-    if(document.hidden) return;          // 页面在后台就别拉了
-    await Promise.allSettled([loadApprovals(), loadReservations()]);
-    // 时间戳在加载**之后**打，否则会在数据还没回来时就宣称"已更新"
-    stamp();
-  }, REFRESH_MS);
+  clearInterval(window.__autoRefresh);
+  let refreshing=false;
+  const epoch=state.epoch;
+  window.__autoRefresh=setInterval(async()=>{
+    if(document.hidden || !state.me || refreshing) return;
+    refreshing=true;
+    try{
+      const results=await Promise.all([loadReservations(true), ...(isAdmin()?[loadApprovals(true)]:[])]);
+      if(epoch!==state.epoch) return;
+      if(results.every(Boolean)) stamp();
+      else $("#data-stamp").textContent="更新失败，请重试";
+    }finally{ refreshing=false; }
+  },REFRESH_MS);
 }
 
-async function loadApprovals(){
+async function loadApprovals(quiet=false){
+  quiet=quiet===true;
   const box=$("#appr-box");
-  box.innerHTML=skel(2,"row");
+  if(!quiet) box.innerHTML=skel(2,"row");
   try{
     // 待办不带"全部预约"——列表里出现的每一条都是要处理的，这是那个接口
     // 刻意不复用 list_reservations 的原因（见 pending_reservations 的注释）。
     const rows=await api("/api/reservations/pending");
-    if(!rows.length){ box.innerHTML='<div class="empty">没有待确认的申请</div>'; stamp(); return; }
+    if(!rows.length){ box.innerHTML='<div class="empty">没有待确认的申请</div>'; if(!quiet) stamp(); return true; }
     // 批量：勾几条一起批。待办一多，逐条点是最典型的机械重复。
     box.innerHTML='<div class="row batchbar">'
         +'<button class="btn sm" id="b-all">全选</button>'
@@ -613,8 +661,9 @@ async function loadApprovals(){
     $("#b-none", box).addEventListener("click", ()=>{ $$(".b-pick",box).forEach(c=>c.checked=false); syncHint(); });
     $("#b-approve", box).addEventListener("click", ()=>batchReview(true));
     $("#b-reject", box).addEventListener("click", ()=>batchReview(false));
-    stamp();
-  }catch(e){ box.innerHTML=errBox(e); }
+    if(!quiet) stamp();
+    return true;
+  }catch(e){ if(e.name==="AbortError") return false; if(!quiet) box.innerHTML=errBox(e); return false; }
 }
 
 /* 批量审批（2026-09-29 加）。
@@ -735,7 +784,7 @@ async function loadViolations(){
         toast("已豁免 #"+id,"ok"); loadViolations(); loadHealth();
       }catch(e){ toast("豁免失败："+e.message,"err"); b.disabled=false; }
     }));
-  }catch(e){box.innerHTML=errBox(e);}
+  }catch(e){if(e.name!=="AbortError") box.innerHTML=errBox(e);}
 }
 
 const NOTIFY_CN={pending:"待投递",sent:"已投递",skipped:"已跳过",failed:"投递失败"};
@@ -760,7 +809,7 @@ async function loadNotifications(){
           <td><span class="tag ${n.status==="failed"?"bad":(n.status==="sent"?"ok":"warn")}">${esc(NOTIFY_CN[n.status]||n.status)}</span></td>
         </tr>`).join("")
       + '</tbody></table>';
-  }catch(e){box.innerHTML=errBox(e);}
+  }catch(e){if(e.name!=="AbortError") box.innerHTML=errBox(e);}
 }
 
 async function loadAudit(){
@@ -780,7 +829,7 @@ async function loadAudit(){
             <div style="color:var(--ink-3);font-size:11px">${esc(a.detail)}</div></td>
         </tr>`).join("")
       + '</tbody></table>';
-  }catch(e){box.innerHTML=errBox(e);}
+  }catch(e){if(e.name!=="AbortError") box.innerHTML=errBox(e);}
 }
 
 /* ---------- 门禁核验（2026-10-11 加） ----------
@@ -1001,7 +1050,7 @@ async function gateInside(){
       + rows.map(r=>'<tr><td>'+esc(r.username)+'</td><td>'+esc(r.lab_label)+'</td>'
         + '<td class="mono">'+esc(fmtStamp(r.valid_from))+' → '+esc(fmtStamp(r.valid_to))+'</td></tr>').join("")
       + '</tbody></table>';
-  }catch(e){box.innerHTML=errBox(e);}
+  }catch(e){if(e.name!=="AbortError") box.innerHTML=errBox(e);}
 }
 
 /* CSV 导出。为什么值得一个按钮：权限口径与列表接口**完全一致**
@@ -1135,21 +1184,22 @@ async function loadLabs(){
         <tbody>${rows}</tbody></table>
       </div>`;
     }).join("");
-  }catch(e){box.innerHTML=errBox(e);}
+  }catch(e){if(e.name!=="AbortError") box.innerHTML=errBox(e);}
 }
 
 /* ---------- 预约记录 ---------- */
 const STATUS_TAG={pending:"warn",confirmed:"ok",cancelled:"",completed:"ok",expired:"bad"};
 const STATUS_CN={pending:"待确认",confirmed:"已确认",cancelled:"已取消",completed:"已完成",expired:"已过期"};
 
-async function loadReservations(){
+async function loadReservations(quiet=false){
+  quiet=quiet===true;
   const box=$("#res-box");
-  box.innerHTML=skel(3,"row");
+  if(!quiet) box.innerHTML=skel(3,"row");
   const uid=$("#flt-user").value, st=$("#flt-status").value;
   try{
     let rows=await api("/api/reservations"+(uid?("?user_id="+encodeURIComponent(uid)):""));
     if(st) rows=rows.filter(r=>r.status===st);
-    if(!rows.length){box.innerHTML='<div class="empty">没有匹配的预约记录</div>';return;}
+    if(!rows.length){box.innerHTML='<div class="empty">没有匹配的预约记录</div>';return true;}
 
     const total=rows.length;
     const dist={}; rows.forEach(r=>{dist[r.status]=(dist[r.status]||0)+1;});
@@ -1218,7 +1268,8 @@ async function loadReservations(){
         loadReservations(); loadHealth();
       }catch(e){ toast("取消失败："+e.message,"err"); b.disabled=false; b.textContent="取消"; }
     }));
-  }catch(e){box.innerHTML=errBox(e);}
+    return true;
+  }catch(e){ if(e.name==="AbortError") return false; if(!quiet) box.innerHTML=errBox(e); return false; }
 }
 
 /* ---------- 规范检索 ---------- */
@@ -1333,7 +1384,7 @@ function renderCitations(list){
      <div class="s">${esc(h.source)} · score ${h.score}</div></div>`).join("")+"</div>";
 }
 
-let lastProposals=[];
+
 /* ---- 对话流式（2026-09-29 加）----
    原对话是"等整段返回"：一次要走 parse → negotiate → book → compose 好几个节点，
    前面几秒界面上只有转圈。流式之后每走完一个节点就多一行进度 ——
@@ -1394,6 +1445,7 @@ async function send(message,accept){
   }
 
   // 停止生成：只对**本次**对话生效，中断后把 busy 复位，不会把界面卡死
+  const epoch=state.epoch;
   const ctl = new AbortController();
   state.abort = ctl;
   const stopBtn = $("#btn-stop");
@@ -1417,7 +1469,8 @@ async function send(message,accept){
     }, ctl.signal);
 
     ph.remove();
-    lastProposals=r.proposals||[];
+    if(epoch!==state.epoch) return;
+    const proposals=r.proposals||[];
     // 正文先逐字出，结构化块（下单结果 / 备选 / 引用 / 轨迹）攒在 tail 里
     // 等正文出完再挂 —— 见 typeInto 的注释。
     // tail = 正文之后要挂的结构化块，攒好一次挂上
@@ -1439,12 +1492,15 @@ async function send(message,accept){
     const el=pushMsg("a","");
     // 正文经过 mdInline：esc 打底，再把 **粗体**/`代码` 变成真标签
     await typeInto(el.querySelector(".bub"), String(r.reply||""), tail, true);
-    $$("[data-accept]",el).forEach(btn=>btn.addEventListener("click",()=>{
-      const p=lastProposals[Number(btn.getAttribute("data-accept"))];
-      if(p) send("选：" + p.equipment_name + " " + p.date + " " + p.start + "-" + p.end, p);
+    $$("[data-accept]",el).forEach(btn=>btn.addEventListener("click",async()=>{
+      const p=proposals[Number(btn.getAttribute("data-accept"))];
+      if(!p || state.busy) return;
+      const approved=await confirmBox("确认预约方案", p.equipment_name+" · "+p.date+" "+p.start+"–"+p.end, {okText:"确认选择"});
+      if(approved && epoch===state.epoch) send("选：" + p.equipment_name + " " + p.date + " " + p.start + "-" + p.end, p);
     }));
     if(r.booking&&r.booking.ok){ loadReservations(); loadHealth(); }
   }catch(e){
+    if(epoch!==state.epoch) return;
     ph.remove();
     // 用户主动停止不是"出错"：说清楚状态，别让他以为系统坏了
     if(e && e.name === "AbortError"){
@@ -1454,6 +1510,7 @@ async function send(message,accept){
       toast(e.message,"err");
     }
   }finally{
+    if(epoch!==state.epoch) return;
     state.busy=false; $("#btn-send").disabled=false;
     state.abort = null;
     if(stopBtn) stopBtn.hidden = true;
@@ -1515,6 +1572,7 @@ $("#inp-msg").addEventListener("input",()=>{
   $("#btn-send").disabled=v.length>2000||state.busy;
 });
 $("#btn-reset").addEventListener("click",()=>{
+  if(state.busy){ toast("请先停止生成，再开启新会话"); return; }
   state.session="web-"+Math.random().toString(36).slice(2,8);
   $("#msgs").innerHTML="";
   pushMsg("a","已开新会话。上一轮的备选方案不会再被引用。");
@@ -1710,6 +1768,15 @@ document.addEventListener("click",e=>{
     gateVerify();
   }
 });
+
+/* Local illustrative timeline; never calls booking APIs. */
+const storyCopy=[['先说说，你的计划','“我想用光谱仪，下午两点开始，使用两小时。”'],['这个时间，已经有安排','原时段与已有预约重叠。设备和使用时长仍然保留。'],['换个时间，研究照常继续','推荐 16:00—18:00：仅调整开始时间，保留设备与两小时使用时长。']];
+let storyTimer=null;
+function storyStop(){clearTimeout(storyTimer);storyTimer=null;$("#story-play").textContent="播放演示 ↗";}
+function storyStep(n){$("#story-track").dataset.step=n;$("#story-title").textContent=storyCopy[n][0];$("#story-detail").textContent=storyCopy[n][1];document.querySelectorAll('[data-story]').forEach(b=>b.setAttribute('aria-pressed',String(Number(b.dataset.story)===n)));}
+document.querySelectorAll('[data-story]').forEach(b=>b.addEventListener('click',()=>{storyStop();storyStep(Number(b.dataset.story));}));
+$("#story-play").addEventListener('click',()=>{if(storyTimer){storyStop();return;}storyStep(0);if(matchMedia('(prefers-reduced-motion: reduce)').matches){storyStep(2);return;}$("#story-play").textContent="暂停演示";let n=0;const advance=()=>{if(document.hidden||$("#gate").hidden){storyStop();return;}storyStep(++n);if(n<2)storyTimer=setTimeout(advance,1700);else storyStop();};storyTimer=setTimeout(advance,1700);});
+document.addEventListener('visibilitychange',()=>{if(document.hidden)storyStop();});
 
 /* ---------- 启动 ----------
    健康检查是公开端点，先跑，好让登录页顶部也能显示后端连接状态；

@@ -121,6 +121,7 @@
    2) 基础排版
    ========================================================================== */
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 html,body{margin:0;padding:0}
 body{
   background:var(--canvas); color:var(--ink);
@@ -693,122 +694,19 @@ td .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
 /* ==========================================================================
    15) 登录闸门
    ========================================================================== */
-.gate{
-  position:fixed;inset:0;z-index:80;background:var(--canvas);
-  display:grid;place-items:center;padding:24px;overflow-y:auto;
-}
-.gate[hidden]{display:none}
-[data-theme="light"] .gate{
-  background-image:
-    radial-gradient(1100px 640px at 6% -18%, rgba(31,108,159,.045), transparent 62%),
-    radial-gradient(900px 520px at 100% -6%, rgba(149,100,0,.035), transparent 64%);
-}
-.gate-card{
-  position:relative;
-  /* 原来 1fr + 400px（实测 526 : 400 ≈ 57:43）。左边扛着主句、三条论据、
-     技术栈三块内容，右边只有一个标题 + 两个输入框 + 一个按钮 ——
-     重的那侧反而更窄。改成 1.32fr : 1fr，实测约 55:45 里再让左栏多拿一点，
-     左栏宽度从 526 提到约 560，主句那行中文才能自然地断成两行。
-     max-width 同步放宽：928px 下左栏那行主句每行只放得下 16 个字，
-     挤成 4 行；到 1000px 才断得舒服。 */
-  width:100%;max-width:1000px;display:grid;grid-template-columns:1.32fr 1fr;
-  background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);
-  box-shadow:var(--shadow-3);overflow:hidden;
-  animation:rise .34s var(--ease-out) both;
-}
-.gate-card::before{
-  content:"";position:absolute;inset:3px;border-radius:calc(var(--r-lg) - 3px);
-  border:1px solid var(--line-soft);pointer-events:none;z-index:3;
-}
-/* 左半：把"这个系统和普通表单有什么不同"在登录前说清楚。
-   它不装饰，它**说服** —— 决定要不要登录是在这一步做的。 */
-.gate-aside{
-  position:relative;z-index:4;
-  padding:42px 44px;background:linear-gradient(145deg,#10283a 0%,#183c50 55%,#0e202f 100%);color:#f5fbff;
-  display:flex;flex-direction:column;gap:24px;
-}
-.gate-aside::after{content:"";position:absolute;right:-90px;top:70px;width:290px;height:290px;border:1px solid rgba(158,218,235,.2);border-radius:50%;box-shadow:0 0 0 28px rgba(158,218,235,.035),0 0 0 58px rgba(158,218,235,.025);pointer-events:none}.gate-aside>*{position:relative;z-index:1}.gate-aside .brand-lg-txt b,.gate-aside .gate-points b{color:#f5fbff}.gate-aside .brand-lg-txt small,.gate-aside .gate-points li,.gate-aside .gate-foot{color:rgba(228,243,249,.68)}.gate-aside .mark{background:#f4fbff;color:#10283a}.gate-kicker{margin:9px 0 -17px;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#9ed9e8;font-weight:700}.gate-description{margin:-12px 0 0;color:rgba(228,243,249,.72);font-size:13px;line-height:1.7;max-width:350px}.booking-preview{padding:14px 15px;border:1px solid rgba(181,227,237,.2);border-radius:11px;background:rgba(5,20,29,.24);backdrop-filter:blur(8px);max-width:360px}.preview-head,.preview-device,.preview-time{display:flex;align-items:center;justify-content:space-between;gap:10px}.preview-head{font-size:10px;color:#9ed9e8;letter-spacing:.08em;text-transform:uppercase}.preview-status{padding:3px 7px;border-radius:99px;background:rgba(142,218,176,.14);color:#9be0b5;letter-spacing:0;text-transform:none}.preview-device{justify-content:flex-start;margin:16px 0 13px}.preview-icon{display:grid;place-items:center;width:28px;height:28px;border-radius:8px;background:rgba(158,218,235,.14);color:#a8e5f0}.preview-device b{display:block;font-size:13px}.preview-device small,.preview-time small{display:block;color:rgba(228,243,249,.58);font-size:10px;margin-top:3px}.preview-time{padding:10px 0;border-top:1px solid rgba(181,227,237,.13);border-bottom:1px solid rgba(181,227,237,.13);font-size:12px}.preview-time>span:first-child{color:#e79a94;text-decoration:line-through}.preview-time strong{color:#a5e0b8;font-weight:500}.booking-preview p{margin:11px 0 0;color:rgba(228,243,249,.7);font-size:11px}.gate .box{background:var(--surface)}.login-kicker{display:block;color:var(--focus);font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;margin-bottom:8px}.gate .box-h h2{font-size:24px;letter-spacing:-.035em}
-
-.brand-lg{display:flex;align-items:center;gap:12px}
-.brand-lg .mark{width:36px;height:36px;border-radius:8px;font-size:var(--t-sm)}
-.brand-lg-txt{display:flex;flex-direction:column;line-height:1.25}
-.brand-lg-txt b{font-size:var(--t-md);font-weight:500;letter-spacing:-.02em}
-.brand-lg-txt small{color:var(--ink-3);font-size:var(--t-xs);margin-top:2px}
-/* 主句：全页唯一的"排版时刻"。
-   衬线 + 大字 + 负字距 + 紧行高 —— 大字收紧、小字放松，
-   是印刷排版里最省事也最有效的一条规则。 */
-.gate-lede{
-  margin:0;
-  font-family:var(--font-display);
-  font-size:var(--t-xl); line-height:1.42; letter-spacing:-.018em;
-  color:var(--ink); font-weight:400;
-}
-.gate-lede strong{
-  font-weight:500; font-style:italic;
-  border-bottom:1px solid color-mix(in srgb,var(--ink) 30%,transparent);
-  padding-bottom:1px;
-}
-/* 三条论据之间留够气口，并让整块在品牌区与脚注之间**自然摊开**：
-   原来 gap 15px 会让三行挤在一起、底部空出 70px 的死区。
-   改 18px 并给容器一点上边距，三块内容在纵向上的分布就均匀了。 */
-.gate-points{list-style:none;margin:4px 0 0;padding:0;display:flex;flex-direction:column;gap:18px}
-.gate-points li{display:flex;gap:13px;align-items:flex-start;font-size:var(--t-sm);line-height:1.65;color:var(--ink-2)}
-.gate-points .k{
-  font-family:var(--font-mono);font-size:var(--t-micro);color:var(--ink-3);flex:none;
-  padding-top:2px;letter-spacing:0;text-transform:none;
-}
-.gate-points b{color:var(--ink);font-weight:500;display:block;margin-bottom:1px;font-size:var(--t-sm)}
-.gate-foot{margin-top:auto;font-family:var(--font-mono);font-size:var(--t-micro);color:var(--ink-3);letter-spacing:.02em}
-
-/* 右侧表单：内容**顶对齐**，不是垂直居中。
-   居中的后果是上下各留一大块等量空白，表单悬在盒子中间，
-   和左边品牌区没有任何对齐关系。改成上对齐 + 与左栏同样的顶部留白，
-   两栏的第一行就落在同一条水平线上 —— 这是"贴合"最直接的来源。 */
-.gate .box{position:relative;z-index:4;padding:44px 40px;display:flex;flex-direction:column;justify-content:flex-start}
-.box-h{margin-bottom:24px}
-.box-h h2{margin:0;font-size:var(--t-lg);font-weight:500;letter-spacing:-.022em}
-.gate .sub{color:var(--ink-2);font-size:var(--t-sm);margin:6px 0 0;line-height:1.62}
-.gate .btn-block{margin-top:20px;padding:11px}
-.gate .err{
-  display:none;margin-top:14px;padding:10px 13px;border-radius:var(--r-sm);font-size:var(--t-sm);
-  color:var(--bad-ink);background:var(--bad-bg);line-height:1.58;
-}
-.gate .err.on{display:block}
-.divider{display:flex;align-items:center;gap:12px;margin:22px 0 18px;color:var(--ink-3);font-size:var(--t-xs);letter-spacing:.04em}
-.divider::before,.divider::after{content:"";height:1px;background:var(--line);flex:1}
-.gate-toggle{text-align:center;font-size:var(--t-sm);margin:16px 0 0}
-.gate-toggle a{color:var(--ink-2);text-decoration:none;border-bottom:1px solid var(--line);padding-bottom:1px;transition:color .16s var(--ease), border-color .16s var(--ease)}
-.gate-toggle a:hover{color:var(--ink);border-color:var(--ink)}
-/* 演示账号区压到底：与左栏 .gate-foot（技术栈脚注）落在同一条底线上，
-   两栏因此上下都有对齐关系，而不是各自为政的两个盒子。
-   margin-top 用 auto + 28px 下界：auto 负责"能推多低推多低"，
-   但在**注册模式下**右栏内容变高、剩余空间归零，此时 auto 塌成 0，
-   演示账号就会紧贴"注册并登录"按钮（实测截图里显得挤）。
-   加一个最小间距，两种模式下都有呼吸。 */
-.gate .demo{margin-top:auto;padding-top:20px;border-top:1px solid var(--line)}
-.gate .box>.gate-toggle{margin-top:28px}
-.gate .demo .t{font-size:var(--t-micro);color:var(--ink-3);letter-spacing:.085em;text-transform:uppercase;margin-bottom:10px;font-weight:500}
-.gate .demo .pill-row{margin-top:0}
-
-/* 演示账号的"边界预览"：点一下当场说明这个身份能约到什么、会被什么拦下。
-   用 dl 而不是表格：这里只有四行键值，表格会给它加上一堆不必要的语义。 */
-.gate .demo-preview{margin-top:12px;min-height:96px}
-.gate .demo-preview .hint{margin-top:0}
-.pv{margin:0;display:grid;grid-template-columns:auto 1fr;gap:5px 12px;font-size:var(--t-sm)}
-.pv>div{display:contents}
-.pv dt{color:var(--ink-3);font-size:var(--t-micro);letter-spacing:.04em;padding-top:2px}
-.pv dd{margin:0;color:var(--ink-2);line-height:1.5}
-.pv dd b{color:var(--ink);font-weight:500}
-.pv dd.ok{color:var(--ok-ink)}
-.pv dd.no{color:var(--bad-ink)}
-/* 切换账号时预览整体淡入一次 —— 不动的话看不出内容变了 */
-@keyframes pvin{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
-.pv-in{animation:pvin .26s var(--ease-out) both}
-/* 被选中的演示账号：墨色描边 + 实底，和 hover 区分开 */
-.gate .demo .pill-row .btn.sm[aria-pressed="true"]{
-  background:var(--action);color:var(--action-ink);border-color:var(--action);
-}
-.gate .demo .btn.sm{font-family:var(--font-mono);font-size:var(--t-xs)}
+body:has(#gate:not([hidden])){overflow:hidden}
+body:has(#gate:not([hidden]))>.top,body:has(#gate:not([hidden]))>main{display:none}
+/* Login surface: independent light palette, shared authentication behavior. */
+.gate{--ink:#203c34;--ink-2:#536b60;--ink-3:#718078;--line:#dce5df;--surface:#fff;--focus:#23775b;--action:#23694f;--action-ink:#fff;--ok-ink:#23694f;--bad-ink:#a24b37;color-scheme:light;position:fixed;inset:0;z-index:80;overflow-y:auto;display:grid;place-items:center;padding:48px;background:#f3f5ee;color:var(--ink)}
+.gate-card{width:100%;max-width:1160px;display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:clamp(40px,7vw,110px);align-items:center}
+.gate-aside{min-width:0}.brand-lg{display:flex;align-items:center;gap:12px}.brand-lg .mark{width:40px;height:40px;background:#264e3e;color:#fff;border-radius:12px}.brand-lg-txt{display:flex;flex-direction:column;gap:4px}.brand-lg-txt b{font-size:16px;font-weight:650;letter-spacing:-.03em}.brand-lg-txt small{font-size:11px;color:#718078}
+.gate-kicker{margin:48px 0 16px;color:#587963;font-size:12px;letter-spacing:.12em}.gate-lede{font-size:clamp(36px,4.4vw,60px);line-height:1.25;letter-spacing:-.055em;font-weight:600;margin:0}.gate-lede strong{color:#31805d;font-weight:600}.gate-description{max-width:400px;font-size:14px;line-height:1.9;color:#65766b;margin:20px 0 30px}
+.booking-story{padding:22px;border:1px solid #d7e2d6;background:#ffffffad;border-radius:18px;box-shadow:0 14px 38px #284a3110;transition:box-shadow .25s,transform .25s}.booking-story:hover{transform:translateY(-3px);box-shadow:0 18px 40px #284a3119}.story-top{display:flex;justify-content:space-between;gap:10px;font-size:12px;font-weight:600}.story-top small{font-size:10px;color:#7a867d;font-weight:400}.story-device{display:flex;align-items:center;gap:12px;margin:24px 0}.story-symbol{display:grid;place-items:center;width:40px;height:40px;border-radius:12px;background:#e4eddf;font-size:24px;color:#357251}.story-device b{font-size:14px;display:block}.story-device small{display:block;color:#78877d;font-size:11px;margin-top:5px}.story-label{margin-left:auto;font-size:10px;color:#4c785a;background:#eef3e9;padding:5px 8px;border-radius:5px}.story-hours{display:flex;justify-content:space-between;font-size:10px;color:#819085;margin-bottom:8px;font-variant-numeric:tabular-nums}.story-track{height:80px;position:relative;display:flex;gap:4px}.story-slot{flex:1;border-radius:7px;font-size:11px;padding:10px;background:#f0e9e1;color:#927a63}.story-slot.available{background:#eaf1e5;color:#6e8c64;text-align:right}.story-request{position:absolute;left:4px;top:39px;width:calc(50% - 8px);background:#325e48;color:#fff;text-align:center;border-radius:6px;padding:9px 4px;font-size:11px;transition:transform .65s cubic-bezier(.2,.8,.2,1),background .35s}.story-track[data-step="1"] .story-request{background:#b77749}.story-track[data-step="2"] .story-request{transform:translateX(calc(100% + 8px));background:#23775b}.story-caption{min-height:77px;padding-top:20px}.story-caption b{font-size:13px}.story-caption p{font-size:12px;line-height:1.7;color:#718078;margin:6px 0 0}.story-controls{display:flex;align-items:center;justify-content:space-between;gap:8px;padding-top:16px;border-top:1px solid #e2e9df}.story-controls button{font:inherit;font-size:11px;border:0;background:transparent;color:#78877d;cursor:pointer;border-radius:5px;padding:7px}.story-controls button:hover{background:#e8efe3}.story-steps{display:flex;gap:3px}.story-steps button[aria-pressed="true"]{color:#216b4b;background:#e4eddf;font-weight:600}#story-play{color:#216b4b;font-weight:600}.gate-principles{display:flex;gap:24px;font-size:11px;color:#768578;margin-top:20px}.gate-principles span::before{content:'✓';margin-right:6px;color:#47815b}
+.gate .box{background:#fff;padding:38px;border:1px solid #e2e8df;border-radius:22px;box-shadow:0 20px 60px #2947350c;min-width:0}.box-h{margin-bottom:28px}.login-kicker{display:block;font-size:11px;color:#3d8060;margin-bottom:12px;letter-spacing:.12em}.gate .box-h h2{font-size:25px;letter-spacing:-.035em;margin:0;font-weight:600;color:#203c34}.gate .sub{font-size:12px;color:#7c8980;line-height:1.8;margin:10px 0 0}.gate .field{margin-top:18px}.gate .f{color:#536b60;font-size:12px;margin-bottom:8px}.gate input{height:47px;border:1px solid #dce5df;border-radius:9px;background:#fafbf8;color:#203c34}.gate input:focus{border-color:#458765;box-shadow:0 0 0 3px #45876518;background:white}.gate .btn-block{height:47px;background:#23694f;color:white;margin-top:24px;border-radius:9px;font-weight:600;transition:background .2s,transform .2s}.gate .btn-block:hover{background:#19583e;transform:translateY(-2px)}.gate .err{display:none;padding:10px;margin-top:12px;background:#fff0ea;color:#a24b37;border-radius:8px;font-size:12px}.gate .err.on{display:block}.gate-toggle{margin:20px 0;text-align:center;font-size:12px}.gate-toggle a{color:#64776b}.gate .demo{border-top:1px solid #e5ebe2;padding-top:22px;margin-top:24px}.gate .demo .t{font-size:10px;letter-spacing:.08em;color:#7b887f;margin-bottom:12px}.gate .demo .pill-row{display:flex;flex-wrap:wrap;gap:7px}.gate .demo .btn.sm{font-size:11px;background:#fafbf8;color:#617368;border:1px solid #e0e7dc;padding:8px 10px;border-radius:7px}.gate .demo .btn.sm:hover,.gate .demo .btn.sm[aria-pressed="true"]{background:#eaf3e6;color:#286c47;border-color:#9fc4a5}.gate .demo-preview{min-height:64px;margin-top:15px}.gate .hint{font-size:11px;color:#7c8980;line-height:1.8}.pv{display:grid;grid-template-columns:auto 1fr;gap:5px 12px;font-size:11px;margin:0}.pv>div{display:contents}.pv dt{color:#7c8980}.pv dd{margin:0;color:#536b60}.pv dd.ok{color:#23694f}.pv dd.no{color:#a24b37}.divider{display:flex;align-items:center;gap:12px;margin:22px 0;color:#718078;font-size:12px}.divider::before,.divider::after{content:'';height:1px;background:#e0e7dc;flex:1}
+@keyframes loginReveal{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}.gate-aside,.gate .box{animation:loginReveal .55s ease both}.gate .box{animation-delay:.08s}
+@media(max-width:980px){.gate{padding:30px}.gate-card{gap:30px;grid-template-columns:1fr 1fr}.gate .box{padding:26px}.gate-lede{font-size:38px}.story-top{display:block}.story-top small{display:block;margin-top:5px}.gate-principles{gap:12px}}
+@media(max-width:720px){.gate{padding:24px 18px;place-items:start center}.gate-card{grid-template-columns:1fr;max-width:460px;gap:24px}.gate-kicker,.gate-description,.booking-story,.gate-principles{display:none}.gate-lede{font-size:27px;line-height:1.4;margin-top:24px}.gate-lede br{display:none}.gate .box{padding:28px 24px}.gate .box-h h2{font-size:23px}}
+@media(prefers-reduced-motion:reduce){.gate-aside,.gate .box{animation:none}.gate *, .gate *::before{transition:none!important}}
 
 .who-role{font-size:var(--t-micro);padding:1px 7px;border-radius:var(--r-pill);background:var(--surface-3);color:var(--ink-3)}
 .who-role.admin{background:var(--info-bg);color:var(--info-ink)}
@@ -830,7 +728,7 @@ td .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
    没有"滚动到才出现"的场景，为它引一段 JS 是净增复杂度。
    只动 transform / opacity —— 这两个属性走合成层，不触发重排。 */
 @keyframes enter{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
-.stats,.cols>*,.gate-aside>*,.gate .box>*{animation:enter .44s var(--ease-out) both}
+.stats,.cols>*{animation:enter .44s var(--ease-out) both}
 .stat{animation:enter .44s var(--ease-out) both}
 .stat:nth-child(1){animation-delay:.04s}
 .stat:nth-child(2){animation-delay:.08s}
@@ -1051,11 +949,11 @@ body.busy header.top::after{opacity:.9; animation:sweep 1.6s var(--ease) infinit
   .tab::after{left:10px;right:10px}
 }
 @media(max-width:1120px){
-  .gate-card{grid-template-columns:1fr;max-width:452px}
-  .gate-aside{padding:30px 30px 26px;gap:18px}
+
+
   :root{--t-xl:20px}
-  .gate-lede{line-height:1.5}
-  .gate-foot{display:none}
+
+
 }
 @media(max-width:1020px){
   /* minmax(0,1fr) 而不是 1fr：1fr 等价于 minmax(auto,1fr)，
@@ -1181,15 +1079,15 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--focus);outline-offs
 /* 工作台欢迎区：把"下一步做什么"放在数据卡片之前，降低首次使用门槛。 */
 .welcome{
   position:relative;display:flex;align-items:center;justify-content:space-between;gap:28px;
-  min-height:190px;margin:0 0 20px;padding:28px 34px;overflow:hidden;
+  min-height:160px;margin:0 0 20px;padding:24px 30px;overflow:hidden;
   border:1px solid color-mix(in srgb,var(--focus) 18%,var(--line));border-radius:var(--r-lg);
   background:linear-gradient(115deg,color-mix(in srgb,var(--surface) 92%,var(--focus)),var(--surface));
   box-shadow:var(--shadow-1)
 }
 .welcome::before{content:"";position:absolute;inset:0;pointer-events:none;opacity:.35;background-image:radial-gradient(color-mix(in srgb,var(--focus) 22%,transparent) 1px,transparent 1px);background-size:18px 18px;mask-image:linear-gradient(90deg,#000,transparent 70%)}
 .welcome-copy{position:relative;z-index:1;max-width:670px}.eyebrow{display:flex;align-items:center;gap:8px;color:var(--focus);font-size:var(--t-sm);font-weight:700;letter-spacing:.08em;text-transform:uppercase}.live-dot{width:7px;height:7px;border-radius:50%;background:var(--focus);box-shadow:0 0 0 4px color-mix(in srgb,var(--focus) 14%,transparent)}
-.welcome h1{margin:10px 0 8px;font-size:clamp(26px,3vw,40px);letter-spacing:-.04em;line-height:1.08}.welcome h1 em{color:var(--focus);font-style:normal}.welcome p{max-width:560px;margin:0;color:var(--muted);font-size:15px;line-height:1.7}.welcome-actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:18px}.welcome-actions .btn span{margin-left:8px;font-size:18px;line-height:0}
-.welcome-orbit{position:relative;flex:0 0 170px;width:170px;height:150px}.orbit-ring{position:absolute;border:1px solid color-mix(in srgb,var(--focus) 28%,transparent);border-radius:50%;transform:rotate(-18deg)}.ring-a{inset:18px 0;animation:orbit 12s linear infinite}.ring-b{inset:4px 20px;transform:rotate(58deg);animation:orbit 16s linear infinite reverse}.orbit-core{position:absolute;top:48px;left:58px;width:58px;height:58px;border-radius:20px;display:grid;place-items:center;background:var(--action);color:var(--action-ink);box-shadow:0 8px 28px color-mix(in srgb,var(--focus) 28%,transparent);transform:rotate(-8deg)}.orbit-core span{font:700 17px Georgia,serif}.orbit-core small{font-size:7px;letter-spacing:.15em;opacity:.72}.orbit-node{position:absolute;padding:4px 8px;border:1px solid var(--line);border-radius:99px;background:var(--surface);color:var(--muted);font-size:10px;box-shadow:var(--shadow-1)}.node-a{top:5px;right:5px}.node-b{bottom:7px;left:2px}.node-c{right:-3px;bottom:22px}
+.welcome h1{margin:10px 0 8px;font-size:clamp(25px,2.6vw,34px);letter-spacing:-.04em;line-height:1.08}.welcome h1 em{color:var(--focus);font-style:normal}.welcome p{max-width:560px;margin:0;color:var(--ink-2);font-size:15px;line-height:1.7}.welcome-actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:18px}.welcome-actions .btn span{margin-left:8px;font-size:18px;line-height:0}
+.welcome-orbit{position:relative;flex:0 0 170px;width:170px;height:150px}.orbit-ring{position:absolute;border:1px solid color-mix(in srgb,var(--focus) 28%,transparent);border-radius:50%;transform:rotate(-18deg)}.ring-a{inset:18px 0;animation:none}.ring-b{inset:4px 20px;transform:rotate(58deg);animation:none}.orbit-core{position:absolute;top:48px;left:58px;width:58px;height:58px;border-radius:20px;display:grid;place-items:center;background:var(--action);color:var(--action-ink);box-shadow:0 8px 28px color-mix(in srgb,var(--focus) 28%,transparent);transform:rotate(-8deg)}.orbit-core span{font:700 17px Georgia,serif}.orbit-core small{font-size:7px;letter-spacing:.15em;opacity:.72}.orbit-node{position:absolute;padding:4px 8px;border:1px solid var(--line);border-radius:99px;background:var(--surface);color:var(--ink-2);font-size:10px;box-shadow:var(--shadow-1)}.node-a{top:5px;right:5px}.node-b{bottom:7px;left:2px}.node-c{right:-3px;bottom:22px}
 @keyframes orbit{to{transform:rotate(342deg)}}
 @media(prefers-reduced-motion:reduce){.ring-a,.ring-b{animation:none}}
 @media(max-width:640px){.welcome{min-height:0;padding:22px 20px}.welcome-orbit{display:none}.welcome h1{font-size:29px}}

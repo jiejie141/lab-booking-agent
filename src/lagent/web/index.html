@@ -38,23 +38,18 @@
         </div>
       </div>
 
-      <p class="gate-kicker">让每一次实验，都有条不紊</p>
-      <p class="gate-lede">专注你的研究。<br><strong>预约，交给我们。</strong></p>
-      <p class="gate-description">从设备选择到时间协调，让智能助手帮你找到合适的实验安排。</p>
-      <div class="booking-preview" aria-label="预约协商示例">
-        <div class="preview-head"><span>预约协商示例</span><span class="preview-status">可选方案</span></div>
-        <div class="preview-device"><span class="preview-icon" aria-hidden="true">◈</span><div><b>荧光光谱仪</b><small>分析实验室 · 光谱分析</small></div></div>
-        <div class="preview-time"><span>14:00 — 16:00 <small>时段冲突</small></span><span aria-hidden="true">↓</span><strong>16:00 — 18:00 <small>备选时段</small></strong></div>
-        <p>同一台设备，换个时间，实验照常进行。</p>
-      </div>
-
-      <ul class="gate-points">
-        <li><span class="k">01</span><span><b>约束协商</b>冲突时给出带取舍说明的备选方案，每条都标注放宽了什么</span></li>
-        <li><span class="k">02</span><span><b>资质准入</b>设备要培训资质才放行，这是硬约束，换时段解决不了</span></li>
-        <li><span class="k">03</span><span><b>全链路留痕</b>下单、审批、驳回、豁免，每一步都进审计流水</span></li>
-      </ul>
-
-      <div class="gate-foot">FastAPI · LangGraph · SQLAlchemy 2.0 · DeepSeek</div>
+      <p class="gate-kicker">为每一次探索，留好时间</p>
+      <h1 class="gate-lede">让研究继续。<br><strong>让预约更简单。</strong></h1>
+      <p class="gate-description">说出你的实验计划。遇到冲突，一起找到下一种可能。</p>
+      <section class="booking-story" aria-label="交互预约演示">
+        <div class="story-top"><span>一次预约，三步安排</span><small>交互示例 · 不创建真实预约</small></div>
+        <div class="story-device"><span class="story-symbol" aria-hidden="true">↗</span><div><b>荧光光谱仪</b><small>分析实验室 / 02</small></div><span class="story-label">保留设备</span></div>
+        <div class="story-hours"><span>14:00</span><span>16:00</span><span>18:00</span></div>
+        <div class="story-track" data-step="0" id="story-track"><div class="story-slot occupied">已有安排</div><div class="story-slot available">空闲时段</div><div class="story-request">你的实验 · 2 小时</div></div>
+        <div class="story-caption" aria-live="polite"><b id="story-title">先说说，你的计划</b><p id="story-detail">“我想用光谱仪，下午两点开始，使用两小时。”</p></div>
+        <div class="story-controls"><div class="story-steps" aria-label="演示步骤"><button type="button" data-story="0" aria-pressed="true">01 需求</button><button type="button" data-story="1" aria-pressed="false">02 冲突</button><button type="button" data-story="2" aria-pressed="false">03 备选</button></div><button type="button" id="story-play">播放演示 ↗</button></div>
+      </section>
+      <div class="gate-principles"><span>资质先行</span><span>取舍可解释</span><span>过程可追溯</span></div>
     </aside>
 
     <div class="box">
@@ -150,12 +145,12 @@
   <section class="welcome" aria-labelledby="welcome-title">
     <div class="welcome-copy">
       <span class="eyebrow"><span class="live-dot"></span> 实验室预约工作台</span>
-      <h1 id="welcome-title">把实验安排好，<em>从一句话开始。</em></h1>
-      <p>告诉助手设备、时间和用途。遇到冲突时，它会解释限制并给出可以执行的备选方案。</p>
+      <h1 id="welcome-title">安排下一场实验，<em>从这里开始。</em></h1>
+      <p>直接预约设备，或让助手帮你寻找合适的时段。预约记录和处理进度随时可查。</p>
       <div class="welcome-actions" aria-label="快捷操作">
         <button class="btn" data-jump="book">直接预约 <span aria-hidden="true">→</span></button>
         <button class="btn ghost" data-jump="labs">浏览设备</button>
-        <button class="btn ghost" data-jump="kb">查看规范</button>
+        <button class="btn ghost" data-jump="res">我的预约</button>
       </div>
     </div>
     <div class="welcome-orbit" aria-hidden="true">
