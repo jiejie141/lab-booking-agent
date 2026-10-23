@@ -2,8 +2,8 @@
 # CI：每次 push / PR 自动验证
 #
 # 分六个 job，故意拆开 —— 失败时能一眼看出是哪一类问题：
-#   quality  : 静态检查（ruff）+ 类型检查（mypy）+ 单元测试（pytest）
 #   frontend : 控制台前端（React + Tailwind）的类型检查、单测与构建
+#   quality  : 静态检查（ruff）+ 类型检查（mypy）+ 单元测试（pytest）
 #   smoke    : 真实进程上的端到端验证（评测集 / 重叠竞态 / 清扫演示 / HTTP 越权清单）
 #   docker   : 镜像构建 + compose 实机验收（真 PG / 真容器 / 真 HTTP）
 #   vector   : 装 chromadb 跑向量检索分支（防降级导致的假绿）
@@ -79,12 +79,18 @@ jobs:
       # 构建完再确认产物真的是「能被后端托管」的那个形状。
       # 光看 exit code 不够：vite 把产物默默放到了别的 outDir（比如相对路径
       # 算错），build 依然成功，而 api.py 会 503。这一步让那种情况当场红。
+      #
+      # ⚠ 路径是 ../dist 而不是 dist：本 job 的 working-directory 是
+      #   src/lagent/web/ui，而 vite.config.ts 里 outDir 写的是 "../dist"
+      #   （相对 ui 目录 → src/lagent/web/dist）。第一次写这一步时漏了这个
+      #   ../ ，于是它在**构建完全成功**的情况下报「产物没落到位」——
+      #   一个纯粹的脚本错误，却长得像构建错误。
       - name: 确认产物落到了后端要读的目录
         run: |
           set -euo pipefail
-          test -f dist/index.html || { echo "::error::dist/index.html 不存在，产物没落到 src/lagent/web/dist"; exit 1; }
-          grep -q '/assets-app/' dist/index.html || { echo "::error::index.html 里没有 /assets-app/ 引用，vite 的 base 配错了"; exit 1; }
-          ls -la dist dist/assets
+          test -f ../dist/index.html || { echo "::error::src/lagent/web/dist/index.html 不存在，产物没落到后端要读的目录"; exit 1; }
+          grep -q '/assets-app/' ../dist/index.html || { echo "::error::index.html 里没有 /assets-app/ 引用，vite 的 base 配错了"; exit 1; }
+          ls -la ../dist ../dist/assets
 
   quality:
     name: 静态检查 + 单测 (py${{ matrix.python-version }})
@@ -109,6 +115,29 @@ jobs:
           # 静态检查工具不进 requirements.txt：它们不是运行依赖
           pip install "ruff>=0.9" "mypy>=1.11"
           pip install "pytest-cov>=5.0"
+
+      # 构建控制台前端 —— 这里**不是**为了验证前端（那是 frontend job 的职责），
+      # 而是因为有几条后端用例真的拿构建产物当夹具：
+      #     tests/test_api.py     test_index_served / test_console_assets_are_served
+      #     tests/test_console.py TestConsoleIsServed 的两条
+      # 它们验的是「api.py 能不能把产物托管出去」。而 dist/ 不入库
+      # （见 .gitignore），干净 checkout 上本来就没有，所以第一次跑 CI 时
+      # 这四条以 503 /「没有引用任何 /assets-app/ 资源」红掉 —— 代码没错，
+      # 缺的是夹具。
+      #
+      # 另一条路是「产物不在这里就 skip」。那样 CI 会绿，而 / 实际仍返回 503：
+      # 一条在最关键处静默消失的断言。宁可多花二三十秒装一次依赖。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: src/lagent/web/ui/package-lock.json
+
+      - name: 构建控制台前端产物（后端用例要读它）
+        working-directory: src/lagent/web/ui
+        run: |
+          npm ci
+          npm run build
 
       # 2026-10-11 加：把「依赖解析出界」这件事在 CI 里变成**硬失败**。
       #
@@ -198,6 +227,21 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      # 与 quality job 同理：smoke_http.py 里有一项「控制台页面可访问」
+      # 断言 GET / == 200，而 / 读的是构建产物。dist/ 不入库，
+      # 不起构建的话这一项必然 503。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: src/lagent/web/ui/package-lock.json
+
+      - name: 构建控制台前端产物（冒烟要访问 /）
+        working-directory: src/lagent/web/ui
+        run: |
+          npm ci
+          npm run build
 
       - name: 评测集（意图 / 槽位 / 端到端通过率）
         run: python scripts/ci_run.py --tail 12 -- python main.py eval
@@ -329,10 +373,23 @@ jobs:
       # 不加这一步的话，万一 chromadb 装不上（版本冲突、平台没 wheel），
       # 测试会因为降级而全部跳过、job 照样绿 ——
       # **看起来通过了，实际什么都没验**。这是可选依赖 job 最容易的假绿。
+      #
+      # ⚠ 两条 python -c 都必须先 sys.path.insert(0, 'src')。
+      #   本项目是 src 布局、不做 pip install -e .，靠
+      #   pyproject.toml 的 [tool.pytest.ini_options] pythonpath = ["src"]
+      #   让测试能 import lagent —— 但那只对 **pytest** 生效，
+      #   对裸的 python -c 不生效。少了这行会报
+      #   ModuleNotFoundError: No module named 'lagent'，
+      #   而那看起来像「项目坏了」，其实是「导入路径没接上」。
+      #   下一步的预热脚本本来就写了这行，所以只有这一步红过。
       - name: 确认 chromadb 真的可用（防止降级导致的假绿）
         run: |
           python -c "import chromadb; print('chromadb', chromadb.__version__)"
-          python -c "from lagent.knowledge.retriever import ChromaVectorIndex; print('import ok')"
+          python -c "
+          import sys; sys.path.insert(0, 'src')
+          from lagent.knowledge.retriever import ChromaVectorIndex
+          print('import ok')
+          "
 
       # 跑全部检索测试。装了 chromadb 之后 test_retrieval.py 里那句
       # `if vector_ok:` 会走 True 分支，断言 HybridRetriever 真的被建出来 ——
