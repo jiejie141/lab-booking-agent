@@ -49,7 +49,7 @@
 
 **H1 · 本轮补的管理功能，在控制台上一个都点不到**
 
-控制台（`src/lagent/web/index.html`）一共只调 8 个接口：
+控制台（当时是 `src/lagent/web/index.html` 单文件）一共只调 8 个接口：
 
 ```
 /api/auth/login · /api/auth/me · /api/health/details · /api/labs

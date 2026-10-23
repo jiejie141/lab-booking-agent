@@ -127,8 +127,8 @@ python main.py loadtest
 
 ### ⑦ 收尾（30 秒工程化盘点）
 
-> "1026 项测试（本地 1010 通过 / 16 跳过）、7 个迁移 revision（'给有数据的表加列'逐条演练过）、
-> CI 四类作业含 PostgreSQL 真实链路、容器化实机验收、备份恢复演练；
+> "1008 项测试（本地 992 通过 / 16 跳过）、7 个迁移 revision（'给有数据的表加列'逐条演练过）、
+> CI 六类作业含 PostgreSQL 真实链路、容器化实机验收、备份恢复演练；
 > 可观测性有结构化日志（request_id 串一次请求）、Prometheus 指标和告警规则。
 > 仓库开源，数字都能对着 CI 复核。"
 
@@ -140,7 +140,7 @@ python main.py loadtest
 2. 张伟撞同时段 → `409 reason=conflict`；
 3. 切终端跑 `loadtest` → "40 并发 ×3 轮，每轮恰好 1 条成功，
    闸在数据库的唯一索引上"；
-4. 一句话收："1026 项测试、CI 四类作业、备份恢复演练，仓库开源可复核。"
+4. 一句话收："1008 项测试、CI 六类作业、备份恢复演练，仓库开源可复核。"
 
 ---
 
@@ -150,7 +150,7 @@ python main.py loadtest
 |---|---|
 | "模型挂了怎么办？" | `src/lagent/api.py` 的表单下单接口 + `app_mode=degraded`：系统只剩"对话不可用"，不是"不能预约" |
 | "并发为什么放数据库层？" | `src/lagent/domain/booking.py`（占用格 + 条件 UPDATE + rowcount）、`models.py` 的部分唯一索引；测试 `tests/test_concurrency.py` |
-| "怎么防 Prompt 注入 / 越权？" | HTTP 冒烟与越权清单 **84/84**（`scripts/smoke_http.py`，真实 uvicorn 进程）；资质判定在代码，模型只做语言层 |
+| "怎么防 Prompt 注入 / 越权？" | HTTP 冒烟与越权清单 **83/83**（`scripts/smoke_http.py`，真实 uvicorn 进程）；资质判定在代码，模型只做语言层 |
 | "评测怎么做的？准确率多少？" | `eval/cases.yaml` + `python main.py eval`。**如实说**：mock 模型下的 14/14 衡量的是链路自洽，不是模型准确率 —— 评测报告里印着这行免责声明；接真实模型要单独跑 |
 | "迁移怎么保证不搞坏生产库？" | `tests/test_migrations.py`：先在旧 revision 上**造数据**再升级，断言数据仍在、新列取默认值（0003/0005 都演练过） |
 | "多副本部署行吗？" | 如实说：**同机多进程已经解决** —— 设 `LAB_STATE_BACKEND=sqlite` 后会话与限流计数共享一份（WAL），脚本与服务并存、`--workers` 都不会漂移；**跨机器**多副本才需要 Redis，那时 `lagent_state_backend` 指标会立刻暴露。这是**有触发条件的取舍**，不是没想过 |
@@ -290,12 +290,12 @@ curl -X POST localhost:8200/api/users -H "Authorization: Bearer $ADMIN_TOKEN" \
 ## 数字台账（2026-10-09 复核）
 | 数字 | 出处 |
 |---|---|
-| **1026** 项测试 | `pytest --collect-only`（35 个测试文件；1010 passed + 16 skipped） |
+| **1008** 项测试 | `pytest --collect-only`（36 个测试文件；992 passed + 16 skipped） |
 | 40 并发 ×3 轮：每轮 1 成功 / 39 明确冲突 / 0 异常 | `python main.py loadtest --concurrency 40 --rounds 3` |
-| HTTP 冒烟与越权清单 84/84 | `scripts/smoke_http.py`，真实 uvicorn 进程 |
+| HTTP 冒烟与越权清单 83/83 | `scripts/smoke_http.py`，真实 uvicorn 进程 |
 | 7 个迁移 revision | `ls migrations/versions/*.py \| wc -l` |
-| 35 个测试文件 | `pytest --collect-only -q` |
-| 33 条 OpenAPI 路径（契约门禁） | `python scripts/check_openapi.py --check` |
+| 36 个测试文件 | `pytest --collect-only -q` |
+| 34 条 OpenAPI 路径（契约门禁） | `python scripts/check_openapi.py --check` |
 | 注册限流 5/h（可配） | `LAB_REGISTER_PER_HOUR`；超配额返回 429 + `Retry-After` |
 | 7 类机器可读 reason | `schemas.py` 的 `BookingReason` |
-| CI 四类作业 | GitHub Actions：quality（py3.10/py3.13 静态+单测）、smoke（真实进程端到端）、docker（镜像构建+compose 实机验收）、postgres（真 PG 链路） |
+| CI 六类作业 | GitHub Actions：frontend（React 类型检查 + vitest + 构建）、quality（py3.10/py3.13 静态+单测）、smoke（真实进程端到端）、docker（镜像构建+compose 实机验收）、vector（装 chromadb 真跑向量检索）、postgres（真 PG 链路） |

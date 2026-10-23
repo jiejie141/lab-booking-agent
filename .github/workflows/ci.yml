@@ -1,10 +1,12 @@
 # ===========================================================================
 # CI：每次 push / PR 自动验证
 #
-# 分四个 job，故意拆开 —— 失败时能一眼看出是哪一类问题：
+# 分六个 job，故意拆开 —— 失败时能一眼看出是哪一类问题：
 #   quality  : 静态检查（ruff）+ 类型检查（mypy）+ 单元测试（pytest）
+#   frontend : 控制台前端（React + Tailwind）的类型检查、单测与构建
 #   smoke    : 真实进程上的端到端验证（评测集 / 重叠竞态 / 清扫演示 / HTTP 越权清单）
-#   docker   : 镜像能不能构建出来
+#   docker   : 镜像构建 + compose 实机验收（真 PG / 真容器 / 真 HTTP）
+#   vector   : 装 chromadb 跑向量检索分支（防降级导致的假绿）
 #   postgres : 在真实 PostgreSQL 上跑迁移 + 并发不变式（见 tests/test_postgres.py）
 #
 # quality 跑两个 Python 版本：pyproject 声明 >=3.10，本地开发用 3.13，
@@ -28,6 +30,62 @@ permissions:
   contents: read
 
 jobs:
+  # =========================================================================
+  # 控制台前端：类型检查 + 组件测试 + 构建
+  #
+  # 为什么单独一个 job 而不是塞进 quality：
+  #   ① quality 是 Python 3.10/3.13 矩阵，前端与 Python 版本毫无关系 ——
+  #      塞进去等于白跑两遍同样的东西；
+  #   ② 失败信号要能分辨。前端挂了和 ruff 挂了是两种完全不同的修法，
+  #      混在一个 job 里只能靠翻日志。
+  #
+  # 为什么必须跑 build 而不只是 tsc/test：
+  #   npm run build 是 tsc --noEmit && vite build。只跑测试的话，
+  #   「测试全绿但打包失败」（比如 import 了只在测试环境存在的模块、
+  #   或者 Tailwind 的 @source 指错）会一路溜到镜像构建才炸。
+  #   这里把它提前到几分钟内可见。
+  # =========================================================================
+  frontend:
+    name: 控制台前端（React + Tailwind）
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: src/lagent/web/ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # 与 Dockerfile 里的 node:22-slim 对齐：本地/CI/镜像三处同一大版本
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: src/lagent/web/ui/package-lock.json
+
+      # npm ci 而不是 npm install：前者严格按 package-lock.json 装，
+      # 装的和你本机、和镜像里完全一致；后者会顺手更新 lock 与依赖树。
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npx tsc --noEmit
+
+      - name: 组件测试
+        run: npm test
+
+      - name: 构建产物
+        run: npm run build
+
+      # 构建完再确认产物真的是「能被后端托管」的那个形状。
+      # 光看 exit code 不够：vite 把产物默默放到了别的 outDir（比如相对路径
+      # 算错），build 依然成功，而 api.py 会 503。这一步让那种情况当场红。
+      - name: 确认产物落到了后端要读的目录
+        run: |
+          set -euo pipefail
+          test -f dist/index.html || { echo "::error::dist/index.html 不存在，产物没落到 src/lagent/web/dist"; exit 1; }
+          grep -q '/assets-app/' dist/index.html || { echo "::error::index.html 里没有 /assets-app/ 引用，vite 的 base 配错了"; exit 1; }
+          ls -la dist dist/assets
+
   quality:
     name: 静态检查 + 单测 (py${{ matrix.python-version }})
     runs-on: ubuntu-latest

@@ -20,3 +20,12 @@ __pycache__/
 
 # 归档与备份只有几百 MB 到几 GB，运行时用不到（挂卷在宿主机）
 var/
+
+# ---- 前端构建链 ----
+# node_modules 有几万个文件，发给 docker daemon 要几十秒到几分钟，
+# 而镜像里的依赖由 `npm ci` 从 package-lock.json 现装（那才是可复现的）。
+node_modules/
+# 构建产物由镜像内的构建阶段生成，不要用宿主机上的旧产物覆盖它 ——
+# 否则「本机能跑、镜像里是三天前的 JS」，而两边都看不出来。
+dist/
+*.tsbuildinfo

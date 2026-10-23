@@ -1,4 +1,4 @@
-"""把字体子集内嵌进 app.css 顶部。
+"""把字体子集内嵌进前端样式表（src/lagent/web/ui/src/fonts.css）。
 
     python scripts/embed_fonts.py            # 用已下载的 woff2 重新生成
     python scripts/embed_fonts.py --fetch    # 先下载再生成
@@ -7,6 +7,18 @@
 内嵌的 base64 是**生成物**。生成物如果没有生成脚本，下一个人就不知道
 它从哪来、怎么更新、以及为什么是这三个文件。半年后要换字体时，
 他只能对着一行 15000 字符的 base64 发呆。
+
+为什么是 fonts.css 而不是 app.css：
+2026-10 控制台从原生三文件换成了 React + Tailwind（src/lagent/web/ui），
+样式入口变成 ui/src/styles.css，它在第一行 `@import "./fonts.css"`。
+字体单独成文件是因为**整份都是生成物** —— 生成物和手写内容混在一个文件里，
+就得靠锚点标记边界（旧版 embed_fonts.py 正是这么做的：找不到 ANCHOR 就退出）。
+分开之后这个脚本直接覆盖整个文件，没有"手写部分"可以误伤。
+
+为什么要把 @font-face 用 @import 引进来、而不是留在 styles.css 顶上：
+Vite 会把 @import 展开进最终那份 CSS，构建产物里字体仍然是内嵌的 ——
+这条链一直通到 dist/console.html（build_web.py 把整份 CSS 内联进 <style>）。
+好处是 src/styles.css 里不再有 50000 多个字符的 base64，diff 终于看得懂。
 
 为什么要内嵌，而不是走 CDN：
 这个控制台有一条硬约束 —— dist/console.html 双击就能打开，
@@ -30,7 +42,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "src" / "lagent" / "web"
-CSS = WEB / "app.css"
+# 2026-10：控制台换成 React（web/ui）之后，样式表的真实位置搬到了这里。
+# 旧的 web/app.css 已随原生三文件一起删除，这个路径没有回退分支 ——
+# 找不到文件就应该炸，而不是悄悄写到一个没人读的地方去。
+CSS = WEB / "ui" / "src" / "fonts.css"
 CACHE = ROOT / "var" / "fonts"
 
 CDN = "https://cdn.jsdelivr.net/npm"
@@ -52,9 +67,6 @@ BANNER = (
     "   汉字不在子集里，由系统字体承担（见 --font-sans / --font-display 的回退链）。\n"
     "   为什么内嵌、以及这个脚本必须是可复现的：见 README「字体」一节。 */\n"
 )
-
-# app.css 里这一段之后才是手写内容，重跑时按这个锚点替换
-ANCHOR = "/* ==========================================================================\n   0) 字体"
 
 
 def fetch(url: str, dest: Path) -> Path:
@@ -78,7 +90,7 @@ def subset(src: Path, weight: int, out: Path) -> bytes:
     为什么要显式关掉 recalcTimestamp：
     fontTools 默认在 save() 时把 head.modified 改写成**当前时间**，
     于是同一个输入每次跑出的字节都不同（实测三次：19316 / 19336 / 19404 B）。
-    这会让 app.css 在每次重跑后都产生一个无意义的 diff，
+    这会让 fonts.css 在每次重跑后都产生一个无意义的 diff，
     也让"生成物是否与脚本一致"这件事没法用 hash 校验。
     关掉之后实例化是纯函数：同样的输入 → 同样的字节。
     """
@@ -122,12 +134,10 @@ def build(fetch_first: bool) -> int:
             f"font-display:swap;src:url(data:font/woff2;base64,{b64}) format('woff2')}}"
         )
 
-    css = CSS.read_text(encoding="utf-8")
-    idx = css.find(ANCHOR)
-    if idx < 0:
-        raise SystemExit(f"app.css 里找不到锚点 {ANCHOR!r} —— 手写部分被改动过？")
-    rest = css[idx:]
-    CSS.write_text(BANNER + "\n".join(faces) + "\n\n" + rest, encoding="utf-8", newline="\n")
+    CSS.parent.mkdir(parents=True, exist_ok=True)
+    # 整个文件都是生成物，所以直接整体覆盖 —— 不需要锚点，也就没有
+    # "锚点找不到时该不该继续"这个必须靠人判断的分支。
+    CSS.write_text(BANNER + "\n".join(faces) + "\n", encoding="utf-8", newline="\n")
     kb = CSS.stat().st_size / 1024
     print(f"已写入 {CSS}（{kb:.1f} KB）")
     return 0

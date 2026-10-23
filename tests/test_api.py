@@ -151,41 +151,50 @@ class TestPublicEndpoints:
         assert "text/html" in resp.headers["content-type"]
 
     async def test_console_assets_are_served(self, http):
-        """控制台的 CSS / JS 必须能取到，且**带 no-cache**。
+        """控制台是构建产物：HTML 引用什么，那些资源就必须真的取得到。
 
-        2026-09-29 前端从"单文件内联"拆成了 index.html + app.css + app.js。
-        这条测试守两件事：
+        2026-10 前端从「原生三文件」换成了 React + Vite。换之前是写死
+        /static/app.css 与 /static/app.js 两个名字；现在文件名带内容哈希
+        （app-B22ay7EC.js），所以这里**从 HTML 里抽引用再逐个取** ——
+        它验的正好是浏览器会做的事。
 
-        ① **拆分不能只做一半**。页面里引用的每个 /static/ 资源都必须真的存在 ——
-           少一个就是"样式全丢"或"按钮全没反应"。
-        ② **资源必须和 HTML 一样 no-cache**。原来 JS 内联在 HTML 里，HTML 带
-           no-cache 就覆盖了它；拆开后若资源被启发式缓存，就会出现
-           "HTML 是新的、JS 是旧的" —— 正是上面 index() 注释里 2026-09-27
-           踩过的那类"强刷一次才好"的灵异问题。
+        这条守的仍然是那个老问题：「构建产物没进到部署里」。
+        源码目录 npm run build 过就有，装进镜像时却可能被 .dockerignore
+        挡掉、被 COPY 漏掉、或者构建阶段根本没跑。那种情况下容器一样健康、
+        接口一样通，唯一致命的表现是打开页面一片空白 —— 而这个问题
+        在源码目录里永远复现不出来。
+
+        另一个刻意的地方：**必须 200，不是 304**。下面断言了 HTML 是
+        no-cache，而资源是 immutable（内容哈希就是它的版本号）。
         """
         import re
 
         page = (await http.get("/")).text
-        refs = re.findall(r'(?:href|src)="(/static/[^"]+)"', page)
-        assert refs, "控制台没有引用任何 /static/ 资源，拆分可能没生效"
-        assert set(refs) == {"/static/app.css", "/static/app.js"}, refs
+        refs = sorted(set(re.findall(r'(?:href|src)="(/assets-app/[^"]+)"', page)))
+        assert refs, "控制台没有引用任何 /assets-app/ 资源，构建产物可能没进到部署里"
 
-        for ref in sorted(set(refs)):
+        for ref in refs:
             resp = await http.get(ref)
             assert resp.status_code == 200, f"{ref} 取不到 -> {resp.status_code}"
-            assert resp.headers.get("cache-control") == "no-cache", ref
+            # 带内容哈希的文件可以永久缓存：内容一变文件名就变了
+            assert "immutable" in resp.headers.get("cache-control", ""), ref
             assert len(resp.content) > 200, f"{ref} 内容太短，像是空文件"
 
-        css = (await http.get("/static/app.css")).text
-        js = (await http.get("/static/app.js")).text
-        assert ":root" in css and "--" in css, "CSS 里没有设计令牌"
-        assert "function" in js, "JS 内容不对"
+    async def test_console_asset_path_traversal_is_blocked(self, http):
+        """资源路由只认 dist/assets 下的文件，穿越一律 404。
 
-    async def test_console_asset_whitelist(self, http):
-        """白名单之外一律 404 —— 不做目录挂载就不会有路径穿越。"""
-        for bad in ("../api.py", "index.html", "nonexistent.js"):
-            assert (await http.get(f"/static/{bad}")).status_code == 404, bad
-
+        旧版是显式白名单（两个固定名字），React 版必须按路径取文件，
+        于是那条「不做目录挂载就不会有穿越」的保证要靠 is_relative_to 来做。
+        """
+        for bad in (
+            "../../api.py",
+            "%2e%2e/%2e%2e/api.py",
+            "assets/../../api.py",
+            "assets/nonexistent.js",
+            "",
+        ):
+            resp = await http.get(f"/assets-app/{bad}")
+            assert resp.status_code == 404, f"{bad} -> {resp.status_code}"
 
 class TestAuthRequired:
     """默认拒绝：拿掉令牌，业务端点必须一律 401。"""

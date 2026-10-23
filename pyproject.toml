@@ -73,10 +73,20 @@ where = ["src"]
 [tool.setuptools.package-data]
 # 控制台属于包的一部分（`lagent.api` 直接读它）。
 #
-# ⚠️ 2026-09-29：前端拆成 index.html + app.css + app.js 之后，这里如果什么都不写，
-# `pip install` 出来的包会**缺 CSS 与 JS** —— 源码目录里跑得好好的，
-# 只有装完才炸。browser 项目同一轮踩到过，所以两边一起补。
+# ⚠️ 2026-09-29：前端拆成多文件之后，这里如果什么都不写，`pip install` 出来的包会
+# **缺 CSS 与 JS** —— 源码目录里跑得好好的，只有装完才炸。browser 项目同一轮踩到过，
+# 所以两边一起补。
+#
+# ⚠️ 2026-10：控制台换成 React 构建产物后，要打包的是整个 dist 目录。产物文件名带
+# 内容哈希（assets/app-B22ay7EC.js），**没法用固定名 glob 列出来**，所以用
+# `web/dist/**/*` 递归收：只要忘一层，包里的 JS 就缺一个 chunk，而症状是
+# "页面能开、某个面板点了没反应"，比直接 404 难查得多。
+#
+# 还有一个前提：**打包前必须先构建前端**（npm ci && npm run build）。
+# dist/ 在 .gitignore 里，所以 sdist 默认不含它 —— 这条 package-data 只是保证
+# "已经构建出来的产物会被装进包里"，不负责替你构建。sdist 场景下没有 dist
+# 不会报错，而是装出来的包打开控制台是 503（文案会提示去构建）。
 #
 # 注意：本项目的 Dockerfile 走 `COPY . .` 而不是 pip install，所以容器里不缺 ——
 # 也就是说**Docker CI 绿了不代表这条没问题**。缺了它，坏的是"别人 pip 装你的包"这条路。
-lagent = ["web/*.html", "web/*.css", "web/*.js"]
+lagent = ["web/dist/**/*", "web/ui/package.json"]

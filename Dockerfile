@@ -1,3 +1,37 @@
+# ===========================================================================
+# 阶段一：构建控制台前端（React + Tailwind）
+#
+# 为什么要在镜像里构建，而不是把 dist/ 提交进仓库：
+#   dist/ 里的文件名带内容哈希，提交进去等于每次改一行样式就多一份几百 KB
+#   的二进制噪声 diff，而且**没法审**——你看到的是一串新文件名。
+#
+# 为什么这一步不能省：
+#   api.py 的 GET / 读的是 src/lagent/web/dist/index.html，不是源码。
+#   镜像里没有这个目录时，容器起来了、健康检查也绿，但打开控制台是 503 ——
+#   "服务健康"与"功能可用"是两件事。CI 的 docker job 会跑
+#   scripts/accept_deploy.py，它真的打开页面，所以这种情况在那里会红。
+#
+# 目录结构刻意与仓库保持一致（/app/src/lagent/web/ui），因为 vite.config.ts
+# 里 outDir 写的是相对路径 "../dist"。换个工作目录，产物就会掉到别处去 ——
+# 而那种错误的表现是"镜像里没有 dist"，要往回查很久。
+# ===========================================================================
+FROM node:22-slim AS web
+
+WORKDIR /app/src/lagent/web/ui
+
+# 先只拷依赖清单：package-lock.json 唯一决定依赖树，源码改动不会让它失效
+COPY src/lagent/web/ui/package.json src/lagent/web/ui/package-lock.json ./
+RUN npm ci
+
+COPY src/lagent/web/ui/ ./
+# build = tsc --noEmit && vite build —— 类型错误也会让镜像构建失败，
+# 不允许"能跑但类型是错的"前端进镜像
+RUN npm run build
+
+
+# ===========================================================================
+# 阶段二：运行镜像
+# ===========================================================================
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -50,6 +84,15 @@ RUN apt-get update \
     && pg_dump --version && psql --version
 
 COPY . .
+
+# 控制台构建产物来自上一阶段。放在 COPY . . 之后：源码可以随便改，
+# 这一层只依赖前端构建结果，命中缓存时不必重跑 npm ci。
+COPY --from=web /app/src/lagent/web/dist ./src/lagent/web/dist
+
+# 万一前端构建被跳过（改了 Dockerfile 的 stage 依赖、或有人把上面那行删了），
+# 这里让**构建期**就失败，而不是等到有人打开控制台才发现是 503。
+RUN test -f src/lagent/web/dist/index.html || \
+    (echo "控制台构建产物缺失：src/lagent/web/dist/index.html" && exit 1)
 
 # 非 root 运行
 #

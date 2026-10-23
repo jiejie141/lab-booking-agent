@@ -31,8 +31,12 @@ coverage.xml
 # 后台清扫导出的归档（P1-2）：属于运行态数据，不入库
 var/
 
-# ---- 本地配置（含密钥） ----
-.env
+# ---- 前端构建链（src/lagent/web/ui）----
+# node_modules 是依赖树，由 package-lock.json 唯一决定，一条 npm ci 就能重建。
+# 它有几万个文件，一旦入库既撑爆 diff，也让 clone 慢得没法用。
+node_modules/
+# Vite 的类型缓存（--incremental 时写在 node_modules/.tmp 里，但别指望它）
+*.tsbuildinfo
 
 # ---- 编辑器 / 系统 ----
 .vscode/
@@ -44,5 +48,8 @@ Thumbs.db
 /_*.json
 /_l*.txt
 
-# 控制台单文件打包产物（build_web.py 生成，可一条命令重建）
+# 控制台构建产物，两条命令重建（npm run build && python build_web.py）：
+#   dist/console.html            —— 单文件离线版
+#   src/lagent/web/dist/         —— 开发版（Vite 产物，由 api.py 托管）
+# 规则不带前导斜杠，两层都会命中；产物里有内容哈希，入库只会制造噪声 diff。
 dist/

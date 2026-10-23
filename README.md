@@ -6,8 +6,8 @@
 
 | | |
 |---|---|
-| **代码** | 16,984 行 `src/` · 15,073 行 `tests/` · 35 个测试文件（测试∶源码 ≈ 0.89∶1） |
-| **测试** | **1,026 项** pytest（952 个测试函数 + 参数化展开）· 本地 1010 通过 / 16 跳过，跳过项需真实 PostgreSQL，由 CI `postgres` job 执行 |
+| **代码** | 17,161 行 `src/` · 15,409 行 `tests/` · 36 个测试文件（测试∶源码 ≈ 0.90∶1） |
+| **测试** | **1,008 项** pytest（949 个测试函数 + 参数化展开）· 本地 992 通过 / 16 跳过，跳过项需真实 PostgreSQL，由 CI `postgres` job 执行 |
 | **接口** | **37 个 OpenAPI 操作 / 34 条路径**（41 个路由装饰器，`/metrics` 等刻意不文档化）· 契约门禁（漂移即失败）· 7 个数据库迁移 |
 | **质量门** | `pytest` · `ruff` · `mypy` · `check_openapi.py --check` · `check_deps.py` —— 五项都在 CI 里卡 |
 | **可观测** | `/api/health` · `/api/health/ready` · `/metrics` · Prometheus 告警规则 · 结构化审计流水 |
@@ -890,8 +890,9 @@ Prometheus 只存桶计数，p95 是**插值**出来的，误差不超过所在�
 | `src/lagent/audit.py` | 审计写入（独立事务）与读取 |
 | `src/lagent/ratelimit.py` | 进程内滑动窗口限流 |
 | `src/lagent/sweep.py` | **后台清扫**：过期预约 / 凭证超时与关门收尾 / 审计与流水归档（三个可插拔任务 + 循环，见 §7） |
-| `src/lagent/api.py` | HTTP 层（15 个 API + 1 个页面），`create_app()` 工厂 + APIRouter |
-| `src/lagent/web/index.html` | 控制台：**零依赖单文件**，登录闸门 + 深浅色主题 |
+| `src/lagent/api.py` | HTTP 层（41 个路由：业务 API、三档健康检查、`/metrics`、控制台托管），`create_app()` 工厂 + APIRouter |
+| `src/lagent/web/ui/` | **控制台前端**（React 19 + Tailwind 4 + Vite）：登录闸门、对话流式、10 个数据面板、深浅色主题 |
+| `src/lagent/web/dist/` | 前端的**构建产物**（不入库，`npm run build` 生成）；`api.py` 的 `/` 与 `/assets-app/*` 读它 |
 | `migrations/` + `alembic.ini` | 数据库迁移：**结构变更唯一被允许的入口**（`0001` 建全部 10 张表、`0002` 加 `request_id`），说明见 `migrations/README.md` |
 
 关键的边界：**模型不决定事实，也不决定权限**。资质够不够、时段有没有冲突、
@@ -1106,8 +1107,10 @@ react ──模型故障 / 步数耗尽 / 不按格式回──▶ deterministic
 | **手动重发通知** | `python main.py notify --retry-failed` 或 `POST /api/notifications/retry` | 失败的通知**刻意不自动重发** —— 通知发错人比不发更糟，重发要由人确认后手动触发 |
 | **OpenAPI 契约检查** | `python scripts/check_openapi.py --check` | 生成 `docs/openapi.json` 并与当前代码比对，漂移就退出码 1（CI 里也跑）。**接口形状是契约，不该靠"碰巧有人用到"来发现变更** |
 
-**一个连带修正**：控制台拆成三份后，`/static/{name}` 走**白名单**而不是 `StaticFiles` 目录挂载
-（挂载会引入路径穿越面）。想要单文件时跑 `python build_web.py`，产出 `dist/console.html`。
+**一个连带修正**：控制台拆成多文件后，静态资源**没有**挂 `StaticFiles`，而是自己按路径取。
+挂载一个目录等于把该目录下的所有文件（含将来任何被误放进去的东西）都变成可下载的；
+自己取则可以每一次都显式做 `is_relative_to` 校验。想要单文件时跑 `python build_web.py`，
+产出 `dist/console.html`（把 HTML 引用的全部 `assets-app/*` 内联回去，双击离线可开）。
 
 **演示脚本**：`docs/DEMO-SCRIPT.md` 第 6 节给了这八项的演法与台词。
 
@@ -1116,8 +1119,9 @@ react ──模型故障 / 步数耗尽 / 不按格式回──▶ deterministic
 原界面是功能正确的深色面板，但**把最重要的东西埋掉了**：冲突时给出的备选方案
 以纯文字列在气泡里，而"这几条各自放宽了什么"正是用户要横向比的信息。
 
-改版只动表现层（`index.html` + `app.css`，`app.js` 只同步了几处类名），
-**没有引入任何依赖，仍然是零构建的三文件结构**。几处值得记的判断：
+改版只动表现层，**没有引入任何依赖，当时仍是零构建的三文件结构**。
+（2026-10 控制台换成了 React + Tailwind 构建链，本节保留为那次改版的历史记录 ——
+其中的版式判断在迁移时被逐条照搬了，包括下面这几条。）几处值得记的判断：
 
 | 改动 | 为什么这么做 |
 |---|---|
@@ -1158,7 +1162,8 @@ react ──模型故障 / 步数耗尽 / 不按格式回──▶ deterministic
 ### 字体：为什么内嵌，以及为什么"生成物"必须可复现
 
 界面的身份支点是**衬线体读数**（仪表数字用 Newsreader，正文用 Geist）。
-这两款字体以 woff2 子集 **base64 内嵌在 `app.css` 顶部**，不走 CDN ——
+这两款字体以 woff2 子集 **base64 内嵌在 `src/lagent/web/ui/src/fonts.css`**（整个文件都是生成物，
+由 `styles.css` 第一行 `@import` 进来，Vite 会把它展开进最终 CSS），不走 CDN ——
 因为 `dist/console.html` 有一条硬约束：**双击就能打开，不依赖服务、不依赖网络**。
 外链字体一断，页面就退回系统默认字体，"读数像印刷品"这件事立刻消失。
 
@@ -1176,14 +1181,15 @@ python scripts/embed_fonts.py --fetch  # 先下载再生成
 **这里踩过一个坑，值得单独记**：内嵌的 base64 是**生成物**，而生成物
 如果不能稳定复现，"它和脚本是否一致"就永远没法验证。最初的脚本每次跑
 产出的字节都不同（实测三次：19316 / 19336 / 19404 B），
-于是每次重跑 `app.css` 都会产生一个**毫无意义的 diff**。
+于是每次重跑脚本都会产生一个**毫无意义的 diff**。
 
 定位过程：先确认子集化本身是确定的（同一输入三次 hash 相同），
 再逐表比对哈希，发现只有 `head` 表在变 —— 那是 `head.modified` 时间戳。
 fontTools 默认 `recalcTimestamp=True`，在 `save()` 时把该字段改写成"当前时间"。
 修法是实例化后显式 `f.recalcTimestamp = False`（`instantiateVariableFont`
 会派生新的 `TTFont`，属性不保证继承，所以要在派生之后设）。
-修完两次生成的字节完全一致，`app.css` 的 diff 从此只反映**真实改动**。
+修完两次生成的字节完全一致（实测 `fonts.css` 的 md5 前后都是 `6d17a23c…`），
+diff 从此只反映**真实改动**。
 
 > 顺带一条判据：**"生成物 + 生成脚本"必须成对存在**。只贴一次 base64 而没有脚本，
 > 下一个人就不知道它从哪来、怎么更新；有脚本但不能复现，则连"跑一遍看看"都做不到。
@@ -1193,13 +1199,13 @@ fontTools 默认 `recalcTimestamp=True`，在 `save()` 时把该字段改写成"
 ## 验证
 
 ```bash
-pytest                          # 1010 passed, 16 skipped（跳过 = 需真实 PostgreSQL 的用例，CI 的 postgres job 会执行）
+pytest                          # 992 passed, 16 skipped（跳过 = 需真实 PostgreSQL 的用例，CI 的 postgres job 会执行）
 python main.py eval             # 14/14（mock 模型）
 python main.py loadtest --concurrency 40 --rounds 3
 python main.py access-demo      # 8/8，但**只在实验室开放时段内**才全绿
                                 #   （脚本用 now_local() 取当天，未钉时钟；
                                 #    闭馆时段跑会以 lab_closed 失败 —— 见下方说明）
-python main.py migrate          # 0001 → 0006，结构校验与代码一致
+python main.py migrate          # 0001 → 0007，结构校验与代码一致
 python main.py sweep            # 5/5 项完成
 python main.py notify           # 投递待发通知（没配 SMTP 会如实报告"跳过 N 条"）
 python main.py notify --retry-failed   # 把失败的通知重新入队（不自动重发，要人确认）
@@ -1207,7 +1213,7 @@ python main.py backup           # SQLite 走 VACUUM INTO / PostgreSQL 走 pg_dum
 python scripts/overlap_race.py  # 3/3
 python scripts/sweep_demo.py    # 18/18（真实 SQLite 文件上的清扫端到端）
 python scripts/smoke_http.py    # 83/83（真实 uvicorn 进程，含 react 模式与降级链）
-python scripts/accept_deploy.py  # 25/25（真 compose 栈：真 PG + 真容器 + 真下单）
+python scripts/accept_deploy.py  # 真 compose 栈：真 PG + 真容器 + 真下单（2026-09-26 实测 25/25；此后新增 2 项）
 python scripts/check_openapi.py --check   # OpenAPI 契约未漂移则静默通过
 python scripts/check_deps.py               # 依赖都带边界、且实际版本没越界（见"依赖版本"一节）
 python build_web.py             # 打包单文件控制台 → dist/console.html
@@ -1215,7 +1221,7 @@ python scripts/embed_fonts.py   # 重新生成内嵌字体子集（可复现，�
 ```
 
 ```
-pytest:            1026 collected = 1010 passed + 16 skipped（35 个测试文件，`pytest --collect-only -q`；跳过项为需真实 PostgreSQL 的用例，由 CI 的 postgres job 执行）
+pytest:            1008 collected = 992 passed + 16 skipped（36 个测试文件，`pytest --collect-only -q`；跳过项为需真实 PostgreSQL 的用例，由 CI 的 postgres job 执行）
 评测报告(mock):     意图 100.0% · 槽位 100.0% · 端到端 100.0%（14/14）＝ 链路自洽，非模型准确率
 评测报告(kimi-k2.6):意图  92.9% · 槽位 100.0% · 端到端  92.9%（13/14）＝ 真实模型实测
                     ↑ 两者差的那一条（c07）正是 mock 的同义反复测不出来的语义边界，
@@ -1233,7 +1239,9 @@ pytest:            1026 collected = 1010 passed + 16 skipped（35 个测试文�
 指标与健康检查:      76 项（文本格式逐行校验 / 路由模板而非真实 path / 基数上限与丢弃计数 / p95 误差实测 / 三档健康检查）
 数据库迁移:         27 项（产物 vs 模型 diff 为空 / 部分索引 WHERE 未丢 / 回滚可往返 / 老库接管 / **给有数据的表加列**）
 HTTP 越权清单:       83/83（含 deterministic / react / degraded / 端点不可达四种启动配置）
-compose 实机验收:     25/25（PostgreSQL 上 revision=0006 / 容器 healthy / 真下单 201 / 重约 409）
+compose 实机验收:     25/25（2026-09-26 快照：PostgreSQL 上 revision=0005 / 容器 healthy / 真下单 201 / 重约 409）
+                    ↑ 脚本现为 27 处检查（此后加了 /metrics 需凭据、控制台引用了构建产物），
+                      本轮因本机 Docker 不可用未复测 —— 25 是当时的实测，不是现在的保证
 
 真实栈上的**试用报告**（走完预约→审批→门禁→违约→清扫→备份恢复六个环节，
 含摩擦点清单与已修项）见 [`docs/TRIAL-RUN.md`](docs/TRIAL-RUN.md)。
@@ -1256,7 +1264,7 @@ compose 实机验收:     25/25（PostgreSQL 上 revision=0006 / 容器 healthy 
 
 ```bash
 ruff check .   # All checks passed!
-mypy           # Success: no issues found in 78 source files
+mypy           # Success: no issues found in 94 source files
 ```
 
 覆盖范围：意图分类、中文时间解析（「下午两点到四点」的时段继承）、六道约束判定、
@@ -1293,13 +1301,15 @@ mypy           # Success: no issues found in 78 source files
 
 ### CI
 
-`.github/workflows/ci.yml` 分四个 job，拆开是为了**失败时能一眼看出是哪一类问题**：
+`.github/workflows/ci.yml` 分六个 job，拆开是为了**失败时能一眼看出是哪一类问题**：
 
 | job | 跑什么 | 为什么单独拆 |
 |---|---|---|
-| `quality` | ruff（lint）→ mypy → pytest，**py3.10 与 py3.13 双版本矩阵**（另三个 job 固定 py3.13） | 声明支持 3.10 就不能只在 3.13 上验证 |
+| `frontend` | `npm ci` → `npx tsc --noEmit` → `npm test`（vitest）→ `npm run build` → 断言 `dist/index.html` 里确实引用了 `/assets-app/` | **不塞进 quality**：那是个 py3.10/3.13 矩阵，前端与 Python 版本无关，塞进去只会白跑两遍。另外「测试全绿但打包失败」必须在这里就红，不能等镜像构建才炸 |
+| `quality` | ruff（lint）→ mypy → pytest，**py3.10 与 py3.13 双版本矩阵**（其余五个 job 固定 py3.13） | 声明支持 3.10 就不能只在 3.13 上验证 |
 | `smoke` | `main.py eval` → `scripts/overlap_race.py` → `scripts/sweep_demo.py` → `scripts/smoke_http.py` | 这几项都要起真实进程 / 真实 uvicorn / 真实 SQLite 文件，失败信号与单测不同类 |
-| `docker` | `docker compose up -d --build` → 等就绪 → `scripts/accept_deploy.py`（25 项）→ `down -v` | **只 `docker build` 只能证明「Dockerfile 语法对」**。迁移在真 PG 上跑不跑得到 head、容器健康检查转不转 healthy、端口映射对不对、控制台能不能打开 —— 这些单测与 smoke 全都覆盖不到（它们跑在一次性 SQLite 库上） |
+| `docker` | `docker compose up -d --build` → 等就绪 → `scripts/accept_deploy.py` → `down -v` | **只 `docker build` 只能证明「Dockerfile 语法对」**。迁移在真 PG 上跑不跑得到 head、容器健康检查转不转 healthy、端口映射对不对、控制台能不能打开 —— 这些单测与 smoke 全都覆盖不到（它们跑在一次性 SQLite 库上） |
+| `vector` | 装 `chromadb` → 断言它**真的可用**（否则依赖缺失会静默降级成 BM25，测试照样绿）→ 预热 ONNX 嵌入模型（首次约 79MB）→ 跑检索测试 | **降级路径太会骗人**：没装 chromadb 时向量分支会跳过，全绿也说明不了向量检索能跑。这个 job 的唯一目的是逼那条分支真的执行一次 |
 | `postgres` | 在 `postgres:16-alpine` service container 上跑 `main.py migrate` + `tests/test_postgres.py` | **整套单测都跑在 SQLite 上**，而生产形态是 PG。这个 job 存在的唯一目的就是让 PG 那条路径真的被执行一次 |
 
 `postgres` 这一项是补上去的，起因值得记一笔：在它之前，**PG 路径一行都没被执行过** ——
@@ -1321,7 +1331,7 @@ docker compose up -d --build
 # api  → http://127.0.0.1:8200
 # db   → PostgreSQL 16（比 SQLite 更接近生产形态）
 
-python scripts/accept_deploy.py     # 端到端验收：25 项，含真下单与权限边界
+python scripts/accept_deploy.py     # 端到端验收：含真下单与权限边界（2026-09-26 实测 25/25，现为 27 处检查）
 ```
 
 `accept_deploy.py` 验的是**别的测试验不到的**：pytest 跑在一次性 SQLite 库上、

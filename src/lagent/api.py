@@ -186,6 +186,8 @@ from .seed import seed
 from .sweep import build_runner
 
 WEB_DIR = __import__("pathlib").Path(__file__).parent / "web"
+# React 控制台的构建产物（Vite 输出；dist/ 在 .gitignore 里，不入库）。
+WEB_DIST_DIR = WEB_DIR / "dist"
 
 _log = get_logger("lagent.api")
 
@@ -2492,45 +2494,66 @@ async def retrieve(
 # ==========================================================================
 @router.get("/")
 async def index() -> Response:
-    target = WEB_DIR / "index.html"
+    target = WEB_DIST_DIR / "index.html"
     if not target.exists():
-        return JSONResponse({"detail": "web/index.html 不存在"}, status_code=404)
-    # ★ 必须带 no-cache：这个文件是零构建的单文件前端，JS 全部内联在内。
-    # 不带的话浏览器会启发式缓存，控制台改版后用户拿到的还是**旧 JS**，
-    # 而接口已经是新的 —— 表现是"登录都正常、某个面板莫名报错"，
-    # 一次 cache 强刷才能治好的那种灵异问题（2026-09-27 实际撞过）。
-    # no-cache（而不是 no-store）：每次仍会协商，304 时省的是传输不是验证。
+        # 这是构建产物，不在仓库里（dist/ 被 gitignore）。所以"文件不存在"
+        # 是一个**部署状态**问题，不是代码问题 —— 提示里要写清楚怎么修。
+        return JSONResponse(
+            {
+                "detail": "控制台尚未构建：src/lagent/web/dist/index.html 不存在。"
+                          "请在 src/lagent/web/ui 下执行 npm ci && npm run build。",
+            },
+            status_code=503,
+        )
+    # ★ HTML 必须带 no-cache。它是唯一**没有内容哈希**的文件：
+    # 它引用的 JS/CSS 名字里带内容指纹，所以只要拿到新 HTML，就不可能配错脚本；
+    # 但 HTML 自己若被启发式缓存，用户会一直看着旧的那份引用表。
+    # 2026-09-27 实际撞过一次「HTML 新、JS 旧」，表现是"登录都正常、某个面板莫名报错"，
+    # 强刷才好 —— 后来把 JS 改成带哈希的文件名，这类问题在缓存层就不可能发生了。
+    # no-cache（而不是 no-store）：每次仍会协商，未变时走 304，省的是传输不是验证。
     return FileResponse(target, media_type="text/html", headers={
         "Cache-Control": "no-cache",
     })
 
 
 # --------------------------------------------------------------------------
-# 控制台的样式与脚本（白名单）
+# 控制台的静态资源（目录托管）
 #
-# 2026-09-29：前端由"单文件内联"拆成 index.html + app.css + app.js。
-# 仍然不挂 StaticFiles —— 只有两个资源，显式白名单比给整个目录配路由更少间接层，
-# 也天然没有路径穿越面。
+# 2026-10-23：前端换成 React + Tailwind，由 Vite 构建到 web/dist/。
+# 产物是 assets/ 下一个 JS + 一个 CSS，文件名里带内容哈希（见 ui/vite.config.ts）。
 #
-# ⚠️ 资源必须和 index.html 一样带 no-cache。原来 JS 内联在 HTML 里，
-# HTML 带 no-cache 就覆盖了 JS；拆开之后若资源被启发式缓存，就会出现
-# 「HTML 是新的、JS 是旧的」——正是上面那段注释里 2026-09-27 踩过的灵异问题。
-# no-cache ≠ no-store：每次仍协商，未变时走 304。
+# 和之前"显式白名单两个文件"相比，这里必须改成目录托管 —— 文件名是构建时
+# 算出来的，白名单写不出来。于是路径穿越面回来了，用两件事挡住：
+#   ① 不靠字符串前缀比较。"a/bc" 会以 "a/b" 为前缀，startswith 是错的；
+#      这里先 resolve() 再用 is_relative_to() 判定包含关系；
+#   ② 只允许落在 dist/assets 下，且必须是普通文件（目录、符号链接指向外部都会被挡）。
+#
+# 缓存策略与 HTML 相反：文件名里有内容哈希，同一 URL 的字节永远不变，
+# 所以可以 immutable 一年。这不是为了"性能好"，是为了让「HTML 新、JS 旧」
+# 从**缓存这一层**也不可能发生 —— 改版就是换 URL，浏览器没有旧的可拿。
+# （原来拆成三文件时只能给所有资源都上 no-cache，因为文件名不带指纹。）
 # --------------------------------------------------------------------------
-_WEB_ASSETS = {
-    "app.css": "text/css; charset=utf-8",
-    "app.js": "application/javascript; charset=utf-8",
+_WEB_ASSET_DIR = WEB_DIST_DIR / "assets"
+_WEB_ASSET_TYPES = {
+    ".js": "application/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".woff2": "font/woff2",
+    ".map": "application/json",
 }
 
 
-@router.get("/static/{name}", include_in_schema=False)
+@router.get("/assets-app/{name:path}", include_in_schema=False)
 async def console_asset(name: str) -> Response:
-    media = _WEB_ASSETS.get(name)
-    target = WEB_DIR / name
-    if media is None or not target.exists():
+    # name 形如 "assets/app-C3Z45RQg.js"：base(/assets-app/) 之后的整段，
+    # 已经包含 Vite 输出的 assets/ 目录名。所以拼在 dist 根上，不是再拼一次 assets/。
+    root = _WEB_ASSET_DIR.resolve()
+    target = (WEB_DIST_DIR / name).resolve()
+    if not target.is_relative_to(root) or not target.is_file():
         return JSONResponse({"detail": f"资源不存在: {name}"}, status_code=404)
+    media = _WEB_ASSET_TYPES.get(target.suffix, "application/octet-stream")
     return FileResponse(target, media_type=media, headers={
-        "Cache-Control": "no-cache",
+        "Cache-Control": "public, max-age=31536000, immutable",
     })
 
 

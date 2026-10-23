@@ -18,7 +18,7 @@
 | 问题 | 结论 |
 |---|---|
 | 技术栈完整吗？ | **AI 应用层完整且主流；企业级服务层基本缺位。** 像一个「技术选型全部正确、但只搭到应用层的单机原型」 |
-| 是主流方案吗？ | **核心选型没有过时项**。FastAPI / LangGraph / SQLAlchemy 2.0 async / pydantic v2 / pytest 都是当前主流；两处刻意非主流（手写 BM25、零依赖单页控制台）是设计取舍，不是技术债 |
+| 是主流方案吗？ | **核心选型没有过时项**。FastAPI / LangGraph / SQLAlchemy 2.0 async / pydantic v2 / React 19 + Tailwind / pytest 都是当前主流；手写 BM25 是刻意的设计取舍（语料小、术语密度高），不是技术债 |
 | 最严重的问题是什么？ | **不是缺组件，而是一条核心不变式没有真正落到数据库层**（见 §2.1）。实测可复现超卖：同一设备能同时存在 13:00-15:00 与 14:00-16:00 两条有效预约 |
 | 升级的正确姿势 | 分三期。**P0 只做正确性与安全底线**（不引任何新中间件）；P1 做生产就绪；P2 才是「企业级」的那堆组件。**做完一期写一期**，不要一次上完（见 §7 与 §8） |
 
@@ -41,7 +41,7 @@
 | 功能升级 · 人员准入（门禁） | ✅ 已完成 | `208f074` | 需求是"每个人进实验室都必须提前预约，没预约的进不去"。独立成 `domain/access.py`（房间容量与设备时段是两类不同不变式）；4 张新表 + 3 个接口；`access-demo` **8/8**；`tests/test_access.py` 49 项；冒烟新增 [9] 门禁边界 **11/11**。**顺带修掉两个被自己的演示/冒烟戳出来的真漏洞**（未对齐窗口的尾巴不受容量保护；`now±1h` 跨午夜导致凭证被判过期） |
 | P1-1 · Alembic 数据库迁移 | ✅ 已完成 | `ba58381` | `create_all` 退役：结构变更只走 `migrations/versions/`。`0001` 覆盖全部 10 张表（含 3 条部分唯一索引的 `WHERE` 子句，已人工复核）；`ensure_schema()` 改为「迁移到 head + 校验结构与模型一致」；老库分两种命运（结构一致→`stamp head` 接管、不一致→明确报错要求重建）；新增 `python main.py migrate`；`tests/test_migrations.py` **20 项**，核心断言是「迁移产物 vs 模型 diff 为空」。实测：443 passed / ruff 与 mypy 均干净 / 冒烟 70/70 |
 | P1-2 · 过期清扫后台任务 | ✅ 已完成 | `f3a9f0c` | `src/lagent/sweep.py`：三个可插拔任务（过期预约收尾 / 凭证超时与关门收尾 / 审计与流水归档）+ 进程内循环（lifespan 起停，间隔可配）。**四条硬约束**：门禁正确性不依赖清扫（`verify_entry` 自己判过期）、状态切换一律「带条件的 UPDATE + rowcount」、归档先落盘后删除（失败一行不删）、每项任务异常隔离。顺带补齐 `expire_stale_permits` 的往日遗留分支。新增 `python main.py sweep`、`scripts/sweep_demo.py`（**18/18**）、`tests/test_sweep.py` **32 项**。实测：477 passed / ruff 与 mypy 均干净 / 冒烟 70/70 |
-| P1-3 · 结构化日志与请求关联 | ✅ 已完成 | `5af8f97` | `src/lagent/obs.py`：一行一个 JSON + **`request_id` 贯穿访问日志 / 审计表 / 门禁流水**。关联 id 用 `ContextVar` 而不是 `thread_local`（async 下一个线程跑成百上千协程，thread_local 会让并发请求串味）；入站 `X-Request-Id` 是**不可信输入**，按字符白名单 + 长度上限**丢弃**而不是清洗（否则 `X-Request-Id: abc\n{"level":"ERROR",…}` 能伪造告警）；中间件挂在**最外层**，所以被 413/411 挡下的请求也有关联 id。迁移 `0002` 给 `audit_logs` / `access_events` 加 `request_id` 列（空串而非 NULL）与索引。新增 `tests/test_obs.py` **75 项**、`tests/test_migrations.py` 新增 **3 项**（专门测「给**有数据的表**加列」，这是 `0001` 从空库生成时证明不了的那件事）。实测：555 passed / ruff 与 mypy 均干净 / 冒烟 70/70，并在**真实 uvicorn 进程**上核对过日志与 id |
+| P1-3 · 结构化日志与请求关联 | ✅ 已完成 | `5af8f97` | `src/lagent/obs.py`：一行一个 JSON + **`request_id` 贯穿访问日志 / 审计表 / 门禁流水**。关联 id 用 `ContextVar` 而不是 `thread_local`（async 下一个线程跑成百上千协程，thread_local 会让并发请求串味）；入站 `X-Request-Id` 是**不可信输入**，按字符白名单 + 长度上限**丢弃**而不是清洗（否则 `X-Request-Id: abc\n{"level":"ERROR",…}` 能伪造告警）；中间件挂在**最外层**，所以被 413/411 挡下的请求也有关联 id。迁移 `0002` 给 `audit_logs` / `access_events` 加 `request_id` 列（空串而非 NULL）与索引。新增 `tests/test_obs.py` **75 项**、`tests/test_migrations.py` 新增 **3 项**（专门测「给**有数据的表**加列」，这是 `0001` 从空库生成时证明不了的那件事）。实测（P1-3 时点）：555 passed / ruff 与 mypy 均干净 / 冒烟 70/70，并在**真实 uvicorn 进程**上核对过日志与 id |
 | P1-4 · `/metrics` 与健康检查细分 | ✅ 已完成 | 本次 | `src/lagent/metrics.py`（**零依赖**实现 Prometheus 文本格式，不引 `prometheus_client`）：HTTP / 预约 / 模型 / 清扫四条线 + 进程级注册表。**三条刻意的设计**：① 标签只能用**路由模板**（`/api/labs/{id}`）—— 真实 `path` 是客户端可控的，一条 id 一条时间序列，是监控杀死服务的头号方式；未命中路由的请求统一记为常量 `__unmatched__`；另有序列上限 + `lagent_metrics_dropped_series_total` 让"丢了序列"不等于"从没发生"。② 桶宽就是 p95 的精度天花板（Prometheus 只存桶计数、分位数是插值的），所以桶按本应用真实延迟形状摆，并把误差**量成数字**钉进测试。③ 只测 `RealLLMClient`，mock 那套确定性规则不进模型延迟 —— 假的指标比没有指标更糟。健康检查拆成三档：`/api/health`（存活，**刻意不碰数据库**）/ `/api/health/ready`（就绪，逐项报告 + 比对 alembic 版本，公开但不带业务数字）/ `/api/health/details`（业务统计，**需登录**）。合在一起会出的具体事故：存活探针一旦碰库，库抖一下编排系统就重启一个完全健康的进程，而重启永远修不好数据库 —— 只会把「降级」放大成「一直在重启」。新增 `tests/test_metrics.py` **72 项**（含一个**独立实现**的文本格式校验器，它当场抓出了两处真错：`_sum` 写到了标签后面、标签之间多了个空格）；冒烟新增 [10] **13/13**。实测：**633 passed** / ruff 与 mypy 均干净 / 冒烟 **83/83** |
 
 ### 与原方案的差异（为什么没照抄）
@@ -257,8 +257,8 @@ mypy                                 Success: no issues found in 63 source files
 | ORM / 驱动 | SQLAlchemy(async) + aiosqlite / asyncpg | 2.0.54 / 0.22.1 | ✅ 主流 | 2.0 声明式风格，非遗留 1.x |
 | 模型访问 | httpx 直连 OpenAI 兼容 | 0.28.1 | ✅ 主流（有取舍） | 不引 `langchain-openai`，少一层黑盒，可解释性更强 |
 | 检索 | 手写 BM25 + 可选 Chroma + RRF | — | ⚠️ 部分主流 | RRF 融合是主流做法；手写 BM25 是**刻意零依赖**，属设计决策 |
-| 前端 | 单文件原生 HTML/CSS/JS | — | ❌ 非主流 | 刻意的零构建；企业级必须替换（见 §3-P1） |
-| 测试 | pytest + pytest-asyncio | 9.1.1 / 1.4.0 | ✅ 主流 | 555 条用例，含并发、迁移、清扫、日志关联与回归 |
+| 前端 | React 19 + Tailwind CSS 4 + Vite | 19.3 / 4.3 / 8.3 | ✅ 主流 | 2026-10 从原生三文件迁到构建链；原生化时是刻意的取舍，现在是主流栈 |
+| 测试 | pytest + pytest-asyncio（+ vitest） | 9.1.1 / 1.4.0 / 5.x | ✅ 主流 | Python **1,008 条**（含并发、迁移、清扫、日志关联与回归）+ 前端 vitest **46 条** |
 | 容器 | Dockerfile + compose | — | ✅ 主流 | 但**未实机验证**（沙箱限制） |
 
 ### 1.2 缺位的部分（这才是「不完整」的真正含义）

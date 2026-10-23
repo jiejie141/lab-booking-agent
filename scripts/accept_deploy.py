@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 import urllib.error
 import urllib.request
 
@@ -230,24 +231,30 @@ def main(argv: list[str] | None = None) -> int:
     status, html = api("GET", "/")
     rep.check("控制台页面可访问", status == 200, f"HTTP {status}")
 
-    # 2026-09-29：控制台从单文件拆成了 index.html + app.css + app.js。
-    # 拆分后 `/` 返回的只是 HTML 骨架，逻辑全在 app.js 里 ——
-    # 于是「页面含对话入口」这条断言在容器里直接红了（24/25），
-    # 而后端的 /api/agent/chat 一直是好的，看接口完全发现不了。
+    # 控制台从 2026-10 起是 React 构建产物：`/` 返回 dist/index.html，
+    # 里面引用的 JS / CSS 带内容哈希，路径形如 /assets-app/assets/app-XXXX.js。
     #
-    # 所以这里检查的是**交付到用户手上的整个控制台**：HTML + JS + CSS。
-    # 顺带把"资源取得到"也钉住 —— 这正是「打包/镜像漏文件」那类问题，
-    # 它在源码目录里跑得好好的，只有装完才炸。
+    # 这里**不写死文件名**（哈希每次都变），而是从返回的 HTML 里把引用抽出来
+    # 再逐个取 —— 这样它验的正好是浏览器会做的事。写死名字的版本一旦升级前端
+    # 就会红，而那种红是"脚本过期"，不是"产品坏了"，久了就没人当真了。
+    #
+    # 这一步真正守的是「镜像里到底有没有 dist」：源码目录里 npm run build 过
+    # 就有，装进镜像时却可能被 .dockerignore 挡掉或 COPY 漏掉。
+    # 那种情况下容器一样健康、接口一样通，只有人打开页面才看得到 503。
     console_src = html if isinstance(html, str) else ""
-    for asset in ("app.js", "app.css"):
-        astatus, abody = api("GET", f"/static/{asset}")
-        rep.check(f"/static/{asset} 可访问", astatus == 200, f"HTTP {astatus}")
+    assets = sorted(set(re.findall(r'(?:src|href)="(/assets-app/[^"]+)"', console_src)))
+    rep.check("控制台引用了构建产物", bool(assets), "HTML 里没有任何 /assets-app/ 资源")
+    for ref in assets:
+        astatus, abody = api("GET", ref)
+        rep.check(f"{ref} 可访问", astatus == 200, f"HTTP {astatus}")
         if isinstance(abody, str):
             console_src += "\n" + abody
 
     if isinstance(html, str):
-        # 这条验的是"P0-3 真的交付到了用户手上"：后端有接口不等于用户点得到。
-        rep.check("页面含「直接预约」面板（不走模型的那条路）", 'id="pane-book"' in html)
+        # 这两条验的是"真的交付到了用户手上"：后端有接口不等于用户点得到。
+        # React 版把面板标题写进了 JS bundle（HTML 只剩一个 <div id="root">），
+        # 所以要去 bundle 里找，而不是在 HTML 里找 id。
+        rep.check("页面含「直接预约」面板（不走模型的那条路）", "直接预约" in console_src)
         rep.check("页面含对话入口（两条路并存）", "/api/agent/chat" in console_src)
 
     # ---- 8. 收尾 --------------------------------------------------------

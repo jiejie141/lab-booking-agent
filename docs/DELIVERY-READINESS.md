@@ -26,7 +26,7 @@
 > | P2-9 | 预约列表无分页 | ✅ 已整改 | `5dc4aa0` |
 > | P2-10 | 会话在内存、限流单进程、单 worker | ⚪ **接受**（发布拓扑是单副本；重新评估的触发条件已写明） | — |
 > | P2-11a | **PostgreSQL 路径一行都没执行过** | ✅ **已整改**：CI 新增 `postgres` job，在真实 PG 上跑迁移 + 并发不变式；首次运行即绿 | `371e1e0` |
-> | P2-11b | `docker compose up` 未实机验证 | ✅ **已整改**：栈跑通、两容器 healthy、PG 上 `revision=0005`、端到端验收 **25/25**；脚本已收进 `scripts/accept_deploy.py` | 本文件 · 见下 |
+> | P2-11b | `docker compose up` 未实机验证 | ✅ **已整改**：栈跑通、两容器 healthy、PG 上 `revision=0005`、端到端验收 **25/25**；脚本已收进 `scripts/accept_deploy.py`（该脚本此后长到 27 处检查，本轮因本机 Docker 不可用**未复测**） | 本文件 · 见下 |
 >
 > **编号对不齐的说明**：整改提交信息里写的是 P1-5/6/7/8（按**实施顺序**编号），
 > 与本文件 §结论 2 表格的 5/6/7/8（按**评估顺序**：审批/黑名单/通知/限流）不完全对应。
@@ -124,7 +124,8 @@ POST /api/agent/chat        POST /api/access/verify      POST /api/access/issue
 
 - 依赖极其克制：`requirements.txt` 只有 fastapi / uvicorn / langgraph / sqlalchemy / alembic /
   pydantic / tzdata / httpx / pyyaml。scrypt + HS256 + BM25 + Prometheus 文本格式**全是标准库自实现**，
-  少三条供应链。控制台是零依赖单文件 HTML。
+  少三条供应链。控制台前端另有一条构建链（React + Tailwind + Vite），但它只在开发/构建时存在，
+运行时镜像里只有静态产物，不多一个后端依赖。
 - 配置齐全：`LAB_*` 环境变量 + `.env.example` 逐条带注释（包括"为什么是这个默认值"）。
 - **日志与指标是超配的**：JSON 单行 + `request_id` 贯穿访问日志/审计/门禁 + 入站 id 白名单校验；
   `/metrics` 出 p95/错误率/限流/预约结果分类/模型耗时/清扫心跳；健康检查分存活/就绪/业务三档。

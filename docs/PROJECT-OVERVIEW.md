@@ -1,7 +1,7 @@
 # lab-booking-agent 项目概览
 
-> 数据来源：对 commit `2d887aa` 工作区的**实际统计**（`wc -l` / `pytest --collect-only` /
-> `grep` / GitHub Actions API），非估算。本次更新 2026-09-26。
+> 数据来源：对 commit `b8b803f` 工作区的**实际统计**（`wc -l` / `pytest --collect-only` /
+> `grep` / GitHub Actions API），非估算。本次更新 2026-10-23（控制台迁到 React 之后重新量的）。
 >
 > **历史版本**：本文初版基于 `5d1cb05`（2026-09-24），当时把「审批 / 黑名单与违约 /
 > 通知 / 备份 / 分页」列在**缺失**一栏。那份评估的原文与逐项整改结果保留在
@@ -14,19 +14,24 @@
 
 | 项 | 数量 | 相比 `5d1cb05` |
 |---|---|---|
-| 生产代码 `src/lagent/` | **15,595 行**（含 849 行零依赖控制台 HTML） | +3,545 |
-| 测试 `tests/` | **12,370 行 / 848 用例 / 31 个文件** | +3,610 行 / +215 用例 |
-| 脚本 `scripts/` | 1,412 行（5 个：HTTP 冒烟、清扫端到端、区间竞态、CI 注解包装、**部署验收**） | +366 |
-| 迁移 `migrations/` | **5 个 revision** | +3 |
+| 生产代码 `src/lagent/` | **17,161 行** Python（控制台已迁到独立前端工程 `web/ui/`，另有 **5,624 行** TS/TSX/CSS 不计入此列） | +5,111 |
+| 测试 `tests/`（Python） | **15,409 行 / 1,008 用例 / 36 个文件** | +6,649 行 |
+| 测试 `web/ui/src/**/*.test.ts(x)`（前端） | **46 条** vitest 用例 / 7 个文件 | 新增 |
+| 脚本 `scripts/` | 1,939 行（9 个：HTTP 冒烟、清扫端到端、区间竞态、CI 注解包装、**部署验收**、OpenAPI 契约、依赖边界、字体内嵌、备份演练） | +893 |
+| 迁移 `migrations/` | **7 个 revision**（head = `0007_token_version`） | +5 |
 | 评测集 `eval/` | 14 条用例（意图 / 槽位 / 端到端） | — |
-| **测试 : 生产代码** | **约 0.79 : 1** | ↑ |
+| **测试 : 生产代码** | **约 0.90 : 1** | ↑ |
 | 数据表 | **11 张** | +1 |
-| 配置项 | **62 个 `LAB_*`**（55 项写进 `.env.example`） | +17 |
-| 指标 | **16 个** + 三档健康检查 | +1 |
-| HTTP 路由 | **33 个** | +14 |
+| 配置项 | **75 个 `LAB_*`**（64 项写进 `.env.example`） | +30 |
+| 指标 | **17 个** + 三档健康检查 | +2 |
+| HTTP 路由 | **41 个** | +22 |
 | CLI 子命令 | **13 个** | +3 |
-| CI job | **4 个**（quality 双版本矩阵 → 5 个检查项） | +1 |
+| CI job | **6 个**（quality 双版本矩阵 → 5 个检查项） | +3 |
 | 版本 | 1.3.0 | — |
+
+> 「相比 `5d1cb05`」一列的用例增量留空（只写了行数差）：基线是用 `git archive` 导出到临时目录量的，
+> 那里的 `pyproject.toml` 的 `pythonpath` 不生效，`pytest --collect-only` 收不出可比的数字 ——
+> 与其编一个，不如只给当前值。
 
 **依赖只有 13 个直接包**（含 2 个测试用）：fastapi / uvicorn / langgraph /
 sqlalchemy[asyncio] / aiosqlite / alembic / pydantic / pydantic-settings / tzdata /
@@ -43,26 +48,26 @@ main.py                    统一入口（无参=起服务，有参=CLI）
 src/lagent/
 ├── cli.py                 13 个 CLI 子命令
 ├── server.py              uvicorn 启动
-├── api.py                  HTTP 层 · 33 路由 · 中间件链 · 三档健康检查
-├── config.py              62 个 LAB_* 配置项
+├── api.py                  HTTP 层 · 41 路由 · 中间件链 · 三档健康检查 · 控制台托管
+├── config.py              75 个 LAB_* 配置项
 ├── db.py                  engine / session_scope / 迁移版本校验 / 结构漂移检查
 ├── models.py              11 张表（ORM）
 ├── schemas.py             pydantic 契约（写接口 extra="forbid"）
 ├── security.py            scrypt + HS256 + RBAC（零依赖）
 ├── obs.py                 JSON 单行日志 + request_id 贯穿
-├── metrics.py             16 指标 + 注册表（零依赖 Prometheus 文本格式）
+├── metrics.py             17 指标 + 注册表（零依赖 Prometheus 文本格式）
 ├── audit.py               审计（独立事务）
 ├── localstate.py          进程外状态（SQLite 短连接 + WAL 三件套）
 ├── ratelimit.py           限流（memory / sqlite 双后端）+ 登录失败锁定（进程内）
-├── sweep.py               4 个后台清扫任务 + 循环
+├── sweep.py               5 个后台清扫任务 + 循环
 ├── notify.py              通知（先落库再投递）
 ├── backup.py              备份/恢复（SQLite VACUUM INTO / PG pg_dump）
 ├── seed.py / evaluation.py / clock.py / console.py
-├── agent/         2009    LangGraph 编排（graph / llm / react_agent / state / tools）
-├── domain/        3085    纯业务（availability / negotiate / booking / access / catalog / violations）
+├── agent/         2357    LangGraph 编排（graph / llm / react_agent / state / tools）
+├── domain/        3356    纯业务（availability / negotiate / booking / access / catalog / violations）
 ├── harness/       1016    Agent 运行时（context / runtime / tools / trace）
 ├── knowledge/      337    BM25 + RRF 融合检索
-└── web/index.html  849    零依赖单文件控制台
+└── web/ui/               React 19 + Tailwind 4 控制台（Vite，产物进 web/dist/）
 ```
 
 **分层边界是硬约束**：`harness/` **不 import 任何业务模块**
@@ -80,11 +85,11 @@ src/lagent/
 | Agent 编排 | **LangGraph** `StateGraph`，7 节点 + 条件边 |
 | 模型接入 | 自写 OpenAI 兼容客户端（`httpx`），Mock / Real 可切换 |
 | 数据 | SQLAlchemy 2.0 async；SQLite（默认）/ PostgreSQL 16（compose，**已实机验收**） |
-| 迁移 | Alembic（结构变更唯一入口，5 个 revision） |
+| 迁移 | Alembic（结构变更唯一入口，7 个 revision，head = `0007`） |
 | 校验 | pydantic v2 |
-| 前端 | 单文件 HTML，无框架、无构建、无 CDN 依赖 |
+| 前端 | React 19 + Tailwind CSS 4 + Vite；构建产物由后端同源托管，无 CDN 依赖 |
 | 部署 | Dockerfile + docker-compose（api + postgres）；`scripts/accept_deploy.py` 端到端验收 |
-| CI | GitHub Actions：静态检查+单测（3.10/3.13 矩阵）/ 真实进程端到端 / **PG 实跑** / **compose 实机验收** |
+| CI | GitHub Actions 六类作业：前端（类型检查+vitest+构建）/ 静态检查+单测（3.10/3.13 矩阵）/ 真实进程端到端 / **PG 实跑** / **compose 实机验收** / 向量检索真跑 |
 
 ---
 
@@ -158,20 +163,21 @@ main.py → server.serve() → api.create_app()
 | **登录失败锁定** | 按「来源地址 # 用户名」计数；过期锁丢掉旧失败记录；锁定请求不进审计 |
 | 越权防护 | 真实 uvicorn 进程上的对抗清单 83/83 |
 | **表单式下单** | `POST /api/reservations`（201）+ 控制台「直接预约」面板；重复预约 409 而非 500 |
+| **下单幂等键** | 客户端带 `idempotency_key`，同键重试只回放首次结果；部分唯一索引 + 按用户隔离（换键才是新单） |
 | **设备级审批** | 申请即占坑 / 驳回释放时段 / 重复处理 409 / 非管理员看不到待办 |
 | **通知** | 四类业务事件留痕；**先落库再投递**；没配 SMTP 如实报"跳过 N 条"而不是假装成功 |
 | **违约判定** | **无门禁流水就不判**；迟到在宽限内不算；被门口拦下不算到场；默认只记不罚；豁免留痕 |
 | **备份与恢复** | SQLite `VACUUM INTO` / PG `pg_dump`；**含恢复演练**（没演练过的备份不算备份） |
 | **后台维护 CRUD** | 显式 null 不动字段；停用即失效；**刻意没有删除路由** |
 | 审计 | 独立事务、失败与拒绝也记、`request_id` 贯穿 |
-| 后台清扫 | **4 任务**（过期预约 / 凭证超时 / 归档 / 违约判定）、幂等、失败隔离、先落盘后删除 |
-| **可观测** | JSON 单行日志 + `request_id` 跨访问日志/审计/门禁 + `/metrics` 16 指标 + 三档健康检查 |
+| 后台清扫 | **5 任务**（过期预约 / 凭证超时 / 归档 / 通知投递 / 违约判定）、幂等、失败隔离、先落盘后删除 |
+| **可观测** | JSON 单行日志 + `request_id` 跨访问日志/审计/门禁 + `/metrics` 17 指标 + 三档健康检查 |
 | 数据库迁移 | Alembic 接管，含「给有数据的表加列」实证 |
 | Agent Harness | 双执行模式（deterministic / react）、上下文预算、span、工具注册表 |
 | 检索 | 手写 BM25 + RRF 融合（chromadb 可选） |
 | 降级链 | react → deterministic → 引导式表单，边界如实标注 |
 | 评测 | 14 条用例，意图/槽位/端到端三档；**用例的日历无关性有机械守卫** |
-| **部署与验收** | `compose up` 实机跑通、两容器 healthy、真 PG 上 `revision=0005`、`accept_deploy.py` **25/25** |
+| **部署与验收** | `compose up` 实机跑通（2026-09-26 实测：两容器 healthy、真 PG 上 `revision=0005`、`accept_deploy.py` **25/25**）。迁移 head 现已到 `0007`，验收脚本已增至 27 处检查，**这两项本轮未复测**（本机 Docker 不可用） |
 
 ### ⚠️ 部分实现
 
@@ -191,7 +197,7 @@ main.py → server.serve() → api.create_app()
 
 | 能力 | 说明 |
 |---|---|
-| 幂等键 | 下单没有客户端生成的幂等键，客户端重试会产生两条预约 |
+| 列表/报表导出 | 只有门禁在馆名单能导出 CSV，预约与审计没有导出 |
 | 分布式追踪 | 自研 span 是节点级，未接 OpenTelemetry |
 | Redis / 消息队列 | 依赖中不存在；长请求（5–30s）无队列化 |
 | refresh token | 令牌 2 小时到期需重登（刻意：把风险窗口压小，而不是签长令牌假装安全） |
@@ -205,7 +211,7 @@ main.py → server.serve() → api.create_app()
 
 | 项 | 性质 | 现状 |
 |---|---|---|
-| **py3.10 job 的 pytest 曾失败过一次** | 间歇性，机制未知 | 本地用 Python 3.10.21 + 同源依赖（SQLAlchemy 2.0.54）复现不出来（848 条 exit=0）；期间无相关代码改动。**已埋伏**：CI 失败时会把 `FAILED` 行抬进**注解**（无需鉴权即可读），下次复现直接能拿到用例名 |
+| **py3.10 job 的 pytest 曾失败过一次** | 间歇性，机制未知 | 本地用 Python 3.10.21 + 同源依赖（SQLAlchemy 2.0.54）复现不出来（992 条 exit=0）；期间无相关代码改动。**已埋伏**：CI 失败时会把 `FAILED` 行抬进**注解**（无需鉴权即可读），下次复现直接能拿到用例名 |
 | **限流与会话的存放后端** | 同机多进程已解决，跨机待触发 | 默认 `memory`；设 `LAB_STATE_BACKEND=sqlite` 后同机多进程共享一份、重启不丢（`localstate.py` + 两个 SQLite 存储）。发布拓扑是单副本，所以"配额 × 副本数"在默认形态下不成立；**跨机器**多副本仍需 Redis，重新评估的三条触发条件写在 `DELIVERY-READINESS.md` 的 P2-10 |
 
 **环境侧（与代码无关，留个记录）**：国内网络下 `registry-1.docker.io` 不可达，
@@ -218,12 +224,12 @@ main.py → server.serve() → api.create_app()
 | 维度 | 评级 | 说明 |
 |---|---|---|
 | 代码组织与分层 | **优** | 分层清晰、边界有 AST 检查、harness 可独立复用 |
-| 测试覆盖 | **优** | 848 用例、测试:生产 ≈ 0.79:1、真实进程对抗清单、PG 与 compose 各有专项 |
+| 测试覆盖 | **优** | 1,008 条 Python 用例 + 46 条前端用例、测试:生产 ≈ 0.90:1、真实进程对抗清单、PG 与 compose 各有专项 |
 | 并发正确性 | **优** | 不变式压在数据库层，不靠应用层自觉；SQLite 与 PG 两条路径都有验证 |
 | 安全（越权方向） | **良** | 越权防护扎实、密钥 fail-closed、登录有锁；**密钥托管仍在 `.env`** |
 | 可观测性 | **优** | 日志+指标+三档健康检查，超出一般校内系统水平 |
 | 业务功能完整度 | **中** | 主干流程齐了（预约/审批/准入/违约/通知/备份），但审批两级、通知只有邮件、违约只覆盖未到场 |
-| 部署与运维 | **良** | 备份+恢复演练、compose 实机验收、CI 四类 job；扣分在单 worker 与密钥托管 |
+| 部署与运维 | **良** | 备份+恢复演练、compose 实机验收、CI 六类 job；扣分在单 worker 与密钥托管 |
 | 规模化能力 | **中** | 分页有了；但单进程、会话在内存、无队列 |
 
 **一句话定位**：这是一套**工程质量达到生产级思路的 AI Agent 应用**
@@ -243,7 +249,7 @@ main.py → server.serve() → api.create_app()
    代码侧已经 fail-closed，剩下的只是投递方式。
 3. **改期 / 续约**：现在只有"新约"和"取消"，用户要挪时间只能取消重约
    （而重约可能就约不上了）。这是日常使用里最先被抱怨的缺口。
-4. **幂等键**：下单接口加客户端幂等键，挡住"点了两下"和"客户端重试"。
+4. **导出**：预约与审计也做成 CSV 导出（门禁在馆名单已经有现成写法，可复用）。
 5. **通知多通道 + 到期提醒**：短信/微信通道与"预约前 N 小时提醒"，
    后者对降低违约率的效果比处罚更直接。
 6. **清扫出进程 / 会话外置**：只在真的要横向扩容时才做（触发条件已写明）。
