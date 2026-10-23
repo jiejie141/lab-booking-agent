@@ -6,8 +6,8 @@
 
 | | |
 |---|---|
-| **代码** | 17,161 行 `src/` · 15,409 行 `tests/` · 36 个测试文件（测试∶源码 ≈ 0.90∶1） |
-| **测试** | **1,008 项** pytest（949 个测试函数 + 参数化展开）· 本地 992 通过 / 16 跳过，跳过项需真实 PostgreSQL，由 CI `postgres` job 执行 |
+| **代码** | 17,206 行 `src/` · 15,462 行 `tests/` · 36 个测试文件（测试∶源码 ≈ 0.90∶1） |
+| **测试** | **1,010 项** pytest（951 个测试函数 + 参数化展开）· 本地 993 通过 / 17 跳过（16 项需真实 PostgreSQL，由 CI `postgres` job 执行；1 项需装了 chromadb，由 CI `vector` job 执行） |
 | **接口** | **37 个 OpenAPI 操作 / 34 条路径**（41 个路由装饰器，`/metrics` 等刻意不文档化）· 契约门禁（漂移即失败）· 7 个数据库迁移 |
 | **质量门** | `pytest` · `ruff` · `mypy` · `check_openapi.py --check` · `check_deps.py` —— 五项都在 CI 里卡 |
 | **可观测** | `/api/health` · `/api/health/ready` · `/metrics` · Prometheus 告警规则 · 结构化审计流水 |
@@ -1199,7 +1199,7 @@ diff 从此只反映**真实改动**。
 ## 验证
 
 ```bash
-pytest                          # 992 passed, 16 skipped（跳过 = 需真实 PostgreSQL 的用例，CI 的 postgres job 会执行）
+pytest                          # 993 passed, 17 skipped（16 项需真 PG → CI postgres job；1 项需 chromadb → CI vector job）
 python main.py eval             # 14/14（mock 模型）
 python main.py loadtest --concurrency 40 --rounds 3
 python main.py access-demo      # 8/8，但**只在实验室开放时段内**才全绿
@@ -1221,7 +1221,7 @@ python scripts/embed_fonts.py   # 重新生成内嵌字体子集（可复现，�
 ```
 
 ```
-pytest:            1008 collected = 992 passed + 16 skipped（36 个测试文件，`pytest --collect-only -q`；跳过项为需真实 PostgreSQL 的用例，由 CI 的 postgres job 执行）
+pytest:            1010 collected = 993 passed + 17 skipped（36 个测试文件，`pytest --collect-only -q`；17 项跳过 = 16 项需真实 PostgreSQL + 1 项需 chromadb，CI 的 postgres / vector job 会执行）
 评测报告(mock):     意图 100.0% · 槽位 100.0% · 端到端 100.0%（14/14）＝ 链路自洽，非模型准确率
 评测报告(kimi-k2.6):意图  92.9% · 槽位 100.0% · 端到端  92.9%（13/14）＝ 真实模型实测
                     ↑ 两者差的那一条（c07）正是 mock 的同义反复测不出来的语义边界，

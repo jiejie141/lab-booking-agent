@@ -408,8 +408,11 @@ jobs:
           print('available:', ChromaVectorIndex(load_corpus()).available())
           "
 
+      # 经 ci_run.py 包装：Actions 的原始日志要鉴权才能读，注解不用。
+      # 不加这层包装的话，这一步红了只会得到一句
+      # 「Process completed with exit code 1」—— 知道坏了，不知道坏在哪。
       - name: 检索测试（此时向量分支会被真正执行）
-        run: python -m pytest tests/test_retrieval.py -q -rs
+        run: python scripts/ci_run.py --match '^(FAILED|ERROR|E )' --tail 30 -- python -m pytest tests/test_retrieval.py -q -rs
 
   postgres:
     name: PostgreSQL 真实链路

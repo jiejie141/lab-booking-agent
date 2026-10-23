@@ -127,7 +127,7 @@ python main.py loadtest
 
 ### ⑦ 收尾（30 秒工程化盘点）
 
-> "1008 项测试（本地 992 通过 / 16 跳过）、7 个迁移 revision（'给有数据的表加列'逐条演练过）、
+> "1010 项测试（本地 993 通过 / 17 跳过）、7 个迁移 revision（'给有数据的表加列'逐条演练过）、
 > CI 六类作业含 PostgreSQL 真实链路、容器化实机验收、备份恢复演练；
 > 可观测性有结构化日志（request_id 串一次请求）、Prometheus 指标和告警规则。
 > 仓库开源，数字都能对着 CI 复核。"
@@ -140,7 +140,7 @@ python main.py loadtest
 2. 张伟撞同时段 → `409 reason=conflict`；
 3. 切终端跑 `loadtest` → "40 并发 ×3 轮，每轮恰好 1 条成功，
    闸在数据库的唯一索引上"；
-4. 一句话收："1008 项测试、CI 六类作业、备份恢复演练，仓库开源可复核。"
+4. 一句话收："1010 项测试、CI 六类作业、备份恢复演练，仓库开源可复核。"
 
 ---
 
@@ -290,7 +290,7 @@ curl -X POST localhost:8200/api/users -H "Authorization: Bearer $ADMIN_TOKEN" \
 ## 数字台账（2026-10-09 复核）
 | 数字 | 出处 |
 |---|---|
-| **1008** 项测试 | `pytest --collect-only`（36 个测试文件；992 passed + 16 skipped） |
+| **1,010** 项测试 | `pytest --collect-only`（36 个测试文件；993 passed + 17 skipped） |
 | 40 并发 ×3 轮：每轮 1 成功 / 39 明确冲突 / 0 异常 | `python main.py loadtest --concurrency 40 --rounds 3` |
 | HTTP 冒烟与越权清单 83/83 | `scripts/smoke_http.py`，真实 uvicorn 进程 |
 | 7 个迁移 revision | `ls migrations/versions/*.py \| wc -l` |

@@ -146,6 +146,9 @@ class BM25Index(Retriever):
         return {"name": self.name, "chunks": self.n, "vocab": len(self.idf)}
 
 
+_COLLECTION_NAME = "lab_safety_rules"
+
+
 class ChromaVectorIndex(Retriever):
     """可选的向量路径。chromadb 未安装时 ``available()`` 为 False。
 
@@ -163,14 +166,40 @@ class ChromaVectorIndex(Retriever):
             import chromadb
 
             client = chromadb.EphemeralClient()
-            self._collection = client.create_collection("lab_safety_rules")
-            self._collection.add(
-                ids=[c.fingerprint for c in chunks],
-                documents=[c.body() for c in chunks],
-            )
+            # 用 get_or_create 而不是 create：EphemeralClient 在**同一个进程里是共享的**
+            # （chromadb 按配置缓存 System 实例），所以第二次构造时集合已经存在，
+            # create_collection 会抛 "Collection [lab_safety_rules] already exists"。
+            # 这个异常被下面的 except 吞掉之后，后果不是「构造失败」而是**静默降级**：
+            # 第一次请求走 hybrid，此后每一次都退回 BM25，而 HTTP 响应仍然 200。
+            # 2026-10 由 tests/test_retrieval.py 的启用分支断言抓出来 —— 之前 CI 里
+            # 向量 job 一直红在更早的一步（import 路径），把这条盖住了。
+            self._collection = client.get_or_create_collection(_COLLECTION_NAME)
+            self._sync(chunks)
         except Exception as exc:  # noqa: BLE001  # pragma: no cover - 取决于环境是否装了 chromadb
             self.last_error = f"{type(exc).__name__}: {exc}"
             self._collection = None
+
+    def _sync(self, chunks: list[Chunk]) -> None:
+        """让集合内容与当前语料对齐：多出来的删掉，缺的补上。
+
+        语料是静态的，正常情况下第一次就够。这一步存在的理由是集合**跨实例共享**，
+        而同一个进程里语料可能变过（测试里换过 fixture、开发时热加载），
+        留着旧块会让检索命中已经不在语料里的内容 —— 那种错查起来很费劲，
+        因为返回的每条结果看起来都合情合理，只是来自上一版文档。
+        """
+        if self._collection is None:
+            return
+        want = {c.fingerprint for c in chunks}
+        have = set(self._collection.get()["ids"])
+        stale = have - want
+        if stale:
+            self._collection.delete(ids=sorted(stale))
+        missing = [c for c in chunks if c.fingerprint not in have]
+        if missing:
+            self._collection.add(
+                ids=[c.fingerprint for c in missing],
+                documents=[c.body() for c in missing],
+            )
 
     def available(self) -> bool:
         return self._collection is not None
@@ -289,20 +318,23 @@ def build_retriever(
     corpus = chunks if chunks is not None else load_corpus()
 
     if backend == "bm25":
-        return BM25Index(corpus)
+        # 显式选 bm25 不是「降级」，所以把可能残留的降级原因清掉。
+        return _clear_fallback(BM25Index(corpus))
 
     if backend == "vector":
         index = ChromaVectorIndex(corpus)
         if not index.available():
             return _degraded(corpus, index.last_error)
-        return index
+        return _clear_fallback(index)
 
     if backend == "hybrid":
         vector = ChromaVectorIndex(corpus)
         if not vector.available():
             return _degraded(corpus, vector.last_error)
-        return HybridRetriever(
-            BM25Index(corpus), vector, k=settings.rrf_k, top_k=settings.retrieval_top_k
+        return _clear_fallback(
+            HybridRetriever(
+                BM25Index(corpus), vector, k=settings.rrf_k, top_k=settings.retrieval_top_k
+            )
         )
 
     raise ValueError(f"未知检索后端：{backend}")
@@ -315,6 +347,19 @@ def _degraded(corpus: list[Chunk], reason: str | None) -> BM25Index:
     global _FALLBACK_REASON
     _FALLBACK_REASON = reason or "向量后端不可用"
     return BM25Index(corpus)
+
+
+def _clear_fallback(index: Retriever) -> Retriever:
+    """建成功了就把降级原因清掉。
+
+    不清的话，一次瞬时失败（比如 chromadb 首次启动慢）会让 `fallback_reason()`
+    在之后每一次**正常**的请求里都继续返回那条旧原因，接口把 `degraded_reason`
+    报给前端、控制台据此显示「已降级」—— 而实际上早就不降级了。
+    这是典型的「状态比事实活得久」，宁可在成功路径上多写一行。
+    """
+    global _FALLBACK_REASON
+    _FALLBACK_REASON = None
+    return index
 
 
 def fallback_reason() -> str | None:

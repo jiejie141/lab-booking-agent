@@ -258,7 +258,7 @@ mypy                                 Success: no issues found in 63 source files
 | 模型访问 | httpx 直连 OpenAI 兼容 | 0.28.1 | ✅ 主流（有取舍） | 不引 `langchain-openai`，少一层黑盒，可解释性更强 |
 | 检索 | 手写 BM25 + 可选 Chroma + RRF | — | ⚠️ 部分主流 | RRF 融合是主流做法；手写 BM25 是**刻意零依赖**，属设计决策 |
 | 前端 | React 19 + Tailwind CSS 4 + Vite | 19.3 / 4.3 / 8.3 | ✅ 主流 | 2026-10 从原生三文件迁到构建链；原生化时是刻意的取舍，现在是主流栈 |
-| 测试 | pytest + pytest-asyncio（+ vitest） | 9.1.1 / 1.4.0 / 5.x | ✅ 主流 | Python **1,008 条**（含并发、迁移、清扫、日志关联与回归）+ 前端 vitest **46 条** |
+| 测试 | pytest + pytest-asyncio（+ vitest） | 9.1.1 / 1.4.0 / 5.x | ✅ 主流 | Python **1,010 条**（含并发、迁移、清扫、日志关联与回归）+ 前端 vitest **46 条** |
 | 容器 | Dockerfile + compose | — | ✅ 主流 | 但**未实机验证**（沙箱限制） |
 
 ### 1.2 缺位的部分（这才是「不完整」的真正含义）

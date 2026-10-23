@@ -189,3 +189,56 @@ class TestFactory:
     def test_unknown_backend_raises(self):
         with pytest.raises(ValueError):
             build_retriever("nope")
+
+    def test_repeated_construction_stays_usable(self):
+        """同一个进程里连续建两次向量索引，第二次不许失败。
+
+        chromadb 的 ``EphemeralClient()`` 在同一个进程里是**共享实例**，所以
+        第二次构造时集合已经存在。原先用 ``create_collection`` 就会抛出
+        ``Collection [lab_safety_rules] already exists``，而这个异常被
+        ``except Exception`` 吞掉之后**不会报错**，只会让 ``available()`` 变 False。
+
+        后果不是「一次构造失败」，而是**只有第一个请求走 hybrid，此后全部静默退回
+        BM25，而 HTTP 依然 200**。这条用例钉的就是这个：连建三次都必须可用。
+
+        这也是 ``build_retriever`` 每个请求都重建索引（见 ``api.retrieve``）时
+        必须成立的前提。
+        """
+        from lagent.knowledge.retriever import ChromaVectorIndex
+
+        try:
+            import chromadb  # noqa: F401
+        except Exception as exc:  # noqa: BLE001
+            pytest.skip(f"本环境没装 chromadb：{exc}")
+
+        corpus = load_corpus()
+        # 第一轮也要断言，不许「第一轮不行就 skip」—— 那样正好绕过本用例要抓的
+        # 场景：别的用例（或上一个请求）已经把集合建出来了，这一轮才撞名。
+        for round_no in (1, 2, 3):
+            index = ChromaVectorIndex(corpus)
+            assert index.available(), (
+                f"第 {round_no} 次构造向量索引失败：{index.last_error}"
+                " —— 集合跨实例共享，create_collection 撞名后不该让整条路静默降级"
+            )
+            hits = index.search("离心机 配平", k=3)
+            assert hits, "重建出来的索引搜不到任何东西，等于降级"
+
+    def test_successful_build_clears_stale_fallback_reason(self):
+        """降级原因不许比事实活得久。
+
+        上一次构造失败会把 ``_FALLBACK_REASON`` 写成那条旧错误；如果成功路径
+        不清它，接口就会在之后**每一次正常**请求里继续把 ``degraded_reason``
+        报给前端，控制台据此显示「已降级」—— 而实际上一切正常。
+        """
+        from lagent.knowledge import retriever as R
+
+        R._FALLBACK_REASON = "InternalError: 上一轮留下的旧原因"
+        build_retriever("bm25")
+        assert R.fallback_reason() is None, "显式选 bm25 不是降级，不该留着旧原因"
+
+        R._FALLBACK_REASON = "InternalError: 上一轮留下的旧原因"
+        index = build_retriever("hybrid")
+        if isinstance(index, HybridRetriever):
+            assert R.fallback_reason() is None, "hybrid 建成之后仍报旧降级原因"
+        else:
+            assert R.fallback_reason() is not None, "真的降级了就必须有原因"
