@@ -1306,7 +1306,7 @@ mypy           # Success: no issues found in 94 source files
 | job | 跑什么 | 为什么单独拆 |
 |---|---|---|
 | `frontend` | `npm ci` → `npx tsc --noEmit` → `npm test`（vitest）→ `npm run build` → 断言 `dist/index.html` 里确实引用了 `/assets-app/` | **不塞进 quality**：那是个 py3.10/3.13 矩阵，前端与 Python 版本无关，塞进去只会白跑两遍。另外「测试全绿但打包失败」必须在这里就红，不能等镜像构建才炸 |
-| `quality` | ruff（lint）→ mypy → pytest，**py3.10 与 py3.13 双版本矩阵**（其余五个 job 固定 py3.13） | 声明支持 3.10 就不能只在 3.13 上验证 |
+| `quality` | ruff（lint）→ mypy → pytest **带覆盖率闸门**（`--cov-fail-under=82`），**py3.10 与 py3.13 双版本矩阵**（其余五个 job 固定 py3.13） | 声明支持 3.10 就不能只在 3.13 上验证。测试与覆盖率在同一次运行里结算 —— 原来分两步跑，同一套用例要跑两遍，一次 runner 抖动就会把 15 分钟的 job 顶穿成假红 |
 | `smoke` | `main.py eval` → `scripts/overlap_race.py` → `scripts/sweep_demo.py` → `scripts/smoke_http.py` | 这几项都要起真实进程 / 真实 uvicorn / 真实 SQLite 文件，失败信号与单测不同类 |
 | `docker` | `docker compose up -d --build` → 等就绪 → `scripts/accept_deploy.py` → `down -v` | **只 `docker build` 只能证明「Dockerfile 语法对」**。迁移在真 PG 上跑不跑得到 head、容器健康检查转不转 healthy、端口映射对不对、控制台能不能打开 —— 这些单测与 smoke 全都覆盖不到（它们跑在一次性 SQLite 库上） |
 | `vector` | 装 `chromadb` → 断言它**真的可用**（否则依赖缺失会静默降级成 BM25，测试照样绿）→ 预热 ONNX 嵌入模型（首次约 79MB）→ 跑检索测试 | **降级路径太会骗人**：没装 chromadb 时向量分支会跳过，全绿也说明不了向量检索能跑。这个 job 的唯一目的是逼那条分支真的执行一次 |
