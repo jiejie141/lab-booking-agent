@@ -80,8 +80,13 @@ describe("DataCard", () => {
     expect(pane).not.toBeNull();
     expect(pane!.getAttribute("role")).toBe("tabpanel");
     expect(pane!.getAttribute("aria-labelledby")).toBe("tab-book");
-    // aria-controls 必须指到当前那张面板，而不是永远指向同一张
+    // aria-controls 只挂在选中的那个 tab 上。未选中的 tab 没有对应面板
+    // 在 DOM 里，指向一个不存在的 id 读屏软件会读出空引用。
     expect(tab.getAttribute("aria-controls")).toBe("pane-book");
+    for (const other of screen.getAllByRole("tab")) {
+      if (other.id === "tab-book") continue;
+      expect(other.getAttribute("aria-controls")).toBeNull();
+    }
   });
 
   it("顶栏那行日期来自 /api/today，不是本地时钟", async () => {

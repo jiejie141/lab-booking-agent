@@ -75,7 +75,10 @@ export function DataCard({ tab, onTab, onBooked }: { tab: TabKey; onTab: (t: Tab
               data-tab={t.key}
               role="tab"
               aria-selected={tab === t.key}
-              aria-controls={"pane-" + t.key}
+              /* 只有当前那张面板在 DOM 里（未选中的 tab 不渲染正文），
+                 所以 aria-controls 也只该挂在选中的那个 tab 上 ——
+                 十个全挂就是九个指向不存在的 id，读屏软件读到空引用。 */
+              aria-controls={tab === t.key ? "pane-" + t.key : undefined}
               className={"tab" + (tab === t.key ? " on" : "")}
               onClick={() => { onTab(t.key); touched(); }}
             >
