@@ -71,8 +71,11 @@ export function DataCard({ tab, onTab, onBooked }: { tab: TabKey; onTab: (t: Tab
           {visibleTabs(isAdmin).map((t) => (
             <button
               key={t.key}
+              id={"tab-" + t.key}
+              data-tab={t.key}
               role="tab"
               aria-selected={tab === t.key}
+              aria-controls={"pane-" + t.key}
               className={"tab" + (tab === t.key ? " on" : "")}
               onClick={() => { onTab(t.key); touched(); }}
             >
@@ -87,7 +90,9 @@ export function DataCard({ tab, onTab, onBooked }: { tab: TabKey; onTab: (t: Tab
         <span className="stamp">{stamp}</span>
       </div>
 
-      <div className="card-b">
+      {/* id/role 与旧控制台一致：外部链接与测试都靠 #pane-xxx 定位。
+          aria-controls 指到它，读屏软件才会把 tab 与面板关联起来。 */}
+      <div className="card-b" id={"pane-" + tab} role="tabpanel" aria-labelledby={"tab-" + tab}>
         {tab === "book" ? <BookPane onBooked={onBooked} /> : null}
         {tab === "labs" ? <LabsPane /> : null}
         {tab === "res" ? <ReservationsPane /> : null}

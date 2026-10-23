@@ -68,6 +68,22 @@ describe("DataCard", () => {
     expect(screen.queryByText(/当前身份无权查看/)).toBeNull();
   });
 
+  it("每个 tab 带 id / data-tab，面板带 id=pane-xxx（与旧控制台同名）", async () => {
+    // 这组 id 不是装饰：旧控制台的锚点、外部文档里的深链接、
+    // 以及 pytest 里对 #pane-book 的定位都靠它。React 重写时漏掉了
+    // 一次——页面看着完全正常，只有从链接进来的人会发现点不到。
+    const { container } = await renderCard(adminMe(), "book");
+    const tab = screen.getByRole("tab", { name: "直接预约" });
+    expect(tab.id).toBe("tab-book");
+    expect(tab.getAttribute("data-tab")).toBe("book");
+    const pane = container.querySelector("#pane-book");
+    expect(pane).not.toBeNull();
+    expect(pane!.getAttribute("role")).toBe("tabpanel");
+    expect(pane!.getAttribute("aria-labelledby")).toBe("tab-book");
+    // aria-controls 必须指到当前那张面板，而不是永远指向同一张
+    expect(tab.getAttribute("aria-controls")).toBe("pane-book");
+  });
+
   it("顶栏那行日期来自 /api/today，不是本地时钟", async () => {
     await renderCard(makeMe());
     const stamp = screen.getByTitle(/服务端当前日期与星期/);

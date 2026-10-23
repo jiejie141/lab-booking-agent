@@ -1213,7 +1213,7 @@ python main.py backup           # SQLite 走 VACUUM INTO / PostgreSQL 走 pg_dum
 python scripts/overlap_race.py  # 3/3
 python scripts/sweep_demo.py    # 18/18（真实 SQLite 文件上的清扫端到端）
 python scripts/smoke_http.py    # 83/83（真实 uvicorn 进程，含 react 模式与降级链）
-python scripts/accept_deploy.py  # 真 compose 栈：真 PG + 真容器 + 真下单（2026-09-26 实测 25/25；此后新增 2 项）
+python scripts/accept_deploy.py  # 真 compose 栈：真 PG + 真容器 + 真下单（需 Docker；2026-09-26 实测 25/25，此后脚本又加了两类检查）
 python scripts/check_openapi.py --check   # OpenAPI 契约未漂移则静默通过
 python scripts/check_deps.py               # 依赖都带边界、且实际版本没越界（见"依赖版本"一节）
 python build_web.py             # 打包单文件控制台 → dist/console.html
@@ -1240,7 +1240,9 @@ pytest:            1010 collected = 993 passed + 17 skipped（36 个测试文件
 数据库迁移:         27 项（产物 vs 模型 diff 为空 / 部分索引 WHERE 未丢 / 回滚可往返 / 老库接管 / **给有数据的表加列**）
 HTTP 越权清单:       83/83（含 deterministic / react / degraded / 端点不可达四种启动配置）
 compose 实机验收:     25/25（2026-09-26 快照：PostgreSQL 上 revision=0005 / 容器 healthy / 真下单 201 / 重约 409）
-                    ↑ 脚本现为 27 处检查（此后加了 /metrics 需凭据、控制台引用了构建产物），
+                    ↑ 脚本现为 27 处 rep.check 调用点，其中一处按构建产物个数展开，
+                      所以实际项数随产物而变（React 版通常 2 个资源 → 28 项）。
+                      此后新增的两类检查是 /metrics 需凭据、控制台引用了构建产物；
                       本轮因本机 Docker 不可用未复测 —— 25 是当时的实测，不是现在的保证
 
 真实栈上的**试用报告**（走完预约→审批→门禁→违约→清扫→备份恢复六个环节，
@@ -1331,7 +1333,7 @@ docker compose up -d --build
 # api  → http://127.0.0.1:8200
 # db   → PostgreSQL 16（比 SQLite 更接近生产形态）
 
-python scripts/accept_deploy.py     # 端到端验收：含真下单与权限边界（2026-09-26 实测 25/25，现为 27 处检查）
+python scripts/accept_deploy.py     # 端到端验收：含真下单与权限边界（需 Docker；2026-09-26 实测 25/25）
 ```
 
 `accept_deploy.py` 验的是**别的测试验不到的**：pytest 跑在一次性 SQLite 库上、
