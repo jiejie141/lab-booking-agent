@@ -95,7 +95,7 @@ jobs:
   quality:
     name: 静态检查 + 单测 (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -186,11 +186,6 @@ jobs:
       - name: OpenAPI 契约未漂移
         run: python scripts/check_openapi.py --check
 
-      - name: pytest（单元 + 集成 + 并发）
-        # 经 ci_run.py 包装：失败时把 FAILED/ERROR 行抬成注解 ——
-        # 原始日志要鉴权才能读，注解不用（见 scripts/ci_run.py 的说明）。
-        run: python scripts/ci_run.py --match '^(FAILED|ERROR)' --tail 20 -- python -m pytest -q
-
       # 覆盖率：只强制**总量下限**，不强制每个文件。
       #
       # 为什么不设 per-file 门槛：本项目有几个模块是“结构性低覆盖”，
@@ -206,8 +201,24 @@ jobs:
       #   于是“测试够不够”只能靠感觉。85% 是当前实测值，
       #   把门槛定在 82%（留 3 个点抖动空间）是为了让它成为
       #   **防倒退的闸门**而不是理想值 —— 掉了就红灯，涨了不奖励。
-      - name: 覆盖率（防倒退闸门，非理想值）
-        run: |
+      #
+      # 2026-10-23：把「跑测试」和「算覆盖率」合并成一步。
+      #
+      # 原来同一套用例要跑两遍（先 pytest，再带 --cov 跑一遍），
+      # 用时 199s + 261s ≈ 8 分钟，而 job 的 timeout-minutes 是 15。
+      # 那次运行里 py3.10 这一路恰好遇上 runner 变慢（同样用例跑了
+      # 400s + 466s），直接把 job 顶穿、判成 cancelled —— 一次基础设施
+      # 抖动就变成了一次假红，而「红」在这里本该只表示「代码有问题」。
+      #
+      # 合并不损失信息：覆盖率在同一次运行里结算，失败行照样抬成注解。
+      # timeout 同时放宽到 25 分钟，给 runner 抖动留余量。
+      - name: pytest（单元 + 集成 + 并发，覆盖率闸门一并卡）
+        # 经 ci_run.py 包装：失败时把 FAILED/ERROR 行抬成注解 ——
+        # 原始日志要鉴权才能读，注解不用（见 scripts/ci_run.py 的说明）。
+        # --match 多带一条 Required test coverage：覆盖率不达标时那句话
+        # 出现在 term 报告末尾，不抬上来的话注解里只有一堆测试名。
+        run: >
+          python scripts/ci_run.py --match '^(FAILED|ERROR)|Required test coverage' --tail 20 --
           python -m pytest -q --cov=src/lagent --cov-report=term-missing --cov-fail-under=82
 
 
